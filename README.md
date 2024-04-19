@@ -28,6 +28,7 @@ Watch my [video on YouTube](https://www.youtube.com/watch?v=FrQyTOTJhCc):</br>
 
 Windows: 
 - Download "QualCoderAI_WINDOWS_setup.exe" from here: https://drive.switch.ch/index.php/s/cYJKPA3JV3fJqDc (switch drive is a secure data sharing platform for Swiss universities)
+- MD5: `QualCoderAI_WIN_setup.exe	95D3CD45887137E27086F0E662AA5183`
 - If you get a warning that "Windows protected your PC" and the app comes from an "Unknown publisher", you have to trust us and click "Run anyway"
 
 MacOS:
@@ -35,11 +36,13 @@ MacOS:
 - If you have trouble getting QualCoder to run, you might need to update your operating system to the latest available version.   
 - *Installation on M1/M2/M3-based Macs:*
     - Download "QualCoderAI_MAC_arm64.dmg" from here: https://drive.switch.ch/index.php/s/cYJKPA3JV3fJqDc (switch drive is a secure data sharing platform for Swiss universities)
+    - M5: `QualCoderAI_MAC_arm64.dmg	7E638F5799E507C1456B5C285FE7FA31`
     - Double-click on the dmg-file, then drag QualCoder AI into the link to your applications folder.
     - Start QualCoder AI by double-clicking the app within your applications folder.
 - *Installation on Intel-based Macs:*</br>
 Note: Unfortunately, we are currently not able to sign the x86_64 package correctly, so you will get a warning that QualCoder AI is from an unregistered developer. You have to manually allow QualCoder AI to be executed, if your Gatekeeper is active. Follow these steps:
     - Download "QualCoderAI_MAC_x86_64_unsigned.dmg" from here: https://drive.switch.ch/index.php/s/cYJKPA3JV3fJqDc (switch drive is a secure data sharing platform for Swiss universities)
+    - MD5: `QualCoderAI_MAC_x86_64_unsigned.dmg	E804541EB9468255E70C2B1B0B6D5326`
     - Double-click the dmg-file.
     - Drag QualCoder AI into the link to your applications folder
     - Start QualCoder AI by double-clicking the app within your applications folder. You will get an error that QualCoder AI is from an unregistered developer.
