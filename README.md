@@ -30,7 +30,7 @@ In addition to what's shown in the video, QualCoder AI now also includes an **AI
 ### Installation
 
 **Windows:**
-- Download "QualCoderAI_3_6_2_setup.exe" from here: https://drive.switch.ch/index.php/s/oiy17P7wTDkDFak. Switch drive is a secure data sharing platform for Swiss universities.
+- Download "QualCoderAI_3_6_3_setup.exe" from here: https://drive.switch.ch/index.php/s/J0owi9WC3OT1jcS. Switch drive is a secure data sharing platform for Swiss universities.
 - If you get a warning that "Windows protected your PC" and the app comes from an "Unknown publisher", you have to trust us and click "Run anyway"
 
 **MacOS:**
