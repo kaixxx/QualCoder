@@ -149,7 +149,7 @@ py -m pip install wheel pyqt6 chardet ebooklib openpyxl Pillow ply pdfminer.six 
 For the AI-integration:
 
 ```bash
-py -m pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair
+py -m pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair qtawesome
 ```
  
  Wait, until all modules are installed.
@@ -228,7 +228,7 @@ Note: To exit venv type `deactivate`
 
 `pip install chardet ebooklib ply openpyxl pandas pdfminer pyqt6 pillow pdfminer.six plotly pydub python-vlc rispy six SpeechRecognition xmlschema charset-normalizer`
 
-`pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair`
+`pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair qtawesome`
 
 7. Install QualCoder, and type the following, the dot is important:
 
@@ -259,7 +259,7 @@ It has not been tested, but please see the above instructions to build QualCoder
 2. Install additional python modules
 
 `sudo python3 -m pip install ebooklib plotly pydub python-vlc rispy SpeechRecognition xmlschema charset-normalizer`
-`sudo python3 -m pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair`
+`sudo python3 -m pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair qtawesome`
 
 If successful, all requirements are satisfied.
 
@@ -309,7 +309,7 @@ pip3 install chardet ebooklib openpyxl pandas pillow ply pdfminer.six plotly pyd
 ```
 
 ```sh
-pip install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair
+pip3 install langchain langchain-community langchain-core langchain-chroma langchain-openai langchain-text-splitters chromadb==0.5.0 sentence-transformers fuzzysearch pydantic PyYAML json_repair qtawesome
 ```
 
 Be sure that you are in the QualCoder-ai_integration directory before doing Step 6.
