@@ -34,6 +34,9 @@ In addition to what's shown in the video, QualCoder AI now also includes an **AI
 - If you get a warning that "Windows protected your PC" and the app comes from an "Unknown publisher", you have to trust us and click "Run anyway"
 
 **MacOS:**
+
+**IMPORTANT: Note that the installer in Mac is broken at the moment. You must use the [manual method of installing QualCoder from source](#macos) as described below. I will remove this message once the installer has been updated.**
+
 - Installer made by [gernophil](https://github.com/gernophil), thank you very much!
 - If you have trouble getting QualCoder to run, you might need to update your operating system to the latest available version.   
 - *Installation on M1/M2/M3-based Macs:*
