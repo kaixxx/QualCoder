@@ -34,13 +34,31 @@ class TestAiMcpServer(TestCase):
             "date text, color text, unique(name))"
         )
         cur.execute(
+            "CREATE TABLE code_text (ctid integer primary key, cid integer, fid integer, seltext text, pos0 integer, "
+            "pos1 integer, owner text, date text, memo text, avid integer, important integer)"
+        )
+        cur.execute(
             "CREATE TABLE journal (jid integer primary key, name text, jentry text, date text, owner text, unique(name))"
         )
-        cur.execute("INSERT INTO project VALUES(?,?,?,?,?,?,?,?)", ("v11", "2026-02-13", "memo text", "about", 0, 0, "default", ""))
+
+        cur.execute(
+            "INSERT INTO project VALUES(?,?,?,?,?,?,?,?)",
+            ("v11", "2026-02-13", "memo text", "about", 0, 0, "default", ""),
+        )
         cur.execute(
             "INSERT INTO source (id, name, fulltext, mediapath, memo, owner, date, av_text_id, risid) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
             (1, "doc one", "abcdefghij", None, "doc memo", "default", "2026-02-13", None, None),
+        )
+        cur.execute(
+            "INSERT INTO source (id, name, fulltext, mediapath, memo, owner, date, av_text_id, risid) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (2, "doc two", "klmnopqrst", None, "doc memo 2", "default", "2026-02-13", None, None),
+        )
+        cur.execute(
+            "INSERT INTO source (id, name, fulltext, mediapath, memo, owner, date, av_text_id, risid) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (3, "doc three", "uvwxyz", None, "doc memo 3", "default", "2026-02-13", None, None),
         )
         cur.execute(
             "INSERT INTO code_cat (catid, name, owner, date, memo, supercatid) VALUES (?,?,?,?,?,?)",
@@ -48,7 +66,7 @@ class TestAiMcpServer(TestCase):
         )
         cur.execute(
             "INSERT INTO code_cat (catid, name, owner, date, memo, supercatid) VALUES (?,?,?,?,?,?)",
-            (2, "📌 Speakers", "default", "2026-02-13", "speaker memo", None),
+            (2, "\U0001F4CC Speakers", "default", "2026-02-13", "speaker memo", None),
         )
         cur.execute(
             "INSERT INTO code_name (cid, name, memo, catid, owner, date, color) VALUES (?,?,?,?,?,?,?)",
@@ -57,6 +75,17 @@ class TestAiMcpServer(TestCase):
         cur.execute(
             "INSERT INTO journal (jid, name, jentry, date, owner) VALUES (?,?,?,?,?)",
             (1, "journal one", "journal body", "2026-02-13", "default"),
+        )
+        cur.executemany(
+            "INSERT INTO code_text (ctid, cid, fid, seltext, pos0, pos1, owner, date, memo, avid, important) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, 1, 1, "alpha", 0, 5, "default", "2026-02-10", "", None, 0),
+                (2, 1, 2, "beta quote", 0, 10, "default", "2026-02-12", "", None, 0),
+                (3, 1, 3, "gamma", 0, 5, "default", "2026-02-11", "", None, 0),
+                (4, 1, 1, "delta", 6, 11, "default", "2026-02-13", "", None, 0),
+                (5, 1, 2, "epsilon", 11, 18, "default", "2026-02-09", "", None, 0),
+            ],
         )
         self.conn.commit()
 
@@ -78,8 +107,6 @@ class TestAiMcpServer(TestCase):
         self.assertIn("resources", res["result"]["capabilities"])
         self.assertIn("QualCoder", res["result"]["instructions"])
         self.assertIn("read-only", res["result"]["instructions"])
-        self.assertIn("codes are leaf nodes", res["result"]["instructions"])
-        self.assertIn("speaker categories", res["result"]["instructions"])
 
     def test_codes_tree_contains_structure_rules_and_speaker_convention(self):
         req = {"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {"uri": "qualcoder://codes/tree"}}
@@ -91,9 +118,75 @@ class TestAiMcpServer(TestCase):
         self.assertTrue(payload["structure_rules"]["codes_are_leaves"])
         self.assertFalse(payload["structure_rules"]["codes_can_have_subcodes"])
         self.assertTrue(payload["structure_rules"]["categories_can_contain_codes"])
-        self.assertEqual("📌 ", payload["special_conventions"]["speaker_category_prefix"])
+        self.assertEqual("\U0001F4CC ", payload["special_conventions"]["speaker_category_prefix"])
         self.assertTrue(payload["special_conventions"]["speaker_category_present"])
         self.assertIn(2, payload["special_conventions"]["speaker_category_ids"])
+
+    def test_resources_templates_include_code_segments_template(self):
+        res = self.server.handle_request({"jsonrpc": "2.0", "id": 21, "method": "resources/templates/list", "params": {}})
+        self.assertIn("result", res)
+        templates = [r["uriTemplate"] for r in res["result"]["resourceTemplates"]]
+        self.assertIn("qualcoder://codes/segments/{cid}", templates)
+
+    def test_code_segments_diverse_by_document_strategy(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://codes/segments/1?strategy=diverse_by_document&max_segments=4&max_chars=1000"},
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        ctid_order = [seg["ctid"] for seg in payload["segments"]]
+        self.assertEqual([1, 2, 3, 4], ctid_order)
+
+    def test_code_segments_recent_first_strategy(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://codes/segments/1?strategy=recent_first&max_segments=4&max_chars=1000"},
+        }
+        res = self.server.handle_request(req)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        ctid_order = [seg["ctid"] for seg in payload["segments"]]
+        self.assertEqual([4, 2, 3, 1], ctid_order)
+
+    def test_code_segments_sequential_strategy(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://codes/segments/1?strategy=sequential&max_segments=3&max_chars=1000"},
+        }
+        res = self.server.handle_request(req)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        ctid_order = [seg["ctid"] for seg in payload["segments"]]
+        self.assertEqual([1, 2, 3], ctid_order)
+
+    def test_code_segments_char_budget_truncates_payload(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 25,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://codes/segments/1?strategy=sequential&max_segments=10&max_chars=6"},
+        }
+        res = self.server.handle_request(req)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        self.assertEqual(2, len(payload["segments"]))
+        self.assertFalse(payload["segments"][0]["quote_truncated"])
+        self.assertTrue(payload["segments"][1]["quote_truncated"])
+        self.assertEqual(6, payload["selection"]["returned_chars"])
+        self.assertTrue(payload["selection"]["truncated"])
+        self.assertEqual(2, payload["selection"]["next_cursor"])
+
+    def test_status_event_for_code_segments_contains_code_name(self):
+        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://codes/segments/1"})
+        self.assertIsNotNone(event)
+        self.assertEqual("code_segments", event["status_code"])
+        self.assertEqual(1, event["entity_id"])
+        self.assertEqual("code one", event["entity_name"])
 
     def test_resources_list_contains_only_top_level_resources(self):
         res = self.server.handle_request({"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}})

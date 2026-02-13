@@ -29,6 +29,10 @@ class AiMcpServer:
     server_version = "0.1.0"
     max_read_length = 12000
     default_read_length = 4000
+    default_segments_max_segments = 40
+    max_segments_limit = 200
+    default_segments_max_chars = 8000
+    max_segments_chars_limit = 50000
     STATUS_REVIEW_AVAILABLE_MATERIALS = 'Reviewing available project materials...'
     STATUS_REVIEW_DOCUMENT_LIST = 'Reviewing the list of text documents...'
     STATUS_REVIEW_CODE_TREE = 'Reviewing the current code structure...'
@@ -37,6 +41,7 @@ class AiMcpServer:
     STATUS_REVIEW_DOCUMENT = 'Reviewing text document "{name}"...'
     STATUS_REVIEW_JOURNAL = 'Reviewing journal entry "{name}"...'
     STATUS_REVIEW_RESOURCE = 'Reviewing project material...'
+    STATUS_REVIEW_CODE_SEGMENTS = 'Reviewing coded text segments for "{name}"...'
     STATUS_FORMULATE_RESPONSE = 'Formulating a response based on the selected materials...'
 
     def __init__(self, app):
@@ -54,10 +59,10 @@ class AiMcpServer:
             "QualCoder is a qualitative data analysis application used to analyze empirical material such as "
             "interviews, field notes, images, and video. It supports coding, memo writing, text annotations, "
             "researcher journaling, and reports. "
-            "Code tree invariant: codes are leaf nodes and cannot contain subcodes; only categories can contain "
-            "codes (and subcategories). "
-            "Global optional convention: speaker categories are marked by a category name prefix '📌 ' followed by "
-            "a localized label. This convention may or may not be present in a given project. "
+            #"Code tree invariant: codes are leaf nodes and cannot contain subcodes; only categories can contain "
+            #"codes (and subcategories). "
+            #"Global optional convention: speaker categories are marked by a category name prefix '📌 ' followed by "
+            #"a localized label. This convention may or may not be present in a given project. "
             "This internal MCP server currently exposes read-only access to empirical documents (text only, "
             "no images or videos), codes/categories (code tree), project memo, and journals for analytic assistance. "
             "Use resources/list and resources/read to inspect available material. "
@@ -175,6 +180,21 @@ class AiMcpServer:
                 "entity_type": "codes_tree",
                 "message_id": self.STATUS_REVIEW_CODE_TREE,
             }
+        code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_base)
+        if code_segments_match is not None:
+            cid = int(code_segments_match.group(1))
+            code_name = self._fetch_code_name(cid)
+            if code_name is None or code_name == "":
+                code_name = f"Code {cid}"
+            return {
+                **base_event,
+                "status_code": "code_segments",
+                "entity_type": "code_segments",
+                "entity_id": cid,
+                "entity_name": code_name,
+                "message_id": self.STATUS_REVIEW_CODE_SEGMENTS,
+                "message_args": {"id": cid, "name": code_name},
+            }
         if uri_base == "qualcoder://journals":
             return {
                 **base_event,
@@ -273,6 +293,8 @@ class AiMcpServer:
                 translated = translator('Reviewing journal entry "{name}"...')
             elif message_id == self.STATUS_REVIEW_RESOURCE:
                 translated = translator('Reviewing project material...')
+            elif message_id == self.STATUS_REVIEW_CODE_SEGMENTS:
+                translated = translator('Reviewing coded text segments for "{name}"...')
             elif message_id == self.STATUS_FORMULATE_RESPONSE:
                 translated = translator('Formulating a response based on the selected materials...')
             else:
@@ -359,6 +381,15 @@ class AiMcpServer:
                     description="Read a journal entry by journal id.",
                     mimeType="application/json",
                 ),
+                types.ResourceTemplate(
+                    uriTemplate="qualcoder://codes/segments/{cid}",
+                    name="Coded text segments by code id",
+                    description=(
+                        "Read coded text segments for a code id. Optional query params: strategy "
+                        "(diverse_by_document|recent_first|sequential), max_segments, max_chars, cursor, file_ids."
+                    ),
+                    mimeType="application/json",
+                ),
             ]
 
         @self._sdk_server.read_resource()
@@ -385,23 +416,33 @@ class AiMcpServer:
             raise RuntimeError("No MCP prompts are exposed yet.")
 
     def _read_resource_payload(self, uri: str, start: int, req_length: int) -> Dict[str, Any]:
-        if uri == "qualcoder://project/summary":
+        parts = urlsplit(uri)
+        uri_no_query = urlunsplit((parts.scheme, parts.netloc, parts.path, "", parts.fragment))
+        query = parse_qs(parts.query, keep_blank_values=True)
+
+        if uri_no_query == "qualcoder://project/summary":
             return self._project_summary()
-        if uri == "qualcoder://project/memo":
+        if uri_no_query == "qualcoder://project/memo":
             return self._project_memo()
-        if uri == "qualcoder://codes/tree":
+        if uri_no_query == "qualcoder://codes/tree":
             return self._codes_tree()
-        if uri == "qualcoder://documents":
+        if uri_no_query == "qualcoder://documents":
             return {"documents": self._fetch_text_documents()}
-        if uri == "qualcoder://journals":
+        if uri_no_query == "qualcoder://journals":
             return {"journals": self._fetch_journal_entries()}
 
-        doc_match = re.fullmatch(r"qualcoder://documents/text/(\d+)", uri)
+        code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_no_query)
+        if code_segments_match is not None:
+            cid = int(code_segments_match.group(1))
+            options = self._parse_code_segments_options(query)
+            return self._read_code_segments(cid, options)
+
+        doc_match = re.fullmatch(r"qualcoder://documents/text/(\d+)", uri_no_query)
         if doc_match is not None:
             doc_id = int(doc_match.group(1))
             return self._read_document(doc_id, start, req_length)
 
-        journal_match = re.fullmatch(r"qualcoder://journals/(\d+)", uri)
+        journal_match = re.fullmatch(r"qualcoder://journals/(\d+)", uri_no_query)
         if journal_match is not None:
             jid = int(journal_match.group(1))
             return self._read_journal(jid, start, req_length)
@@ -572,6 +613,175 @@ class AiMcpServer:
         if row is None:
             return None
         return row[0]
+
+    def _fetch_code_name(self, cid: int) -> Optional[str]:
+        row = self._fetchone("SELECT name FROM code_name WHERE cid=?", (cid,))
+        if row is None:
+            return None
+        return row[0]
+
+    def _parse_code_segments_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        strategy = str(query.get("strategy", ["diverse_by_document"])[0]).strip()
+        allowed = {"diverse_by_document", "recent_first", "sequential"}
+        if strategy not in allowed:
+            raise ValueError(
+                "Invalid strategy. Allowed values are: diverse_by_document, recent_first, sequential."
+            )
+
+        max_segments = self._to_int(
+            query.get("max_segments", [self.default_segments_max_segments])[0],
+            self.default_segments_max_segments,
+        )
+        max_segments = max(1, min(max_segments, self.max_segments_limit))
+
+        max_chars = self._to_int(
+            query.get("max_chars", [self.default_segments_max_chars])[0],
+            self.default_segments_max_chars,
+        )
+        max_chars = max(1, min(max_chars, self.max_segments_chars_limit))
+
+        cursor = self._to_int(query.get("cursor", [0])[0], 0)
+        cursor = max(0, cursor)
+
+        file_ids: List[int] = []
+        for raw in query.get("file_ids", []):
+            parts = [p.strip() for p in str(raw).split(",")]
+            for part in parts:
+                if part == "":
+                    continue
+                file_ids.append(max(0, self._to_int(part, -1)))
+        file_ids = [fid for fid in file_ids if fid > 0]
+
+        return {
+            "strategy": strategy,
+            "max_segments": max_segments,
+            "max_chars": max_chars,
+            "cursor": cursor,
+            "file_ids": file_ids,
+        }
+
+    def _read_code_segments(self, cid: int, options: Dict[str, Any]) -> Dict[str, Any]:
+        code_name = self._fetch_code_name(cid)
+        if code_name is None:
+            raise ValueError(f"Code id {cid} not found.")
+
+        strategy = str(options.get("strategy", "diverse_by_document"))
+        max_segments = int(options.get("max_segments", self.default_segments_max_segments))
+        max_chars = int(options.get("max_chars", self.default_segments_max_chars))
+        cursor = int(options.get("cursor", 0))
+        file_ids = options.get("file_ids", [])
+        if not isinstance(file_ids, list):
+            file_ids = []
+
+        where_parts = ["code_text.cid=?"]
+        where_params: List[Any] = [cid]
+        if len(file_ids) > 0:
+            placeholders = ",".join(["?"] * len(file_ids))
+            where_parts.append(f"code_text.fid IN ({placeholders})")
+            where_params.extend(file_ids)
+        where_sql = " WHERE " + " AND ".join(where_parts)
+
+        count_sql = "SELECT count(*) FROM code_text" + where_sql
+        count_row = self._fetchone(count_sql, tuple(where_params))
+        total_segments = 0 if count_row is None else int(count_row[0])
+
+        order_sql = "ORDER BY code_text.ctid"
+        select_sql = (
+            "SELECT code_text.ctid, code_text.cid, code_text.fid, ifnull(code_text.seltext,''), code_text.pos0, "
+            "code_text.pos1, code_text.owner, code_text.date, source.name, code_name.name "
+            "FROM code_text "
+            "JOIN source ON source.id = code_text.fid "
+            "JOIN code_name ON code_name.cid = code_text.cid "
+            + where_sql
+            + " "
+        )
+
+        if strategy == "recent_first":
+            order_sql = "ORDER BY code_text.date DESC, code_text.ctid DESC"
+            segment_rows = self._fetchall(
+                select_sql + order_sql + " LIMIT ? OFFSET ?",
+                tuple(where_params + [max_segments, cursor]),
+            )
+        elif strategy == "sequential":
+            order_sql = "ORDER BY code_text.ctid"
+            segment_rows = self._fetchall(
+                select_sql + order_sql + " LIMIT ? OFFSET ?",
+                tuple(where_params + [max_segments, cursor]),
+            )
+        else:
+            diverse_sql = (
+                "SELECT ordered.ctid, ordered.cid, ordered.fid, ifnull(ordered.seltext,''), ordered.pos0, "
+                "ordered.pos1, ordered.owner, ordered.date, source.name, code_name.name "
+                "FROM ("
+                "SELECT code_text.ctid, code_text.cid, code_text.fid, code_text.seltext, code_text.pos0, code_text.pos1, "
+                "code_text.owner, code_text.date, ROW_NUMBER() OVER (PARTITION BY code_text.fid ORDER BY code_text.ctid) AS rn "
+                "FROM code_text "
+                + where_sql
+                + ") AS ordered "
+                "JOIN source ON source.id = ordered.fid "
+                "JOIN code_name ON code_name.cid = ordered.cid "
+                "ORDER BY ordered.rn, ordered.fid, ordered.ctid LIMIT ? OFFSET ?"
+            )
+            segment_rows = self._fetchall(diverse_sql, tuple(where_params + [max_segments, cursor]))
+
+        segments: List[Dict[str, Any]] = []
+        used_chars = 0
+        for row in segment_rows:
+            if len(segments) >= max_segments:
+                break
+
+            quote = "" if row[3] is None else str(row[3])
+            remaining_chars = max_chars - used_chars
+            if remaining_chars <= 0:
+                break
+
+            quote_truncated = False
+            quote_text = quote
+            if len(quote) > remaining_chars:
+                quote_text = quote[:remaining_chars]
+                quote_truncated = True
+
+            segments.append(
+                {
+                    "ctid": row[0],
+                    "cid": row[1],
+                    "fid": row[2],
+                    "quote": quote_text,
+                    "quote_truncated": quote_truncated,
+                    "pos0": row[4],
+                    "pos1": row[5],
+                    "owner": row[6],
+                    "date": row[7],
+                    "source_name": row[8],
+                    "code_name": row[9],
+                }
+            )
+            used_chars += len(quote_text)
+            if quote_truncated:
+                break
+
+        next_cursor = cursor + len(segments)
+        if next_cursor > total_segments:
+            next_cursor = total_segments
+        truncated = next_cursor < total_segments
+
+        return {
+            "cid": cid,
+            "code_name": code_name,
+            "selection": {
+                "strategy": strategy,
+                "max_segments": max_segments,
+                "max_chars": max_chars,
+                "cursor": cursor,
+                "file_ids": file_ids,
+                "total_segments": total_segments,
+                "returned_segments": len(segments),
+                "returned_chars": used_chars,
+                "next_cursor": next_cursor,
+                "truncated": truncated,
+            },
+            "segments": segments,
+        }
 
     def _read_document(self, doc_id: int, start: int, length: int) -> Dict[str, Any]:
         row = self._fetchone(
