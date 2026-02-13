@@ -613,12 +613,13 @@ class AiLLM():
         self.ai_streaming_output = ''
         return res
 
-    def ai_async_query(self, func, result_callback, *args, **kwargs):        
+    def ai_async_query(self, func, result_callback, *args, progress_callback=None, **kwargs):        
         """Calls an AI related function in a background thread
 
         Args:
             func: the function to be called.  *args, **kwargs are handed over to this function. 
             result_callback: callback function
+            progress_callback: callback function for progress/status updates
         """
         self.ai_async_is_canceled = False
         
@@ -631,7 +632,10 @@ class AiLLM():
         if result_callback is not None: 
             worker.signals.result.connect(result_callback)
         worker.signals.finished.connect(self._ai_async_finished)
-        worker.signals.progress.connect(self._ai_async_progress)
+        if progress_callback is not None:
+            worker.signals.progress.connect(progress_callback)
+        else:
+            worker.signals.progress.connect(self._ai_async_progress)
         worker.signals.error.connect(self._ai_async_error)
         self.threadpool.start(worker)
                         

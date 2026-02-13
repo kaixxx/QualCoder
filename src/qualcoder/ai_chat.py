@@ -31,9 +31,10 @@ from langchain_core.messages.system import SystemMessage
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.documents.base import Document
 
-from typing import List
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 import json
+import html as html_lib
 import logging
 import traceback
 import os
@@ -47,6 +48,7 @@ from .helpers import Message
 from .confirm_delete import DialogConfirmDelete
 from .ai_prompts import PromptItem
 from .ai_llm import extract_ai_memo, ai_quote_search
+from .ai_mcp_server import AiMcpServer
 from .error_dlg import qt_exception_hook
 from .html_parser import html_to_text
 
@@ -111,6 +113,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_stream_buffer = ""
         self.ai_stream_in_ref = False
         self.curr_codings = None
+        self.ai_mcp_server = AiMcpServer(self.app)
         self.ai_prompt = None
         self.ai_search_code_name = None
         self.ai_search_code_memo = None
@@ -121,6 +124,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_text_doc_name = ''
         self.ai_text_text = ''
         self.ai_text_start_pos = -1
+        self.agent_status_msg_ids = {}
 
     def init_styles(self):
         """Set up the stylesheets for the ui and the chat entries
@@ -140,11 +144,13 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_response_style = f'"{doc_font} color: #356399;"'
         self.ai_user_style = f'"{doc_font} color: #287368;"'
         self.ai_info_style = f'"{doc_font}"'
+        self.ai_status_style = f'"{doc_font} color: #808080;"'
         self.ai_actions_style = f'"{doc_font}"'
         if self.app.settings['stylesheet'] in ['dark', 'rainbow']:
             self.ai_response_style = f'"{doc_font} color: #8FB1D8;"'
             self.ai_user_style = f'"{doc_font} color: #35998A;"'
             self.ai_info_style = f'"{doc_font}"'
+            self.ai_status_style = f'"{doc_font} color: #B5B5B5;"'
         elif self.app.settings['stylesheet'] == 'native':
             # Determine whether dark or light native style is active:
             style_hints = QGuiApplication.styleHints()
@@ -154,10 +160,12 @@ class DialogAIChat(QtWidgets.QDialog):
                     self.ai_response_style = f'"{doc_font} color: #8FB1D8;"'
                     self.ai_user_style = f'"{doc_font} color: #35998A;"'
                     self.ai_info_style = f'"{doc_font}"'
+                    self.ai_status_style = f'"{doc_font} color: #B5B5B5;"'
                 else:
                     self.ai_response_style = f'"{doc_font} color: #356399;"'
                     self.ai_user_style = f'"{doc_font} color: #287368;"'
                     self.ai_info_style = f'"{doc_font}"'
+                    self.ai_status_style = f'"{doc_font} color: #808080;"'
             except AttributeError as e_:
                 print(f"Using older version of PyQT6? {e_}")
                 logger.debug(f"Using older version of PyQT6? {e_}")
@@ -166,6 +174,7 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ai_response_style = f'"{doc_font} color: #356399;"'
             self.ai_user_style = f'"{doc_font} color: #287368;"'
             self.ai_info_style = f'"{doc_font}"'
+            self.ai_status_style = f'"{doc_font} color: #808080;"'
         self.ui.plainTextEdit_question.setStyleSheet(self.ai_user_style[1:-1])
         default_bg_color = self.ui.plainTextEdit_question.palette().color(self.ui.plainTextEdit_question.viewport().backgroundRole())
         self.ui.ai_output.setStyleSheet(doc_font)
@@ -178,6 +187,7 @@ class DialogAIChat(QtWidgets.QDialog):
     def init_ai_chat(self, app=None):
         if app is not None:
             self.app = app
+            self.ai_mcp_server = AiMcpServer(self.app)
         # init chat history
         self.chat_history_folder = self.app.project_path + '/ai_data'
         if not os.path.exists(self.chat_history_folder):
@@ -829,6 +839,13 @@ data collected. This information will accompany every prompt sent to the AI, res
                         txt = msg[4].replace('\n', '<br />')
                         txt = '<b>' + _('Info:') + '</b><br />' + txt
                         html += f'<p style={self.ai_info_style}>{txt}</p>'
+                    elif msg[2] == 'agent_status':
+                        txt = html_lib.escape(msg[4]).replace('\n', '<br />')
+                        author = msg[3]
+                        if author is None or author == '':
+                            author = 'unknown'
+                        txt = f'<b>{_("AI")} ({author}) {_("Agent")}:</b><br />{txt}'
+                        html += f'<p style={self.ai_status_style}>{txt}</p>'
                 # add partially streamed ai response if needed
                 if len(self.app.ai.ai_streaming_output) > 0:
                     txt = self.app.ai.ai_streaming_output
@@ -1108,6 +1125,38 @@ data collected. This information will accompany every prompt sent to the AI, res
                            ' VALUES (?, ?, ?, ?)', (curr_chat_id, msg_type, msg_author, msg_content))
             db_conn.commit()
             self.history_update_message_list()
+
+    def history_add_or_append_agent_status(self, status_text: str, chat_idx=None, msg_author='Codex CLI'):
+        """Add a single status block and append subsequent status lines to it."""
+        if chat_idx is None:
+            chat_idx = self.current_chat_idx
+        if chat_idx <= -1:
+            return
+        if status_text is None or status_text.strip() == '':
+            return
+        curr_chat_id = self.chat_list[chat_idx][0]
+        cursor = self.chat_history_conn.cursor()
+        msg_id = self.agent_status_msg_ids.get(curr_chat_id, None)
+        if msg_id is None:
+            cursor.execute('INSERT INTO chat_messages (chat_id, msg_type, msg_author, msg_content)'
+                           ' VALUES (?, ?, ?, ?)', (curr_chat_id, 'agent_status', msg_author, status_text.strip()))
+            self.chat_history_conn.commit()
+            self.agent_status_msg_ids[curr_chat_id] = cursor.lastrowid
+        else:
+            cursor.execute('SELECT msg_content FROM chat_messages WHERE id = ? AND chat_id = ?', (msg_id, curr_chat_id))
+            row = cursor.fetchone()
+            if row is None:
+                self.agent_status_msg_ids.pop(curr_chat_id, None)
+                self.history_add_or_append_agent_status(status_text, chat_idx, msg_author)
+                return
+            prev = row[0] if row[0] is not None else ''
+            status_line = status_text.strip()
+            if prev.endswith(status_line):
+                return
+            updated = prev + '\n' + status_line if prev != '' else status_line
+            cursor.execute('UPDATE chat_messages SET msg_content=? WHERE id=?', (updated, msg_id))
+            self.chat_history_conn.commit()
+        self.history_update_message_list()
     
     def button_question_clicked(self):
         if self.app.ai.is_busy():
@@ -1152,6 +1201,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             # info messages are only shown on screen, not send to the AI
             self.history_add_message(msg_type, '', msg_content, chat_idx)
             self.update_chat_window()
+        elif msg_type == 'agent_status':
+            self.history_add_or_append_agent_status(msg_content, chat_idx)
+            if chat_idx == self.current_chat_idx:
+                self.update_chat_window()
         elif msg_type == 'system':
             # system messages are only added to the chat history. They are never shown on screen. 
             # The system message will be not be send to the AI immediately,
@@ -1176,12 +1229,24 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.history_add_message(msg_type, self.app.settings['codername'], msg_content, chat_idx)
                 messages = self.history_get_ai_messages()
                 self.current_streaming_chat_idx = self.current_chat_idx
-                self.app.ai.ai_async_stream(self.app.ai.large_llm, 
-                                            messages, 
-                                            result_callback=self.ai_message_callback, 
-                                            progress_callback=None, 
-                                            streaming_callback=self.ai_streaming_callback, 
-                                            error_callback=self.ai_error_callback)
+                analysis_type = ''
+                if 0 <= chat_idx < len(self.chat_list):
+                    analysis_type = self.chat_list[chat_idx][2]
+                if analysis_type == 'general chat':
+                    curr_chat_id = self.chat_list[chat_idx][0]
+                    self.agent_status_msg_ids.pop(curr_chat_id, None)
+                    self.app.ai.ai_async_query(self._mcp_general_chat_worker,
+                                               self.ai_mcp_message_callback,
+                                               messages,
+                                               chat_idx,
+                                               progress_callback=self.ai_mcp_progress_callback)
+                else:
+                    self.app.ai.ai_async_stream(self.app.ai.large_llm, 
+                                                messages, 
+                                                result_callback=self.ai_message_callback, 
+                                                progress_callback=None, 
+                                                streaming_callback=self.ai_streaming_callback, 
+                                                error_callback=self.ai_error_callback)
                 self.update_chat_window()
         elif msg_type == 'ai':
             # ai responses.
@@ -1195,6 +1260,198 @@ data collected. This information will accompany every prompt sent to the AI, res
             finally:
                 db_conn.close()
         return True    
+
+    def _mcp_agent_system_prompt(self) -> str:
+        return (
+            "You are a QualCoder assistant that can use an internal MCP server. "
+            "At each step, respond with ONLY a JSON object. Use one of the following formats:\n"
+            "1) {\"action\": \"mcp_call\", \"method\": \"resources/read\", \"params\": {\"uri\": \"qualcoder://...\"}}\n"
+            "2) {\"action\": \"done\"}\n"
+            "Rules:\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
+            "- Never invent MCP methods.\n"
+            "- Keep resource reads focused. Do not read large amounts of irrelevant text.\n"
+            "- When enough context is available, return done.\n"
+            "- Do not return normal prose here."
+        )
+
+    def _run_mcp_request(self, method: str, params: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        request = {
+            "jsonrpc": "2.0",
+            "id": self.ai_mcp_server.new_request_id(),
+            "method": method,
+            "params": params,
+        }
+        response = self.ai_mcp_server.handle_request(request)
+        return request, response
+
+    def _parse_mcp_agent_action(self, raw_text: str) -> Dict[str, Any]:
+        """Interpret one structured control message from the model."""
+
+        try:
+            data = json.loads(raw_text)
+        except Exception:
+            return {"action": "done"}
+        if not isinstance(data, dict):
+            return {"action": "done"}
+
+        action = str(data.get("action", "")).strip().lower()
+        if action in ("done", "finish", "finished"):
+            return {"action": "done"}
+
+        if action in ("mcp_call", "call_mcp", "call"):
+            method = str(data.get("method", "")).strip()
+            params = data.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            return {"action": "mcp_call", "method": method, "params": params}
+
+        # fallback shape: {"method": "...", "params": {...}}
+        if "method" in data:
+            method = str(data.get("method", "")).strip()
+            params = data.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            return {"action": "mcp_call", "method": method, "params": params}
+        return {"action": "done"}
+
+    def _emit_mcp_status(self, signals, chat_idx: int, status_event: Optional[Dict[str, Any]]):
+        status_msg = self.ai_mcp_server.status_event_to_text(status_event)
+        if status_msg.strip() == '':
+            return
+        if signals is None or signals.progress is None:
+            return
+        payload = {"chat_idx": chat_idx, "status": status_msg, "status_event": status_event}
+        signals.progress.emit(json.dumps(payload, ensure_ascii=False))
+
+    def _mcp_general_chat_worker(self, messages: List[Any], chat_idx: int, signals=None) -> Dict[str, Any]:
+        """Background worker: general chat with MCP resource access."""
+
+        result: Dict[str, Any] = {"chat_idx": chat_idx, "stream_messages": [], "canceled": False}
+        allowed_methods = {"initialize", "resources/list", "resources/templates/list", "resources/read"}
+
+        try:
+            agent_messages: List[Any] = [SystemMessage(content=self._mcp_agent_system_prompt())]
+            agent_messages.extend(messages)
+            final_hint = ''
+
+            # canonical bootstrap: initialize + resource discovery
+            for method, params in (
+                ("initialize", {"clientInfo": {"name": "qualcoder-ai-chat", "version": "0.1.0"}}),
+                ("resources/list", {}),
+                ("resources/templates/list", {}),
+            ):
+                if self.app.ai.ai_async_is_canceled:
+                    result["canceled"] = True
+                    return result
+                status_event = self.ai_mcp_server.describe_status_event(method, params)
+                self._emit_mcp_status(signals, chat_idx, status_event)
+                _request, response = self._run_mcp_request(method, params)
+                agent_messages.append(AIMessage(content=json.dumps({"action": "mcp_call", "method": method, "params": params}, ensure_ascii=False)))
+                agent_messages.append(HumanMessage(content="MCP response:\n" + json.dumps(response, ensure_ascii=False)))
+
+            max_steps = 6
+            for _step in range(max_steps):
+                if self.app.ai.ai_async_is_canceled:
+                    result["canceled"] = True
+                    return result
+
+                try:
+                    llm_response = self.app.ai.large_llm.invoke(agent_messages, response_format={"type": "json_object"})
+                except Exception:
+                    # Some providers/models do not support response_format.
+                    llm_response = self.app.ai.large_llm.invoke(agent_messages)
+                raw = str(llm_response.content).strip()
+                action = self._parse_mcp_agent_action(raw)
+
+                if action["action"] == "done":
+                    try:
+                        raw_json = json.loads(raw)
+                        if isinstance(raw_json, dict):
+                            final_hint = str(raw_json.get("answer", "")).strip()
+                    except Exception:
+                        pass
+                    break
+
+                method = action.get("method", "")
+                params = action.get("params", {})
+                if method not in allowed_methods:
+                    response = {
+                        "jsonrpc": "2.0",
+                        "id": self.ai_mcp_server.new_request_id(),
+                        "error": {"code": -32601, "message": "Method not found", "data": method},
+                    }
+                else:
+                    status_event = self.ai_mcp_server.describe_status_event(method, params)
+                    self._emit_mcp_status(signals, chat_idx, status_event)
+                    _request, response = self._run_mcp_request(method, params)
+
+                agent_messages.append(AIMessage(content=json.dumps({"action": "mcp_call", "method": method, "params": params}, ensure_ascii=False)))
+                agent_messages.append(HumanMessage(content="MCP response:\n" + json.dumps(response, ensure_ascii=False)))
+
+            self._emit_mcp_status(signals, chat_idx, self.ai_mcp_server.describe_host_status_event("final_response"))
+            final_prompt = (
+                "Now provide the final answer to the user in normal prose. "
+                "Do not call MCP anymore. "
+                "The final answer must follow the current conversation language."
+            )
+            if final_hint != '':
+                final_prompt += '\nHere is a draft idea from your internal planning:\n' + final_hint
+            agent_messages.append(HumanMessage(content=final_prompt))
+            result["stream_messages"] = agent_messages
+        except Exception as err:
+            result["error"] = _('Error during MCP-based general chat: ') + str(err)
+        return result
+
+    def ai_mcp_message_callback(self, mcp_result):
+        """Called when the MCP-based general chat worker has finished."""
+
+        self.ai_streaming_output = ''
+        if not isinstance(mcp_result, dict):
+            self.process_message('info', _('Error: Invalid result from MCP general chat worker.'), self.current_streaming_chat_idx)
+            return
+
+        chat_idx = int(mcp_result.get("chat_idx", self.current_streaming_chat_idx))
+        if chat_idx < 0 or chat_idx >= len(self.chat_list):
+            return
+
+        if mcp_result.get("canceled", False):
+            self.process_message('info', _('Chat has been canceled by the user.'), chat_idx)
+            return
+
+        err = str(mcp_result.get("error", "")).strip()
+        if err != '':
+            self.process_message('info', err, chat_idx)
+            return
+
+        stream_messages = mcp_result.get("stream_messages", None)
+        if stream_messages is None or not isinstance(stream_messages, list) or len(stream_messages) == 0:
+            self.process_message('info', _('Error: Invalid message stream from MCP general chat worker.'), chat_idx)
+            return
+
+        self.current_streaming_chat_idx = chat_idx
+        self.app.ai.ai_async_stream(self.app.ai.large_llm,
+                                    stream_messages,
+                                    result_callback=self.ai_message_callback,
+                                    progress_callback=None,
+                                    streaming_callback=self.ai_streaming_callback,
+                                    error_callback=self.ai_error_callback)
+        self.update_chat_window()
+
+    def ai_mcp_progress_callback(self, progress_msg):
+        """Receive live MCP status updates from the worker thread."""
+        try:
+            payload = json.loads(str(progress_msg))
+            status = str(payload.get("status", "")).strip()
+            if status == '':
+                status = self.ai_mcp_server.status_event_to_text(payload.get("status_event", None)).strip()
+            chat_idx = int(payload.get("chat_idx", self.current_chat_idx))
+        except Exception:
+            status = str(progress_msg).strip()
+            chat_idx = self.current_chat_idx
+        if status == '':
+            return
+        self.process_message('agent_status', status, chat_idx)
     
     def ai_streaming_callback(self, streamed_text):  # TODO streamed_text unused
         self.update_chat_window()
