@@ -1145,9 +1145,13 @@ data collected. This information will accompany every prompt sent to the AI, res
                 messages.append(HumanMessage(content=msg[4]))
             elif msg[2] == 'ai':
                 messages.append(AIMessage(content=msg[4]))
+            elif msg[2] == 'tool_call':
+                messages.append(AIMessage(content=msg[4]))
+            elif msg[2] == 'tool_result':
+                messages.append(HumanMessage(content=msg[4]))
         return messages
     
-    def history_add_message(self, msg_type, msg_author, msg_content, chat_idx=None, db_conn=None):
+    def history_add_message(self, msg_type, msg_author, msg_content, chat_idx=None, db_conn=None, refresh=True, commit=True):
         self.ai_streaming_output = ''
         if chat_idx is None:
             chat_idx = self.current_chat_idx
@@ -1161,8 +1165,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             # Insert new message
             cursor.execute('INSERT INTO chat_messages (chat_id, msg_type, msg_author, msg_content)'
                            ' VALUES (?, ?, ?, ?)', (curr_chat_id, msg_type, msg_author, msg_content))
-            db_conn.commit()
-            self.history_update_message_list()
+            if commit:
+                db_conn.commit()
+            if refresh:
+                self.history_update_message_list(db_conn)
 
     def history_add_or_append_agent_status(self, status_text: str, chat_idx=None, msg_author='Codex CLI'):
         """Add a single status block and append subsequent status lines to it."""
@@ -1222,7 +1228,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.ui.plainTextEdit_question.clear()
                 QtWidgets.QApplication.processEvents()
                         
-    def process_message(self, msg_type, msg_content, chat_idx=None) -> bool:
+    def process_message(self, msg_type, msg_content, chat_idx=None, db_conn=None, refresh_history=True, commit_history=True) -> bool:
         #if not self.app.ai.is_ready():
         #    msg = _('The AI is busy or not yet fully loaded. Please wait a moment and retry.')
         #    Message(self.app, _('AI not ready'), msg, "warning").exec()
@@ -1238,7 +1244,7 @@ data collected. This information will accompany every prompt sent to the AI, res
              
         if msg_type == 'info':
             # info messages are only shown on screen, not send to the AI
-            self.history_add_message(msg_type, '', msg_content, chat_idx)
+            self.history_add_message(msg_type, '', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
             self.update_chat_window()
         elif msg_type == 'agent_status':
             self.history_add_or_append_agent_status(msg_content, chat_idx)
@@ -1248,7 +1254,13 @@ data collected. This information will accompany every prompt sent to the AI, res
             # system messages are only added to the chat history. They are never shown on screen. 
             # The system message will be not be send to the AI immediately,
             # but together with the next user message (as part of the chat history).
-            self.history_add_message(msg_type, '', msg_content, chat_idx)
+            self.history_add_message(msg_type, '', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+        elif msg_type == 'tool_call':
+            # tool messages are persisted for multi-turn MCP context, but not rendered in the chat window
+            self.history_add_message(msg_type, 'mcp_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+        elif msg_type == 'tool_result':
+            # tool messages are persisted for multi-turn MCP context, but not rendered in the chat window
+            self.history_add_message(msg_type, 'mcp_server', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'instruct':
             # instruct messages are only send to the AI, but not shown on screen
             # Other than system messages, instruct messages are send immediatly and will produce an answer that is shown on screen
@@ -1312,6 +1324,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
             "- Never invent MCP methods.\n"
+            "- First check whether the current conversation and previous MCP responses already contain enough information.\n"
+            "- Call MCP when genuinely new project information is needed.\n"
+            #"- If answering the users question needs project-specific evidence and no relevant MCP data is available yet, call MCP before done.\n"            
+            #"- Reuse previously retrieved MCP results whenever possible; avoid repeating identical MCP calls.\n"
             "- Keep resource reads focused. Do not read large amounts of irrelevant text.\n"
             "- When enough context is available, return done.\n"
             "- Do not return normal prose here."
@@ -1365,6 +1381,44 @@ data collected. This information will accompany every prompt sent to the AI, res
             return {"action": "mcp_call", "method": method, "params": params}
         return {"action": "done"}
 
+    def _mcp_call_key(self, method: str, params: Dict[str, Any]) -> str:
+        try:
+            params_key = json.dumps(params, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            params_key = str(params)
+        return method + "|" + params_key
+
+    def _extract_mcp_response_cache(self, messages: List[Any]) -> Dict[str, Dict[str, Any]]:
+        cache: Dict[str, Dict[str, Any]] = {}
+        pending_key: Optional[str] = None
+        prefix = "MCP response:\n"
+        for msg in messages:
+            if isinstance(msg, AIMessage):
+                action = self._parse_mcp_agent_action(str(msg.content))
+                if action.get("action") == "mcp_call":
+                    method = str(action.get("method", "")).strip()
+                    params = action.get("params", {})
+                    if not isinstance(params, dict):
+                        params = {}
+                    pending_key = self._mcp_call_key(method, params)
+                else:
+                    pending_key = None
+                continue
+
+            if isinstance(msg, HumanMessage) and pending_key is not None:
+                raw = str(msg.content)
+                if raw.startswith(prefix):
+                    try:
+                        response = json.loads(raw[len(prefix):])
+                        if isinstance(response, dict):
+                            cache[pending_key] = response
+                    except Exception:
+                        pass
+                pending_key = None
+            else:
+                pending_key = None
+        return cache
+
     def _emit_mcp_status(self, signals, chat_idx: int, status_event: Optional[Dict[str, Any]]):
         status_msg = self.ai_mcp_server.status_event_to_text(status_event)
         if status_msg.strip() == '':
@@ -1377,28 +1431,26 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _mcp_general_chat_worker(self, messages: List[Any], chat_idx: int, signals=None) -> Dict[str, Any]:
         """Background worker: general chat with MCP resource access."""
 
-        result: Dict[str, Any] = {"chat_idx": chat_idx, "stream_messages": [], "canceled": False}
+        result: Dict[str, Any] = {"chat_idx": chat_idx, "stream_messages": [], "tool_messages": [], "canceled": False}
         allowed_methods = {"initialize", "resources/list", "resources/templates/list", "resources/read"}
 
         try:
             agent_messages: List[Any] = [SystemMessage(content=self._mcp_agent_system_prompt())]
             agent_messages.extend(messages)
             final_hint = ''
+            tool_messages: List[Dict[str, str]] = []
+            mcp_cache = self._extract_mcp_response_cache(agent_messages)
 
-            # canonical bootstrap: initialize + resource discovery
-            for method, params in (
-                ("initialize", {"clientInfo": {"name": "qualcoder-ai-chat", "version": "0.1.0"}}),
-                ("resources/list", {}),
-                ("resources/templates/list", {}),
-            ):
-                if self.app.ai.ai_async_is_canceled:
-                    result["canceled"] = True
-                    return result
-                status_event = self.ai_mcp_server.describe_status_event(method, params)
-                self._emit_mcp_status(signals, chat_idx, status_event)
-                _request, response = self._run_mcp_request(method, params)
-                agent_messages.append(AIMessage(content=json.dumps({"action": "mcp_call", "method": method, "params": params}, ensure_ascii=False)))
-                agent_messages.append(HumanMessage(content="MCP response:\n" + json.dumps(response, ensure_ascii=False)))
+            def append_tool_exchange(method_name: str, method_params: Dict[str, Any], rpc_response: Dict[str, Any]):
+                call_content = json.dumps(
+                    {"action": "mcp_call", "method": method_name, "params": method_params},
+                    ensure_ascii=False,
+                )
+                result_content = "MCP response:\n" + json.dumps(rpc_response, ensure_ascii=False)
+                agent_messages.append(AIMessage(content=call_content))
+                agent_messages.append(HumanMessage(content=result_content))
+                tool_messages.append({"msg_type": "tool_call", "msg_author": "mcp_agent", "msg_content": call_content})
+                tool_messages.append({"msg_type": "tool_result", "msg_author": "mcp_server", "msg_content": result_content})
 
             max_steps = 6
             for _step in range(max_steps):
@@ -1432,12 +1484,16 @@ data collected. This information will accompany every prompt sent to the AI, res
                         "error": {"code": -32601, "message": "Method not found", "data": method},
                     }
                 else:
-                    status_event = self.ai_mcp_server.describe_status_event(method, params)
-                    self._emit_mcp_status(signals, chat_idx, status_event)
-                    _request, response = self._run_mcp_request(method, params)
+                    call_key = self._mcp_call_key(method, params)
+                    if call_key in mcp_cache:
+                        response = mcp_cache[call_key]
+                    else:
+                        status_event = self.ai_mcp_server.describe_status_event(method, params)
+                        self._emit_mcp_status(signals, chat_idx, status_event)
+                        _request, response = self._run_mcp_request(method, params)
+                        mcp_cache[call_key] = response
 
-                agent_messages.append(AIMessage(content=json.dumps({"action": "mcp_call", "method": method, "params": params}, ensure_ascii=False)))
-                agent_messages.append(HumanMessage(content="MCP response:\n" + json.dumps(response, ensure_ascii=False)))
+                append_tool_exchange(method, params, response)
 
             self._emit_mcp_status(signals, chat_idx, self.ai_mcp_server.describe_host_status_event("final_response"))
             final_prompt = (
@@ -1452,6 +1508,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             final_stream_messages.extend(agent_messages[1:])
             final_stream_messages.append(HumanMessage(content=final_prompt))
             result["stream_messages"] = final_stream_messages
+            result["tool_messages"] = tool_messages
         except Exception as err:
             result["error"] = _('Error during MCP-based general chat: ') + str(err)
         return result
@@ -1481,6 +1538,29 @@ data collected. This information will accompany every prompt sent to the AI, res
         if stream_messages is None or not isinstance(stream_messages, list) or len(stream_messages) == 0:
             self.process_message('info', _('Error: Invalid message stream from MCP general chat worker.'), chat_idx)
             return
+
+        tool_messages = mcp_result.get("tool_messages", None)
+        if isinstance(tool_messages, list) and len(tool_messages) > 0:
+            db_conn = sqlite3.connect(self.chat_history_path)
+            try:
+                for item in tool_messages:
+                    if not isinstance(item, dict):
+                        continue
+                    msg_type = str(item.get("msg_type", "")).strip()
+                    msg_content = str(item.get("msg_content", ""))
+                    if msg_type in ("tool_call", "tool_result"):
+                        self.process_message(
+                            msg_type,
+                            msg_content,
+                            chat_idx,
+                            db_conn=db_conn,
+                            refresh_history=False,
+                            commit_history=False,
+                        )
+                db_conn.commit()
+                self.history_update_message_list(db_conn)
+            finally:
+                db_conn.close()
 
         self.current_streaming_chat_idx = chat_idx
         self.app.ai.ai_async_stream(self.app.ai.large_llm,
