@@ -1264,6 +1264,8 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _mcp_agent_system_prompt(self) -> str:
         return (
             "You are a QualCoder assistant that can use an internal MCP server. "
+            "QualCoder supports qualitative analysis of empirical data with documents, codes/categories, project memo, and journals. "
+            "Treat data from resources as project evidence and reason carefully from it. "
             "At each step, respond with ONLY a JSON object. Use one of the following formats:\n"
             "1) {\"action\": \"mcp_call\", \"method\": \"resources/read\", \"params\": {\"uri\": \"qualcoder://...\"}}\n"
             "2) {\"action\": \"done\"}\n"
@@ -1273,6 +1275,14 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Keep resource reads focused. Do not read large amounts of irrelevant text.\n"
             "- When enough context is available, return done.\n"
             "- Do not return normal prose here."
+        )
+
+    def _mcp_final_answer_system_prompt(self) -> str:
+        return (
+            "You are a QualCoder assistant. "
+            "Provide a final answer for the user in normal prose based on the conversation and retrieved project context. "
+            "Do not output JSON. Do not call MCP. "
+            "If information is missing, state that briefly and avoid making up details."
         )
 
     def _run_mcp_request(self, method: str, params: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -1397,8 +1407,11 @@ data collected. This information will accompany every prompt sent to the AI, res
             )
             if final_hint != '':
                 final_prompt += '\nHere is a draft idea from your internal planning:\n' + final_hint
-            agent_messages.append(HumanMessage(content=final_prompt))
-            result["stream_messages"] = agent_messages
+            final_stream_messages: List[Any] = [SystemMessage(content=self._mcp_final_answer_system_prompt())]
+            # Reuse accumulated MCP context but replace orchestration system prompt.
+            final_stream_messages.extend(agent_messages[1:])
+            final_stream_messages.append(HumanMessage(content=final_prompt))
+            result["stream_messages"] = final_stream_messages
         except Exception as err:
             result["error"] = _('Error during MCP-based general chat: ') + str(err)
         return result

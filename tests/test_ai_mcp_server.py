@@ -72,6 +72,8 @@ class TestAiMcpServer(TestCase):
         self.assertIn("result", res)
         self.assertEqual("2025-06-18", res["result"]["protocolVersion"])
         self.assertIn("resources", res["result"]["capabilities"])
+        self.assertIn("QualCoder", res["result"]["instructions"])
+        self.assertIn("read-only", res["result"]["instructions"])
 
     def test_resources_list_contains_only_top_level_resources(self):
         res = self.server.handle_request({"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}})

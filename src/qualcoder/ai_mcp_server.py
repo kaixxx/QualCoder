@@ -45,12 +45,20 @@ class AiMcpServer:
         self._sdk_server = Server(
             self.server_name,
             version=self.server_version,
-            instructions=(
-                "This QualCoder internal MCP server is read-only in the current phase. "
-                "Use resources/list and resources/read for project data."
-            ),
+            instructions=self._server_instructions(),
         )
         self._register_sdk_handlers()
+
+    def _server_instructions(self) -> str:
+        return (
+            "QualCoder is a qualitative data analysis application used to analyze empirical material such as "
+            "interviews, field notes, images, and video. It supports coding, memo writing, text annotations, "
+            "researcher journaling, and reports. "
+            "This internal MCP server currently exposes read-only access to empirical documents (text only, "
+            "no images or videos), codes/categories (code tree), project memo, and journals for analytic assistance. "
+            "Use resources/list and resources/read to inspect available material. "
+            "Do not assume write operations are available in this phase."
+        )
 
     def new_request_id(self) -> int:
         req_id = self._request_seq
@@ -279,10 +287,7 @@ class AiMcpServer:
                 prompts=types.PromptsCapability(listChanged=False),
             ),
             serverInfo=types.Implementation(name=self.server_name, version=self.server_version),
-            instructions=(
-                "This QualCoder internal MCP server is read-only in the current phase. "
-                "Use resources/list and resources/read for project data."
-            ),
+            instructions=self._server_instructions(),
         )
         return result.model_dump(mode="json", exclude_none=True)
 
