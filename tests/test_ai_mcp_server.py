@@ -47,6 +47,10 @@ class TestAiMcpServer(TestCase):
             (1, "cat one", "default", "2026-02-13", "cat memo", None),
         )
         cur.execute(
+            "INSERT INTO code_cat (catid, name, owner, date, memo, supercatid) VALUES (?,?,?,?,?,?)",
+            (2, "📌 Speakers", "default", "2026-02-13", "speaker memo", None),
+        )
+        cur.execute(
             "INSERT INTO code_name (cid, name, memo, catid, owner, date, color) VALUES (?,?,?,?,?,?,?)",
             (1, "code one", "code memo", 1, "default", "2026-02-13", "#AAAAAA"),
         )
@@ -74,6 +78,22 @@ class TestAiMcpServer(TestCase):
         self.assertIn("resources", res["result"]["capabilities"])
         self.assertIn("QualCoder", res["result"]["instructions"])
         self.assertIn("read-only", res["result"]["instructions"])
+        self.assertIn("codes are leaf nodes", res["result"]["instructions"])
+        self.assertIn("speaker categories", res["result"]["instructions"])
+
+    def test_codes_tree_contains_structure_rules_and_speaker_convention(self):
+        req = {"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {"uri": "qualcoder://codes/tree"}}
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        self.assertIn("structure_rules", payload)
+        self.assertIn("special_conventions", payload)
+        self.assertTrue(payload["structure_rules"]["codes_are_leaves"])
+        self.assertFalse(payload["structure_rules"]["codes_can_have_subcodes"])
+        self.assertTrue(payload["structure_rules"]["categories_can_contain_codes"])
+        self.assertEqual("📌 ", payload["special_conventions"]["speaker_category_prefix"])
+        self.assertTrue(payload["special_conventions"]["speaker_category_present"])
+        self.assertIn(2, payload["special_conventions"]["speaker_category_ids"])
 
     def test_resources_list_contains_only_top_level_resources(self):
         res = self.server.handle_request({"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}})

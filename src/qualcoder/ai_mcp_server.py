@@ -54,6 +54,10 @@ class AiMcpServer:
             "QualCoder is a qualitative data analysis application used to analyze empirical material such as "
             "interviews, field notes, images, and video. It supports coding, memo writing, text annotations, "
             "researcher journaling, and reports. "
+            "Code tree invariant: codes are leaf nodes and cannot contain subcodes; only categories can contain "
+            "codes (and subcategories). "
+            "Global optional convention: speaker categories are marked by a category name prefix '📌 ' followed by "
+            "a localized label. This convention may or may not be present in a given project. "
             "This internal MCP server currently exposes read-only access to empirical documents (text only, "
             "no images or videos), codes/categories (code tree), project memo, and journals for analytic assistance. "
             "Use resources/list and resources/read to inspect available material. "
@@ -495,7 +499,33 @@ class AiMcpServer:
                     "date": row[6],
                 }
             )
-        return {"categories": categories, "codes": codes}
+        speaker_prefix = "📌 "
+        speaker_categories = []
+        for cat in categories:
+            cat_name = str(cat.get("name", ""))
+            if cat_name.startswith(speaker_prefix):
+                speaker_categories.append({"catid": cat["catid"], "name": cat_name})
+
+        structure_rules = {
+            "codes_are_leaves": True,
+            "codes_can_have_subcodes": False,
+            "categories_can_contain_codes": True,
+            "categories_can_have_subcategories": True,
+        }
+        special_conventions = {
+            "speaker_category_prefix": speaker_prefix,
+            "speaker_category_name_is_localized": True,
+            "speaker_category_optional": True,
+            "speaker_category_present": len(speaker_categories) > 0,
+            "speaker_categories": speaker_categories,
+            "speaker_category_ids": [item["catid"] for item in speaker_categories],
+        }
+        return {
+            "categories": categories,
+            "codes": codes,
+            "structure_rules": structure_rules,
+            "special_conventions": special_conventions,
+        }
 
     def _fetch_text_documents(self) -> List[Dict[str, Any]]:
         docs = []
