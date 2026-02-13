@@ -17,6 +17,7 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 from copy import deepcopy
@@ -112,22 +113,32 @@ class DialogCodesBySegments(QtWidgets.QDialog):
         self.horizontal_labels = []
         self.xlsx_results = []
 
-    def get_files_and_cases(self):
-        """ Get source files with additional details and fill files list widget.
+    def get_files_and_cases(self, file_sort="name asc"):
+        """ Get text files with additional details and fill files list widget.
         Get cases and fill case list widget
         Called from : init, manage_files.delete manage_files.delete_button_multiple_files
         """
 
         self.ui.listWidget_files.clear()
         self.files = self.app.get_text_filenames()
+        # Sorting the file list
+        if file_sort == "name asc":
+            self.files = sorted(self.files, key=lambda x: x['name'])
+        if file_sort == "name desc":
+            self.files = sorted(self.files, key=lambda x: x['name'], reverse=True)
+        if file_sort == "date asc":
+            self.files = sorted(self.files, key=lambda x: x['date'])
+        if file_sort == "date desc":
+            self.files = sorted(self.files, key=lambda x: x['date'], reverse=True)
         item = QtWidgets.QListWidgetItem("")
         item.setToolTip(_("No file selection"))
         self.ui.listWidget_files.addItem(item)
-        for f in self.files:
-            item = QtWidgets.QListWidgetItem(f['name'])
-            tt = ""
-            if f['memo'] != "":
-                tt = _("\nMEMO: ") + f['memo']
+
+        for file_ in self.files:
+            item = QtWidgets.QListWidgetItem(file_['name'])
+            tt = f"{file_['date'].split()[0]}\n"
+            if file_['memo'] != "":
+                tt = _("\nMEMO: ") + file_['memo']
             item.setToolTip(tt)
             self.ui.listWidget_files.addItem(item)
 
@@ -143,6 +154,8 @@ class DialogCodesBySegments(QtWidgets.QDialog):
                 tt = _("MEMO: ") + c['memo']
             item.setToolTip(tt)
             self.ui.listWidget_cases.addItem(item)
+        if not self.cases:
+            self.ui.listWidget_cases.setHidden(True)
 
     def get_codes_categories_coders(self):
         """ Called from init, delete category. Load codes, categories, and coders. """
@@ -238,13 +251,17 @@ class DialogCodesBySegments(QtWidgets.QDialog):
                 self.ui.listWidget_files.item(i).setSelected(False)
 
     def listwidget_files_menu(self, position):
-        """ Context menu for file selection. """
+        """ Context menu for file selection and sorting. """
 
         menu = QtWidgets.QMenu()
         menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
         action_all_files = menu.addAction(_("Select all files"))
         action_files_like = menu.addAction(_("Select files like"))
         action_files_none = menu.addAction(_("Select none"))
+        action_sort_name_asc = menu.addAction(_("Sort by name ascending"))
+        action_sort_name_desc = menu.addAction(_("Sort by name descending"))
+        action_sort_date_asc = menu.addAction(_("Sort by date ascending"))
+        action_sort_date_desc = menu.addAction(_("Sort by date descending"))
         action = menu.exec(self.ui.listWidget_files.mapToGlobal(position))
         if action == action_all_files:
             self.ui.listWidget_files.selectAll()
@@ -271,6 +288,14 @@ class DialogCodesBySegments(QtWidgets.QDialog):
                     self.ui.listWidget_files.item(i).setSelected(True)
                 else:
                     self.ui.listWidget_files.item(i).setSelected(False)
+        if action == action_sort_name_asc:
+            self.get_files_and_cases("name asc")
+        if action == action_sort_name_desc:
+            self.get_files_and_cases("name desc")
+        if action == action_sort_date_asc:
+            self.get_files_and_cases("date asc")
+        if action == action_sort_date_desc:
+            self.get_files_and_cases("date desc")
 
     def listwidget_cases_menu(self, position):
         """ Context menu for case selection. """
@@ -483,11 +508,12 @@ class DialogCodesBySegments(QtWidgets.QDialog):
                 tree_item.setSelected(False)
         if action == action_like:
             # Need to unselect where mouse click occurred
-            clicked_selected = self.ui.treeWidget.selectedItems()[0]
-            clicked_selected.setSelected(False)
+            if self.ui.treeWidget.selectedItems():
+                clicked_selected = self.ui.treeWidget.selectedItems()[0]
+                clicked_selected.setSelected(False)
             # Input dialog narrow, so code below
             dialog = QtWidgets.QInputDialog(None)
-            dialog.setStyleSheet("* {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+            dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
             dialog.setWindowTitle(_("Select some codes"))
             dialog.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
             dialog.setInputMode(QtWidgets.QInputDialog.InputMode.TextInput)

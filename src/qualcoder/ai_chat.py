@@ -17,6 +17,7 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Kai Droege (kaixxx)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 from PyQt6 import QtWidgets, QtCore
@@ -47,7 +48,7 @@ from .GUI.ui_ai_chat import Ui_Dialog_ai_chat
 from .helpers import Message
 from .confirm_delete import DialogConfirmDelete
 from .ai_prompts import PromptItem
-from .ai_llm import extract_ai_memo, ai_quote_search
+from .ai_llm import extract_ai_memo, ai_quote_search, strip_think_blocks
 from .ai_mcp_server import AiMcpServer
 from .error_dlg import qt_exception_hook
 from .html_parser import html_to_text
@@ -125,6 +126,8 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_text_text = ''
         self.ai_text_start_pos = -1
         self.agent_status_msg_ids = {}
+        self.ai_output_autoscroll = True
+        self.ui.scrollArea_ai_output.verticalScrollBar().valueChanged.connect(self.on_ai_output_scroll)
 
     def init_styles(self):
         """Set up the stylesheets for the ui and the chat entries
@@ -226,11 +229,9 @@ class DialogAIChat(QtWidgets.QDialog):
         if self.chat_history_conn is not None:
             self.chat_history_conn.close()
             
-    @staticmethod
-    def help():
+    def help(self):
         """ Open help in browser. """
-        url = "https://github.com/ccbogel/QualCoder/wiki/5.1.-AI-chat-based-analysis"
-        webbrowser.open(url)
+        self.app.help_wiki("5.1.-AI-chat-based-analysis")
 
     def get_chat_list(self):
         """Load the current chat list from the database into self.chat_list
@@ -287,6 +288,7 @@ class DialogAIChat(QtWidgets.QDialog):
         # select new chat
         self.current_chat_idx = self.find_chat_idx(cursor.lastrowid)
         self.ui.listWidget_chat_list.setCurrentRow(self.current_chat_idx)
+        self.ai_output_autoscroll = True
         self.chat_list_selection_changed()
 
     def new_general_chat(self, name, summary):
@@ -348,14 +350,9 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ai_search_code_memo = ui.selected_code_memo
             self.ai_search_file_ids = ui.selected_file_ids
             self.ai_search_code_ids = ui.selected_code_ids
+            self.ai_search_coder_names = ui.coder_names
             self.ai_prompt = ui.current_prompt
-            
-            file_ids_str = str(self.ai_search_file_ids).replace('[', '(').replace(']', ')')
-            code_ids_str = str(self.ai_search_code_ids).replace('[', '(').replace(']', ')')
-                        
             # fetch data
-            #sql = f'SELECT * FROM code_text WHERE cid IN {code_ids_str} AND fid IN {file_ids_str}'
-            
             # This SQL sorts the results by file id, but not like 1, 1, 1, 2, 2, 3... 
             # Instead, the results are mixed up in this order: file id = 1, 2, 3, 1, 2, 1...
             # This tries to ensure that even if the data send to the AI must be cut off at some point 
@@ -363,20 +360,40 @@ class DialogAIChat(QtWidgets.QDialog):
             # possible included in the analysis.
             # The JOIN also adds the source.name so that the AI can refer to a certain document
             # by its name.     
+
+            code_ids = list(self.ai_search_code_ids or [])
+            file_ids = list(self.ai_search_file_ids or [])
+            coder_names = list(self.ai_search_coder_names or [])
+
+            code_ph  = ",".join(["?"] * len(code_ids))
+            file_ph  = ",".join(["?"] * len(file_ids))
+            owner_ph = ",".join(["?"] * len(coder_names))
+
             sql = f"""
                 SELECT ordered.*, source.name, code_name.name AS code_name
                 FROM (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY fid ORDER BY ctid) as rn
-                FROM code_text
-                WHERE cid IN {code_ids_str} AND fid IN {file_ids_str}
+                    SELECT *,
+                        ROW_NUMBER() OVER (PARTITION BY fid ORDER BY ctid) AS rn
+                    FROM code_text
+                    WHERE cid IN ({code_ph})
+                    AND fid IN ({file_ph})
+                    AND owner IN ({owner_ph})
                 ) AS ordered
                 JOIN source ON ordered.fid = source.id
                 JOIN code_name ON ordered.cid = code_name.cid
                 ORDER BY ordered.rn, ordered.fid;
-                """
+            """
+
+            params = [*code_ids, *file_ids, *coder_names]
+
             cursor = self.app.conn.cursor()
-            cursor.execute(sql)
+            cursor.execute(sql, params)
             self.curr_codings = cursor.fetchall()
+            
+            if len(self.curr_codings) == 0:
+                msg = _('No codings found for this particuar combination of coder, document filter, and code.')
+                Message(self.app, _('Code analysis'), msg, 'warning').exec()
+                return
             
             ai_data = []
             # Limit the amount of data (characters) send to the ai, so the maximum context window is not exceeded.
@@ -585,6 +602,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             
     def topic_chat_analyze_more(self): 
         # Analyze more data found in the semantic search
+        self.ai_output_autoscroll = True
         cursor = self.chat_history_conn.cursor()
         chat_id = int(self.chat_list[self.current_chat_idx][0])
         cursor.execute(f'''
@@ -774,6 +792,22 @@ data collected. This information will accompany every prompt sent to the AI, res
         else: 
             self.main_window.statusBar().showMessage('')
 
+    def on_ai_output_scroll(self, value):
+        """Normally, if the AI is generating text, the scrollArea_ai_output scrolls to the bottom
+        automatically so that the new text becomes visible. 
+        This function ensures the if the user scroll up during the text generation, the auto
+        scrolling stops. 
+        If the user scroll back down the the end, the auto scrolling is re-enabled. 
+
+        Args:
+            value (int): current scroll position
+        """
+        max_value = self.ui.scrollArea_ai_output.verticalScrollBar().maximum()
+        if value >= max_value:
+            self.ai_output_autoscroll = True
+        else:
+            self.ai_output_autoscroll = False
+
     def update_chat_window(self, scroll_to_bottom=True):
         """load current chat into self.ai_output"""
         if self.current_chat_idx > -1:
@@ -849,6 +883,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                 # add partially streamed ai response if needed
                 if len(self.app.ai.ai_streaming_output) > 0:
                     txt = self.app.ai.ai_streaming_output
+                    txt = strip_think_blocks(txt)
+                    if len(self.app.ai.ai_streaming_output) != len(txt) and len(txt) == 0:
+                        txt = _('Thinking...')
                     txt = self.replace_references(txt, streaming=True)
                     txt = txt.replace('\n', '<br />')
                     author = self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']
@@ -1077,8 +1114,9 @@ data collected. This information will accompany every prompt sent to the AI, res
         QtCore.QTimer.singleShot(200, self._ai_output_scroll_to_bottom)
         
     def _ai_output_scroll_to_bottom(self):
-        self.ui.scrollArea_ai_output.verticalScrollBar().setValue(self.ui.scrollArea_ai_output.verticalScrollBar().maximum())
-        #self.ui.scrollArea_ai_output.ensureVisible(0, self.ui.scrollArea_ai_output.widget().height())
+        if self.ai_output_autoscroll:
+            self.ui.scrollArea_ai_output.verticalScrollBar().setValue(self.ui.scrollArea_ai_output.verticalScrollBar().maximum())
+            self.ai_output_autoscroll = True
                                 
     def history_update_message_list(self, db_conn=None):
         """Update sel.chat_msg_list from the database
@@ -1177,6 +1215,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             msg = _('The AI not yet fully loaded. Please wait and retry.')
             Message(self.app, _('AI not ready'), msg, "warning").exec()
             return
+        self.ai_output_autoscroll = True
         q = self.ui.plainTextEdit_question.toPlainText()
         if q != '':
             if self.process_message('user', q):
@@ -1254,6 +1293,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             db_conn = sqlite3.connect(self.chat_history_path)
             try: 
                 ai_model_name = self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']
+                msg_content = strip_think_blocks(msg_content)
                 self.history_add_message(msg_type, ai_model_name, msg_content, chat_idx, db_conn)
                 self.ai_streaming_output = ''
                 self.update_chat_window()

@@ -16,6 +16,8 @@ If not, see <https://www.gnu.org/licenses/>.
 
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
+https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 import os
@@ -820,6 +822,8 @@ class DialogReferenceManager(QtWidgets.QDialog):
         reference_editor = QtWidgets.QDialog()
         ui_re = Ui_DialogReferenceEditor()
         ui_re.setupUi(reference_editor)
+        ui_re.tableWidget.setStyleSheet(f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";')
+        ui_re.buttonBox.setStyleSheet(f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";')
         ui_re.tableWidget.setColumnCount(2)
         ui_re.tableWidget.setHorizontalHeaderLabels(["RIS", "Data"])
         for row, key in enumerate(short_dict):

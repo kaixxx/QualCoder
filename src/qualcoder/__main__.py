@@ -18,6 +18,7 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 import multiprocessing
@@ -55,7 +56,6 @@ from qualcoder.GUI.base64_notosans_helper import NotoSans
 from qualcoder.GUI.ui_main import Ui_MainWindow
 from qualcoder.helpers import Message, ImportPlainTextCodes
 from qualcoder.import_survey import DialogImportSurvey
-from qualcoder.import_twitter_data import DialogImportTwitterData
 from qualcoder.information import DialogInformation, menu_shortcuts_display, coding_shortcuts_display
 from qualcoder.locale.base64_lang_helper import *
 from qualcoder.journals import DialogJournals
@@ -86,6 +86,7 @@ from qualcoder.view_graph import ViewGraph
 from qualcoder.view_image import DialogCodeImage
 from qualcoder.ai_prompts import DialogAiEditPrompts
 from qualcoder.ai_llm import get_default_ai_models, update_ai_models
+from qualcoder.speakers import speaker_coder_name
 
 # Check if VLC installed, for warning message for code_av
 vlc = None
@@ -94,7 +95,7 @@ try:
 except Exception as e:
     print(e)
 
-qualcoder_version = "QualCoder 3.8"
+qualcoder_version = "QualCoder 3.9"
 path = os.path.abspath(os.path.dirname(__file__))
 home = os.path.expanduser('~')
 if not os.path.exists(home + '/.qualcoder'):
@@ -155,7 +156,7 @@ class ProjectLockHeartbeatWorker(QtCore.QObject):
                     with open(self.lock_file_path, 'w', encoding='utf-8') as lock_file:
                         lock_file.write(f"{getpass.getuser()}\n{str(time.time())}")
                     self.lost_connection = False
-                except Exception as e_:  # TODO Needs specific exception, printing to find out what is needed
+                except Exception as e_:
                     print(e_)
                     if not self.lost_connection:
                         self.io_error.emit()
@@ -347,33 +348,44 @@ class App(object):
             res.append(dict(zip(keys, row)))
         return res
 
-    def get_filenames(self):
-        """ Get all filenames. As id, name, memo
+    def get_filenames(self, ids=None):
+        """ Get all filenames.
+        Args:
+            ids: List of ids or none
 
         Returns:
-            List of dictionaries of id, name memo, mediapath
+            List of dictionaries of id, name memo, mediapath, date
         """
 
+        if ids is None:
+            ids = []
+        sql = "select id, name, ifnull(memo,''), date from source "
+        if ids:
+            ids_str = ",".join(map(str, ids))
+            sql += f" where id in ({ids_str}) "
+        sql += "order by lower(name)"
         cur = self.conn.cursor()
-        cur.execute("select id, name, ifnull(memo,'') from source order by lower(name)")
+        cur.execute(sql)
         result = cur.fetchall()
         res = []
+        keys = 'id', 'name', 'memo', 'date'
         for row in result:
-            res.append({'id': row[0], 'name': row[1], 'memo': row[2]})
+            res.append(dict(zip(keys, row)))
         return res
 
     def get_casenames(self):
         """ Get all case names. As id, name, memo.
         Returns:
-            List of dictionaries of name memo, id
+            List of dictionaries of name memo, id, date
         """
 
         cur = self.conn.cursor()
-        cur.execute("select caseid, name, ifnull(memo,'') from cases order by lower(name)")
+        cur.execute("select caseid, name, ifnull(memo,''), date from cases order by lower(name)")
         result = cur.fetchall()
         res = []
+        keys = 'id', 'name', 'memo', 'date'
         for row in result:
-            res.append({'id': row[0], 'name': row[1], 'memo': row[2]})
+            res.append(dict(zip(keys, row)))
         return res
 
     def get_text_filenames(self, ids=None):
@@ -383,12 +395,12 @@ class App(object):
             ids: list of Integer ids for a restricted list of files.
 
         Returns:
-            List of dictionaries of id, name memo, mediapath
+            List of dictionaries of id, name memo, mediapath, date
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,''), mediapath from source where (mediapath is Null or mediapath " \
+        sql = "select id, name, ifnull(memo,''), mediapath, date from source where (mediapath is Null or mediapath " \
               "like '/docs/%' or mediapath like 'docs:%') "
         if ids:
             ids_str = ",".join(map(str, ids))
@@ -398,7 +410,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -461,12 +473,12 @@ class App(object):
         Args:
             ids: list of Integer ids for a restricted list of files, or None.
         Returns:
-            List of dictionaries of id, name memo, mediapath
+            List of dictionaries of id, name memo, mediapath, date
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,''), mediapath from source where mediapath is not Null and(mediapath " \
+        sql = "select id, name, ifnull(memo,''), mediapath, date from source where mediapath is not Null and(mediapath " \
               "like '/docs/%' or mediapath like 'docs:%') and (mediapath like '%.pdf' or mediapath like '%.PDF')"
         if ids:
             ids_str = ",".join(map(str, ids))
@@ -476,7 +488,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -484,14 +496,14 @@ class App(object):
     def get_image_filenames(self, ids=None):
         """ Get filenames of image files only.
         Args:
-            ids: list of Integer ids for a restricted list of files, or Nonew.
+            ids: list of Integer ids for a restricted list of files, or None.
         Returns:
-            List of dictionaries of id, name, memo
+            List of dictionaries of id, name, memo, mediapath, date
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,'') from source where mediapath like '/images/%' or mediapath like 'images:%'"
+        sql = "select id, name, ifnull(memo,''), mediapath, date from source where mediapath like '/images/%' or mediapath like 'images:%'"
         if ids:
             ids_str = ",".join(map(str, ids))
             sql += f" and id in ({ids_str})"
@@ -500,8 +512,9 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
+        keys = 'id', 'name', 'memo', 'mediapath', 'date'
         for row in result:
-            res.append({'id': row[0], 'name': row[1], 'memo': row[2]})
+            res.append(dict(zip(keys, row)))
         return res
 
     def get_image_and_pdf_filenames(self, ids=None):
@@ -509,13 +522,13 @@ class App(object):
         Args:
             ids: list of Integer ids for a restricted list of files, or Nonew.
         Returns:
-            List of dictionaries of id, name, memo
+            List of dictionaries of id, name, memo, mediapath, date
         """
 
         if ids is None:
             ids = []
 
-        sql = "select id, name, ifnull(memo,'') from source where "
+        sql = "select id, name, ifnull(memo,''),mediapath, date from source where "
         sql += "(substr(mediapath,1,7) in ('/images', 'images:')) or "
         sql += "(lower(substr(mediapath, -4)) = '.pdf') "
 
@@ -527,8 +540,9 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
+        keys = 'id', 'name', 'memo', 'mediapath', 'date'
         for row in result:
-            res.append({'id': row[0], 'name': row[1], 'memo': row[2]})
+            res.append(dict(zip(keys, row)))
         return res
 
     def get_av_filenames(self, ids=None):
@@ -536,12 +550,12 @@ class App(object):
         Args:
             ids: list of Integer ids for a restricted list of files.
         Returns:
-            List of dictionaries of id, name, memo
+            List of dictionaries of id, name, memo, mediapath, date
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,'') from source where "
+        sql = "select id, name, ifnull(memo,''), mediapath, date from source where "
         sql += "(mediapath like '/audio/%' or mediapath like 'audio:%' or mediapath like '/video/%' or mediapath like 'video:%') "
         if ids:
             ids_str = ",".join(map(str, ids))
@@ -551,19 +565,19 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
+        keys = 'id', 'name', 'memo', 'mediapath', 'date'
         for row in result:
-            res.append({'id': row[0], 'name': row[1], 'memo': row[2]})
+            res.append(dict(zip(keys, row)))
         return res
 
     def get_annotations(self):
-        """ Get annotations for text files.
+        """ Get annotations for text files for all visible coders.
         Returns:
             List of dictionaries of anid, fid, memo, date, pos0, pos1, owner
         """
 
         cur = self.conn.cursor()
-        cur.execute("select anid, fid, pos0, pos1, memo, owner, date from annotation where owner=?",
-                    [self.settings['codername'], ])
+        cur.execute("select anid, fid, pos0, pos1, memo, owner, date from annotation_visible")
         result = cur.fetchall()
         res = []
         keys = 'anid', 'fid', 'pos0', 'pos1', 'memo', 'owner', 'date'
@@ -594,7 +608,7 @@ class App(object):
         for row in result:
             codes.append(dict(zip(keys, row)))
         return codes, categories
-
+    
     def check_bad_file_links(self):
         """ Check all linked files are present.
          Called from MainWindow.open_project, view_av.
@@ -641,6 +655,7 @@ class App(object):
             config[model_section]['large_model_context_window'] = model['large_model_context_window']
             config[model_section]['fast_model'] = model['fast_model']
             config[model_section]['fast_model_context_window'] = model['fast_model_context_window']
+            config[model_section]['reasoning_effort'] = model['reasoning_effort']
             config[model_section]['api_base'] = model['api_base']
             config[model_section]['api_key'] = model['api_key']
         
@@ -693,6 +708,7 @@ class App(object):
                     'large_model_context_window': config[section].get('large_model_context_window', '32768'),
                     'fast_model': config[section].get('fast_model', ''),
                     'fast_model_context_window': config[section].get('fast_model_context_window', '32768'),
+                    'reasoning_effort': config[section].get('reasoning_effort', ''),
                     'api_base': config[section].get('api_base', ''),
                     'api_key': config[section].get('api_key', '')
                 }
@@ -796,6 +812,8 @@ class App(object):
         QWidget:focus {border: 2px solid #f89407;}\n\
         QDialog {border: 1px solid #707070;}\n\
         QFileDialog {font-size: 12px}\n\
+        QFileDialog QListView {font-size: 12px;}\n\
+        QFileDialog QAbstractItemView {font-size: 12px;}\n\
         QCheckBox {border: None}\n\
         QCheckBox::indicator {border: 2px solid #808080; background-color: #2a2a2a;}\n\
         QCheckBox::indicator::checked {border: 2px solid #808080; background-color: orange;}\n\
@@ -846,17 +864,23 @@ class App(object):
         QTreeWidget {font-size: 12px;}\n\
         QTreeView {background-color: #484848}\n\
         QTreeView::branch:selected {border-left: 2px solid red; color: #eeeeee;}"
-        style_dark = style_dark.replace("* {font-size: 12", "* {font-size:" + str(settings.get('fontsize')))
+        style_dark = style_dark.replace("* {font-size: 12", f"* {{font-size: {settings.get('fontsize')}")
         style_dark = style_dark.replace("QFileDialog {font-size: 12",
-                                        "QFileDialog {font-size:" + str(settings.get('fontsize')))
+                                        f"QFileDialog {{font-size: {settings.get('fontsize')}")
+        style_dark = style_dark.replace("QFileDialog QListView {font-size: 12",
+                              f"QFileDialog QListView {{font-size: {settings.get('fontsize')}")
+        style_dark = style_dark.replace("QFileDialog QAbstractItemView {font-size: 12",
+                              f"QFileDialog QAbstractItemView {{font-size: {settings.get('fontsize')}")
         style_dark = style_dark.replace("QTreeWidget {font-size: 12",
-                                        "QTreeWidget {font-size: " + str(settings.get('treefontsize')))
+                                        f"QTreeWidget {{font-size: {settings.get('treefontsize')}")
         style = "* {font-size: 12px; color: #000000;}\n\
         QWidget {background-color: #efefef; color: #000000; border: none;}\n\
         QWidget:focus {border: 1px solid #f89407;}\n\
         QMainWindow {background-color: #efefef}\n\
         QDialog {border: 1px solid #808080; background-color: #efefef;}\n\
-        QFileDialog {font-size: 12px}\n\
+        QFileDialog {font-size: 12px;}\n\
+        QFileDialog QListView {font-size: 12px;}\n\
+        QFileDialog QAbstractItemView {font-size: 12px;}\n\
         QComboBox {border: 1px solid #707070; background-color: #fafafa;}\n\
         QComboBox:hover,QPushButton:hover {border: 2px solid #f89407;}\n\
         QGroupBox {border-right: 1px solid #707070; border-bottom: 1px solid #707070; background-color: #efefef}\n\
@@ -891,10 +915,15 @@ class App(object):
         QToolTip {background-color: #fffacd; color:#000000; border: 1px solid #f89407; }\n\
         QTreeWidget {font-size: 12px;}\n\
         QTreeView::branch:selected {border-left: 2px solid red; color: #000000;}"
-        style = style.replace("* {font-size: 12", "* {font-size:" + str(settings.get('fontsize')))
-        style = style.replace("QFileDialog {font-size: 12", "QFileDialog {font-size:" + str(settings.get('fontsize')))
+        style = style.replace("* {font-size: 12", f"* {{font-size: {settings.get('fontsize')}")
+        style = style.replace("QFileDialog {font-size: 12",
+                              f"QFileDialog {{font-size: {settings.get('fontsize')}")
+        style = style.replace("QFileDialog QListView {font-size: 12",
+                              f"QFileDialog QListView {{font-size: {settings.get('fontsize')}")
+        style = style.replace("QFileDialog QAbstractItemView {font-size: 12",
+                              f"QFileDialog QAbstractItemView {{font-size: {settings.get('fontsize')}")
         style = style.replace("QTreeWidget {font-size: 12",
-                              "QTreeWidget {font-size: " + str(settings.get('treefontsize')))
+                              f"QTreeWidget {{font-size: {settings.get('treefontsize')}")
         # Set the color for links (used in AI chat window and Settings dialog). The system default might be hard to read, especially in light themes. 
         palette = QtGui.QPalette()
         palette.setColor(QtGui.QPalette.ColorRole.Link, QtGui.QColor(self.highlight_color()))
@@ -940,8 +969,8 @@ class App(object):
         for i, sl in enumerate(style_lines):
             print(i + 1, sl)
         style_lines = style_lines[0:15]  # Test bed for parsing
-        style = "\n".join(style_lines)
-        print("\nSTYLE\n", style)'''
+        style = "\n".join(style_lines)'''
+        # print("\nSTYLE\n", style)
         return style
     
     def highlight_color(self):
@@ -1138,8 +1167,143 @@ class App(object):
         for row in cur.fetchall():
             result.append(dict(zip(keys, row)))
         return result
+    
+    def get_last_project_coder(self) -> str:
+        """Returns the last coder name stored in the project table or 
+        an empty string if nothing is found there (old dab version 1-4)"""
+        if self.conn is None:
+            return ""
+        cur = self.conn.cursor()
+        try:
+            cur.execute("SELECT codername FROM project")
+            res = cur.fetchone()
+            if res is not None and res[0] is not None:
+                return res[0]                   
+        except sqlite3.OperationalError: # db vers. 1-4 did not have codername in project table
+            return ""
+        
+    def update_coder_names(self):
+        """
+        Collects names from the 'owner' field in all tables, and updates the 
+        table 'coder_names' accordingly. The table will be created if not present.
+        
+        The function also creates views that filter out invisible coders for the 
+        following tables: 
+        code_image --> code_image_visible 
+        code_text  --> code_text_visible 
+        code_av    --> code_av_visible 
+        annotation --> annotation_visible
+        """
+        if self.conn is None:
+            return
+        system_coder_names = [speaker_coder_name] # in the future, we could add '🤖 AI' to the list, and more...
+        
+        cur = self.conn.cursor()
+        initial_changes = self.conn.total_changes
+        
+        try:
+            # create table 'coder_names' if not already present
+            sql = """
+                CREATE TABLE IF NOT EXISTS coder_names (
+                    name TEXT UNIQUE NOT NULL,
+                    visibility INTEGER NOT NULL DEFAULT 1 CHECK (visibility IN (0, 1))
+                );
+            """        
+            cur.execute(sql)
 
-    def get_coder_names_in_project(self):
+            # Collect used coder names from all tables and add them to 'coder_names'.
+            # Visibility will default to 1 (True)
+            sql = """
+                INSERT OR IGNORE INTO coder_names (name)
+                    SELECT owner FROM code_image WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM code_text WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM code_av WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM code_name WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM code_cat WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM cases WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM case_text WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM attribute WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM attribute_type WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM source WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM annotation WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM journal WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM manage_files_display WHERE owner IS NOT NULL
+                    UNION SELECT owner FROM files_filter WHERE owner IS NOT NULL;
+            """
+            cur.execute(sql)
+
+            # Ensure current coder is added and visible
+            sql = """
+                INSERT INTO coder_names (name, visibility) 
+                VALUES (?, 1) 
+                ON CONFLICT(name) 
+                DO UPDATE SET visibility = 1
+                WHERE coder_names.visibility <> 1
+            """
+            cur.execute(sql, (self.settings['codername'],))
+            
+            # Ensure last coder from project is added
+            last_project_coder = self.get_last_project_coder()
+            if last_project_coder != "":
+                cur.execute("INSERT OR IGNORE INTO coder_names (name) VALUES (?)", (last_project_coder, ))                    
+            
+            # Ensure system coder names are added
+            for name in system_coder_names:
+                cur.execute("INSERT OR IGNORE INTO coder_names (name) VALUES (?)", (name, ))
+            
+            # create views
+            cur.execute("""
+                CREATE VIEW IF NOT EXISTS code_image_visible AS
+                SELECT t.*
+                FROM code_image t
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM coder_names c
+                    WHERE c.name = t.owner
+                        AND c.visibility = 0
+                );
+            """)
+            cur.execute("""
+                CREATE VIEW IF NOT EXISTS code_text_visible AS
+                SELECT t.*
+                FROM code_text t
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM coder_names c
+                    WHERE c.name = t.owner
+                        AND c.visibility = 0
+                );
+            """)
+            cur.execute("""
+                CREATE VIEW IF NOT EXISTS code_av_visible AS
+                SELECT t.*
+                FROM code_av t
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM coder_names c
+                    WHERE c.name = t.owner
+                        AND c.visibility = 0
+                );
+            """)
+            cur.execute("""
+                CREATE VIEW IF NOT EXISTS annotation_visible AS
+                SELECT t.*
+                FROM annotation t
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM coder_names c
+                    WHERE c.name = t.owner
+                        AND c.visibility = 0
+                );
+            """)
+            if self.conn.total_changes != initial_changes:
+                self.delete_backup = False
+            self.conn.commit()
+        except:
+            self.conn.rollback()
+            raise
+    
+    def get_coder_names_in_project(self, only_visible=False):
         """ Get all coder names from all tables and from the config.ini file
         Design flaw is that current codername is not stored in a specific table in Database Versions 1 to 4.
         Coder name is stored in Database version 5.
@@ -1148,29 +1312,24 @@ class App(object):
         Returns:
             List of String coder names
         """
+        
+        if self.conn is None:
+            return [self.settings['codername']]
 
-        # Try except, as there may not be an open project, and might be an older <= v4 database
+        coder_names = []
         try:
+            self.update_coder_names()
             cur = self.conn.cursor()
-            cur.execute("select codername from project")
-            res = cur.fetchone()
-            if res[0] is not None:
-                self.settings['codername'] = res[0]
-        except sqlite3.OperationalError:
-            pass
-        # For versions 1 to 4, current coder name stored in the config.ini file, so is added here.
-        coder_names = [self.settings['codername']]
-        try:
-            cur = self.conn.cursor()
-            sql = "select owner from code_image union select owner from code_text union select owner from code_av "
-            sql += "union select owner from cases union select owner from source union select owner from code_name"
+            if only_visible:
+                sql = "select name from coder_names where visibility = 1"
+            else:
+                sql = "select name from coder_names"
             cur.execute(sql)
             res = cur.fetchall()
             for r in res:
-                if r[0] not in coder_names:
-                    coder_names.append(r[0])
+                coder_names.append(r[0])
         except sqlite3.OperationalError:
-            pass
+            pass        
         return coder_names
          
     def save_backup(self, suffix=""):
@@ -1211,7 +1370,23 @@ class App(object):
         # Delete backup path - delete the backup if no changes occurred in the project during the session
         self.delete_backup_path_name = backup
         return msg, backup
+        
+    def help_wiki(self, page_path):
+        """ Open website doc help page in https://qualcoder-org.github.io.
+        Assumes English pages are present as a default.
+        Args:
+            page_path : String : specific page
+        """
 
+        lang = self.settings['language']
+        try:
+            urllib.request.urlopen(f"https://qualcoder-org.github.io/doc/{lang}/{page_path}")
+        except urllib.error.HTTPError as err:
+            logger.warning(f"App.help_wiki:\nhttps://qualcoder-org.github.io/doc/{lang}/{page_path}\n{err}")
+            if err.code == 404:
+                lang = "en"
+        webbrowser.open(f"https://qualcoder-org.github.io/doc/{lang}/{page_path}")
+       
 
 class MainWindow(QtWidgets.QMainWindow):
     """ Main GUI window.
@@ -1291,7 +1466,7 @@ Click "Yes" to start now.')
                 while reply is None or reply == QtWidgets.QMessageBox.StandardButton.Help:
                     reply = msg_box.exec()
                     if reply == QtWidgets.QMessageBox.StandardButton.Help:
-                        webbrowser.open('https://github.com/ccbogel/QualCoder/wiki/2.3.-AI-Setup')                
+                        self.app.help_wiki("2.3.-AI-Setup")                
                 if reply == QtWidgets.QMessageBox.StandardButton.Yes:
                     self.ai_setup_wizard()  # (will also init the llm)
             else:
@@ -1345,7 +1520,10 @@ Click "Yes" to start now.')
         self.ui.actionManage_bad_links_to_files.triggered.connect(self.manage_bad_file_links)
         self.ui.actionManage_references.setShortcut('Alt+R')
         self.ui.actionManage_references.triggered.connect(self.manage_references)
-        self.ui.actionImport_twitter_data.triggered.connect(self.import_twitter)
+        # Expect twitter / X is not used now
+        # self.ui.actionImport_twitter_data.triggered.connect(self.import_twitter)
+        self.ui.actionImport_twitter_data.setVisible(False)
+        self.ui.menuImport.removeAction(self.ui.actionImport_twitter_data)  # Line does not work
         # Coding menu
         self.ui.actionCodes.triggered.connect(self.text_coding)
         self.ui.actionCodes.setShortcut('Alt+T')
@@ -1497,7 +1675,7 @@ Click "Yes" to start now.')
         self.ui.actionImport_survey_2.setEnabled(False)
         self.ui.actionManage_bad_links_to_files.setEnabled(False)
         self.ui.actionManage_references.setEnabled(False)
-        self.ui.actionImport_twitter_data.setEnabled(False)
+        #self.ui.actionImport_twitter_data.setEnabled(False)
         # Coding menu
         self.ui.actionCodes.setEnabled(False)
         self.ui.actionCode_image.setEnabled(False)
@@ -1546,7 +1724,7 @@ Click "Yes" to start now.')
         self.ui.actionManage_attributes.setEnabled(True)
         self.ui.actionImport_survey_2.setEnabled(True)
         self.ui.actionManage_references.setEnabled(True)
-        self.ui.actionImport_twitter_data.setEnabled(True)
+        #self.ui.actionImport_twitter_data.setEnabled(True)
         # Coding menu
         self.ui.actionCodes.setEnabled(True)
         self.ui.actionCode_image.setEnabled(True)
@@ -1727,11 +1905,10 @@ Click "Yes" to start now.')
         ui.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
         self.tab_layout_helper(self.ui.tab_reports, ui)
 
-    @staticmethod
-    def help():
+    def help(self):
         """ Display manual in browser. """
 
-        webbrowser.open("https://github.com/ccbogel/QualCoder/wiki")
+        self.app.help_wiki("")
 
     def display_menu_key_shortcuts(self):
         self.ui.textEdit.append(menu_shortcuts_display)
@@ -1792,7 +1969,7 @@ Click "Yes" to start now.')
         ui = DialogImportSurvey(self.app, self.ui.textEdit)
         self.tab_layout_helper(self.ui.tab_manage, ui)
 
-    def import_twitter(self):
+    '''def import_twitter(self):
         """ Import twitter flat sheet: csv file.
         Create cases by User name.
         Create qualitative text files for each tweet.
@@ -1800,7 +1977,7 @@ Click "Yes" to start now.')
 
         self.ui.label_manage.hide()
         ui = DialogImportTwitterData(self.app, self.ui.textEdit)
-        self.tab_layout_helper(self.ui.tab_manage, ui)
+        self.tab_layout_helper(self.ui.tab_manage, ui)'''
 
     def manage_cases(self):
         """ Create, edit, delete, rename cases, add cases to files or parts of
@@ -1816,7 +1993,7 @@ Click "Yes" to start now.')
         """
 
         self.ui.label_manage.hide()
-        ui = DialogManageFiles(self.app, self.ui.textEdit, self.ui.tab_coding, self.ui.tab_reports)
+        ui = DialogManageFiles(self.app, self.ui.textEdit, self.ui.tab_coding, self.ui.tab_reports, self)
         self.tab_layout_helper(self.ui.tab_manage, ui)
 
     def manage_bad_file_links(self):
@@ -1862,7 +2039,12 @@ Click "Yes" to start now.')
                 if doc_id is not None:
                     ui.open_doc_selection(doc_id, doc_sel_start, doc_sel_end)
             elif task == 'ai_search':
-                ui.ui.tabWidget.setCurrentWidget(ui.ui.tab_ai)               
+                ui.ui.tabWidget.setCurrentWidget(ui.ui.tab_ai)
+            elif task == 'mark_speakers':
+                ui.ui.tabWidget.setCurrentWidget(ui.ui.tab_docs)
+                if doc_id is not None:
+                    ui.open_doc_selection(doc_id, doc_sel_start, doc_sel_end)
+                    ui.mark_speakers()                               
         else:
             msg = _("This project contains no text files.")
             Message(self.app, _('No text files'), msg).exec()
@@ -2089,6 +2271,8 @@ Click "Yes" to start now.')
         v10 has code_image.pdf_page integer added
         v11 has gr_pix_item.pdf_page integer added
         v12 has manage_files_display table added. For Table display profile.
+        v13 creates table files_filter?
+        v14 has coder_names table added to store codernames and their visibility status
         """
 
         self.journal_display = None
@@ -2201,8 +2385,9 @@ Click "Yes" to start now.')
         cur.execute("CREATE TABLE ris (risid integer, tag text, longtag text, value text);")
         cur.execute("CREATE TABLE manage_files_display (mfid integer primary key, name text, tblrows text, tblcolumns text, owner text);")
         cur.execute("CREATE TABLE files_filter (filterid integer primary key, name text, filter text, owner text);")
+        self.app.update_coder_names() # will create table coder_names, add current coder, create views, etc.
         cur.execute("INSERT INTO project VALUES(?,?,?,?,?,?,?,?)",
-                    ('v13', datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"), '', qualcoder_version, 0,
+                    ('v14', datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"), '', qualcoder_version, 0,
                      0, self.app.settings['codername'], ""))
         self.app.conn.commit()
         try:
@@ -2277,9 +2462,10 @@ Click "Yes" to start now.')
         else:  
             self.app.ai.close()
             
-        # Name change: Close all opened dialogs as coder name needs to change everywhere
-        if current_coder != self.app.settings['codername']:
-            self.ui.textEdit.append(_("Coder name changed to: ") + self.app.settings['codername'])
+        # Change in coder names: Close all opened dialogs as coder names needs to change everywhere
+        if ui.coder_names_changes:
+            if current_coder != self.app.settings['codername']:
+                self.ui.textEdit.append(_("Coder name changed to: ") + self.app.settings['codername'])
             # Remove widgets from each tab
             contents = self.ui.tab_reports.layout()
             if contents:
@@ -2495,13 +2681,31 @@ Click "Yes" to start now.')
         # Potential design flaw to have the current coders name in the config.ini file (early versions of QC).
         # as it would change to this coder when opening different projects
         # Check that the coder name from setting ini file is in the project
-        # If not then replace with a name in the project
+        # If not then user is asked if they want to switch.
         # Database version 5 (QualCoder 2.8 and newer) stores the current coder in the project table
-        names = self.app.get_coder_names_in_project()
-        if self.app.settings['codername'] not in names and len(names) > 0:
-            self.app.settings['codername'] = names[0]
-            self.app.write_config_ini(self.app.settings, self.app.ai_models)
-            self.ui.textEdit.append(_("Default coder name changed to: ") + names[0])
+        last_project_coder = self.app.get_last_project_coder()
+        if last_project_coder != "" and last_project_coder != self.app.settings['codername']:
+            msg = _('Your current coder name ("{}") differs from the one last used in the project ("{}"). Do you want to keep your current name or switch to the one from the project?'.format(
+                self.app.settings['codername'], last_project_coder)
+            )
+            msg_box = Message(self.app, _('Coder name'), msg, 'warning')
+            msg_box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.NoButton)  # Clear default buttons
+            keep_button = msg_box.addButton(_('Keep'), QtWidgets.QMessageBox.ButtonRole.YesRole)
+            switch_button = msg_box.addButton(_('Switch'), QtWidgets.QMessageBox.ButtonRole.NoRole)
+            cancel_button = msg_box.addButton(_('Cancel'), QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            msg_box.setDefaultButton(keep_button) 
+            msg_box.exec()
+            res = msg_box.clickedButton()
+            if res == keep_button:
+                pass                
+            elif res == switch_button:
+                self.app.settings['codername'] = last_project_coder
+                self.app.write_config_ini(self.app.settings, self.app.ai_models)
+                self.ui.textEdit.append(_("Default coder name changed to: ") + last_project_coder)                
+            else:  # Cancel or closed
+                self.close_project()                
+                return
+
         # Display some project details
         self.app.append_recent_project(self.app.project_path)
         self.fill_recent_projects_menu_actions()
@@ -2732,15 +2936,6 @@ Click "Yes" to start now.')
             self.app.conn.commit()
             self.ui.textEdit.append(_("Updating database to version") + " v11")
 
-        # Save a date and 24 hour stamped backup
-        if self.app.settings['backup_on_open'] == 'True' and newproject == "no":
-            msg, backup_name = self.app.save_backup()
-            self.ui.textEdit.append(msg)
-        msg = f"\n{_('Project Opened: ')}{self.app.project_name}"
-        self.ui.textEdit.append(msg)
-        self.project_summary_report()
-        self.show_menu_options()
-
         # Database version v12
         try:
             cur.execute("select name from manage_files_display")
@@ -2757,6 +2952,14 @@ Click "Yes" to start now.')
             cur.execute('update project set databaseversion="v13", about=?', [qualcoder_version])
             self.app.conn.commit()
             self.ui.textEdit.append(_("Updating database to version") + " v13")
+        # Database version v14
+        try:
+            cur.execute("select name from coder_names")
+        except sqlite3.OperationalError:
+            self.app.update_coder_names() # will create table coder_names, add current coder, create views, etc.
+            cur.execute('update project set databaseversion="v14", about=?', [qualcoder_version])
+            self.app.conn.commit()
+            self.ui.textEdit.append(_("Updating database to version") + " v14")
 
         # Delete codings (fid, id) that do not have a matching source id
         sql = "select fid from code_text where fid not in (select source.id from source)"
@@ -2791,11 +2994,16 @@ Click "Yes" to start now.')
         cur.execute("vacuum")
         self.app.conn.commit()
         
+        # Update coder_names table and current coder in project
+        self.app.update_coder_names()
+        cur.execute('update project set codername=?', [self.app.settings['codername']])
+        self.app.conn.commit()
+        
         # AI: init llm and update vectorstore
         self.app.ai.init_llm(self)
         self.ai_chat_window.init_ai_chat(self.app)
         
-        # Fix missing folders within QualCoder project. Will cause import errors.
+        # Fix missing folders within QualCoder project. Otherwise, will cause import errors.
         span = '<span style="color:red">'
         end_span = "</span>"
         missing_folders = False
@@ -2817,6 +3025,15 @@ Click "Yes" to start now.')
             missing_folders = True
         if missing_folders:
             Message(self.app, _("Information"), _("QualCoder project missing folders. Created empty folders")).exec()
+
+        # Save a date and 24 hour stamped backup
+        if self.app.settings['backup_on_open'] == 'True' and newproject == "no":
+            msg, backup_name = self.app.save_backup()
+            self.ui.textEdit.append(msg)
+        msg = f"\n{_('Project Opened: ')}{self.app.project_name}"
+        self.ui.textEdit.append(msg)
+        self.project_summary_report()
+        self.show_menu_options()
 
     def project_summary_report(self):
         """ Add a summary of the project to the text edit.
@@ -3234,7 +3451,7 @@ def install_droid_sans_mono():
 def install_noto_sans():
     """ Install NotoSans ttf font for general application into .qualcoder folder """
 
-    qc_folder = os.path.join(home, '.qualcoder', 'NotoSans.ttf')
+    qc_folder = os.path.join(home, '.qualcoder', 'NotoSans-Regular.ttf')
     with open(qc_folder, 'wb') as file_:
         decoded_data = base64.decodebytes(NotoSans)
         file_.write(decoded_data)

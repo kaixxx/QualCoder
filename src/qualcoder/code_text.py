@@ -9,14 +9,15 @@ Foundation, either version 3 of the License, or (at your option) any later versi
 
 QualCoder is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
 without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-See the GNU General Pu
-blic License for more details.
+See the GNU General Public License for more details.
 
 You should have received a copy of the GNU Lesser General Public License along with QualCoder.
 If not, see <https://www.gnu.org/licenses/>.
 
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
+https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 import sqlite3
@@ -49,6 +50,8 @@ from .reports import DialogReportCoderComparisons, DialogReportCodeFrequencies  
 from .report_codes import DialogReportCodes
 from .report_code_summary import DialogReportCodeSummary  # For isinstance()
 from .select_items import DialogSelectItems  # For isinstance()
+from .speakers import DialogSpeakers, speaker_coder_name
+from .coder_names import DialogCoderNames
 from .ai_search_dialog import DialogAiSearch
 from .ai_prompts import PromptsList, DialogAiEditPrompts
 from .ai_chat import ai_chat_signal_emitter
@@ -75,7 +78,7 @@ class DialogCodeText(QtWidgets.QWidget):
     recent_codes = []  # List of recent codes (up to 5) for textedit context menu
     categories = []
     tree_sort_option = "all asc"  # all desc, cat then code asc
-    filenames = []
+    files = []
     file_ = None  # Contains filename and file id returned from SelectItems
     code_text = []
     annotations = []
@@ -95,7 +98,8 @@ class DialogCodeText(QtWidgets.QWidget):
     attributes = []  # Show selected files using these attributes in list widget
 
     # Autocode variables
-    all_first_last = "all"  # Autocode all instances or first or last in a file
+    autocode_all_first_last_within = "all"  # Autocode all instances or first or last, or within another code in a file
+    autocode_frag_all_first_within = "all"  # Autocode all instances or within another code in a file
     # A list of dictionaries of autocode history {title, list of dictionary of sql commands}
     autocode_history = []
 
@@ -154,6 +158,8 @@ class DialogCodeText(QtWidgets.QWidget):
         self.annotations = self.app.get_annotations()
         self.autocode_history = []
         self.undo_deleted_codes = []
+        self.autocode_all_first_last_within = "all"
+        self.autocode_frag_all_first_within = "all"
         self.default_new_code_color = None
         self.project_memo = False
         self.code_rule = False
@@ -188,22 +194,23 @@ class DialogCodeText(QtWidgets.QWidget):
         tree_font = f'font: {self.app.settings["treefontsize"]}pt "{self.app.settings["font"]}";'
         self.ui.treeWidget.setStyleSheet(tree_font)
         doc_font = f'font: {self.app.settings["docfontsize"]}pt "{self.app.settings["font"]}";'
-        self.ui.textEdit.setStyleSheet(doc_font)
-        self.ui.label_coder.setText(f"Coder: {self.app.settings['codername']}")
-        self.ui.textEdit.setPlainText("")
-        self.ui.textEdit.setAutoFillBackground(True)
-        self.ui.textEdit.setToolTip("")
-        self.ui.textEdit.setMouseTracking(True)
-        self.ui.textEdit.setTextInteractionFlags(
+        self.ui.plainTextEdit.setStyleSheet(doc_font)
+        self.ui.lineEdit_coder.setText(self.app.settings['codername'])
+        self.ui.pushButton_coder.clicked.connect(self.edit_coder_names)
+        self.ui.plainTextEdit.setPlainText("")
+        self.ui.plainTextEdit.setAutoFillBackground(True)
+        self.ui.plainTextEdit.setToolTip("")
+        self.ui.plainTextEdit.setMouseTracking(True)
+        self.ui.plainTextEdit.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse | 
             Qt.TextInteractionFlag.TextSelectableByKeyboard  
         )        
-        self.ui.textEdit.installEventFilter(self)
+        self.ui.plainTextEdit.installEventFilter(self)
         self.eventFilterTT = ToolTipEventFilter()
-        self.ui.textEdit.installEventFilter(self.eventFilterTT)
-        self.ui.textEdit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.ui.textEdit.customContextMenuRequested.connect(self.text_edit_menu)
-        self.ui.textEdit.cursorPositionChanged.connect(self.overlapping_codes_in_text)
+        self.ui.plainTextEdit.installEventFilter(self.eventFilterTT)
+        self.ui.plainTextEdit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.plainTextEdit.customContextMenuRequested.connect(self.text_edit_menu)
+        self.ui.plainTextEdit.cursorPositionChanged.connect(self.overlapping_codes_in_text)
         self.ui.textEdit_info.setReadOnly(True)
         self.ui.listWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ui.listWidget.customContextMenuRequested.connect(self.file_menu)
@@ -215,6 +222,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.lineEdit_search.returnPressed.connect(self.search_for_text)
         self.ui.tabWidget.currentChanged.connect(self.tab_changed)
         self.ui.tabWidget.setCurrentIndex(0)  # Defaults to list of documents
+        self.files = []
         self.get_files()
 
         # Buttons under files list
@@ -258,11 +266,15 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.pushButton_coding_memo.pressed.connect(self.coded_text_memo)
         self.ui.pushButton_show_memos.setIcon(qta.icon('mdi6.text-search', options=[{'scale_factor': 1.3}]))
         self.ui.pushButton_show_memos.pressed.connect(self.show_memos)
+        self.ui.pushButton_mark_speakers.setIcon(qta.icon('mdi6.pin-outline', options=[{'scale_factor': 1.3}]))
+        self.ui.pushButton_mark_speakers.pressed.connect(self.mark_speakers)
         self.ui.pushButton_auto_code.setIcon(qta.icon('mdi6.mace'))
         self.ui.pushButton_auto_code.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ui.pushButton_auto_code.customContextMenuRequested.connect(self.button_auto_code_menu)
         self.ui.pushButton_auto_code.clicked.connect(self.auto_code)
         self.ui.pushButton_auto_code_frag_this_file.setIcon(qta.icon('mdi6.magic-staff'))
+        self.ui.pushButton_auto_code_frag_this_file.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.pushButton_auto_code_frag_this_file.customContextMenuRequested.connect(self.button_auto_code_frag_menu)
         self.ui.pushButton_auto_code_frag_this_file.pressed.connect(self.auto_code_sentences)
         self.ui.pushButton_auto_code_surround.setIcon(qta.icon('mdi6.spear'))
         self.ui.pushButton_auto_code_surround.pressed.connect(self.button_autocode_surround)
@@ -307,7 +319,6 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.treeWidget.viewport().installEventFilter(self)
         self.ui.treeWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ui.treeWidget.customContextMenuRequested.connect(self.tree_menu)
-        #self.ui.treeWidget.itemSelectionChanged.connect(self.fill_code_label_with_selected_code)
         self.ui.treeWidget.itemPressed.connect(self.fill_code_label_with_selected_code)
         self.ui.comboBox_export.currentIndexChanged.connect(self.export_option_selected)
         index = self.ui.comboBox_fontsize.findText(str(self.app.settings['docfontsize']),
@@ -333,7 +344,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.leftsplitter.splitterMoved.connect(self.update_sizes)
 
         # Add paragraph numbers widget
-        self.number_bar = NumberBar(self.ui.textEdit)
+        self.number_bar = NumberBar(self.ui.plainTextEdit)
         layout = QtWidgets.QVBoxLayout(self.ui.lineNumbers)
         layout.setContentsMargins(0, 0, 0, 0)  # Remove margins if needed
         layout.addWidget(self.number_bar)
@@ -364,16 +375,12 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ai_include_coded_segments = None
         self.ai_search_analysis_counter = 0
 
-    @staticmethod
-    def help():
+    def help(self):
         """ Open help for transcribe section in browser. """
-
-        url = "https://github.com/ccbogel/QualCoder/wiki/4.1.-Coding-Text"
-        webbrowser.open(url)
+        self.app.help_wiki("4.1.-Coding-Text")
 
     def show_right_side_pane(self):
         """ Button press to show hidden right side pane. """
-
         self.ui.splitter.setSizes([150, 300, 100])
 
     def set_default_new_code_color(self):
@@ -394,7 +401,7 @@ class DialogCodeText(QtWidgets.QWidget):
         """ Combobox font size changed, range: 8 - 22 points. """
 
         font = f'font: {self.ui.comboBox_fontsize.currentText()}pt "{self.app.settings["font"]}";'
-        self.ui.textEdit.setStyleSheet(font)
+        self.ui.plainTextEdit.setStyleSheet(font)
 
     def find_code_in_tree(self):
         """ Find a code by name in the codes tree and select it.
@@ -465,7 +472,7 @@ class DialogCodeText(QtWidgets.QWidget):
         This will fill the self.app.collapsed_categories and is the expanded/collapsed tree is then replicated across
         other areas of the app. """
 
-        #print(item.text(0), item.text(1), "Expanded:", item.isExpanded())
+        # print(item.text(0), item.text(1), "Expanded:", item.isExpanded())
         if item.text(1)[:3] == "cid":
             return
         if not item.isExpanded() and item.text(1) not in self.app.collapsed_categories:
@@ -473,43 +480,69 @@ class DialogCodeText(QtWidgets.QWidget):
         if item.isExpanded() and item.text(1) in self.app.collapsed_categories:
             self.app.collapsed_categories.remove(item.text(1))
 
-    def get_files(self, ids=None):
+    def get_files(self, ids=None, sort="name asc"):
         """ Get files with additional details and fill list widget.
          Called by: init, get_files_from_attributes, show_files_like
          Args:
             ids : list, fill with ids to limit file selection.
+            sort : String Sort options, name asc, name, desc, case asc, case desc
          """
 
         if ids is None:
             ids = []
         self.ui.listWidget.clear()
-        self.filenames = self.app.get_text_filenames(ids)
+        self.files = self.app.get_text_filenames(ids)
         # Fill additional details about each file in the memo
         cur = self.app.conn.cursor()
-        sql = "select length(fulltext), fulltext from source where id=?"
-        sql_codings = "select count(cid) from code_text where fid=? and owner=?"
-        for file_ in self.filenames:
-            cur.execute(sql, [file_['id'], ])
-            res = cur.fetchone()
-            if res is None:  # Safety catch
-                res = [0, ""]
-            tt = _("Characters: ") + str(res[0])
-            file_['characters'] = res[0]
+        sql_length = "select length(fulltext), fulltext from source where id=?"
+        sql_codings = "select count(cid) from code_text_visible where fid=?"
+        sql_case = "SELECT group_concat(cases.name) from cases join case_text on case_text.caseid=cases.caseid " \
+                   "where case_text.fid=?"
+        for file_ in self.files:
+            cur.execute(sql_length, [file_['id'], ])
+            res_length = cur.fetchone()
+            if res_length is None:  # Safety catch
+                res_length = [0, ""]
+            tt = _("Date: ") + file_['date'].split()[0] + "\n"  # Date without timestamp
+            cur.execute(sql_case, [file_['id']])
+            res_cases = cur.fetchone()
+            file_['case'] = ""
+            if res_cases and res_cases[0] is not None:
+                tt += _("Case: ") + str(res_cases[0]) + "\n"
+                file_['case'] = str(res_cases[0])
+            tt += _("Characters: ") + str(res_length[0])
+            file_['characters'] = res_length[0]
             file_['start'] = 0
-            file_['end'] = res[0]
-            file_['fulltext'] = res[1]
-            cur.execute(sql_codings, [file_['id'], self.app.settings['codername']])
-            res = cur.fetchone()
-            tt += f'\n{_("Codings:")} {res[0]}'
+            file_['end'] = res_length[0]
+            file_['fulltext'] = res_length[1]
+            cur.execute(sql_codings, [file_['id']])
+            res_codings = cur.fetchone()
+            tt += f'\n{_("Codings:")} {res_codings[0]}'
             tt += f"\n{_('From:')} {file_['start']} - {file_['end']}"
-            item = QtWidgets.QListWidgetItem(file_['name'])
             if file_['memo'] != "":
                 tt += f"\nMemo: {file_['memo']}"
-            item.setToolTip(tt)
+            file_['tooltip'] = tt
+        # Sorting the file list
+        if sort == "name asc":
+            self.files = sorted(self.files, key=lambda x: x['name'])
+        if sort == "name desc":
+            self.files = sorted(self.files, key=lambda x: x['name'], reverse=True)
+        if sort == "case asc":
+            self.files = sorted(self.files, key=lambda x: x['case'])
+        if sort == "case desc":
+            self.files = sorted(self.files, key=lambda x: x['case'], reverse=True)
+        if sort == "date asc":
+            self.files = sorted(self.files, key=lambda x: x['date'])
+        if sort == "date desc":
+            self.files = sorted(self.files, key=lambda x: x['date'], reverse=True)
+        # Fill list widget
+        for file_ in self.files:
+            item = QtWidgets.QListWidgetItem(file_['name'])
+            item.setToolTip(file_['tooltip'])
             self.ui.listWidget.addItem(item)
         self.file_ = None
         self.code_text = []  # Must be before clearing textEdit, as next calls cursorChanged
-        self.ui.textEdit.setText("")
+        self.ui.plainTextEdit.setPlainText("")
 
     def update_file_tooltip(self):
         """ Create tooltip for file containing characters, codings and from: to: if partially loaded.
@@ -526,8 +559,8 @@ class DialogCodeText(QtWidgets.QWidget):
             res = [0, ""]
         tt = _("Characters: ") + str(res[0])
         file_size = {'characters': res[0], 'start': 0, 'end': res[0], 'fulltext': res[1]}
-        sql_codings = "select count(cid) from code_text where fid=? and owner=?"
-        cur.execute(sql_codings, [self.file_['id'], self.app.settings['codername']])
+        sql_codings = "select count(cid) from code_text_visible where fid=?"
+        cur.execute(sql_codings, [self.file_['id']])
         res = cur.fetchone()
         tt += f"\n{_('Codings:')} {res[0]}"
         tt += f"\n{_('From:')} {file_size['start']} - {file_size['end']}"
@@ -613,7 +646,7 @@ class DialogCodeText(QtWidgets.QWidget):
                     tt += _("Memo: ") + c['memo']
                 self.ui.label_code.setToolTip(tt)
                 break
-        selected_text = self.ui.textEdit.textCursor().selectedText()
+        selected_text = self.ui.plainTextEdit.textCursor().selectedText()
         if len(selected_text) > 0:
             self.mark()
         # When a code is selected undo the show selected code features
@@ -751,51 +784,85 @@ class DialogCodeText(QtWidgets.QWidget):
         self.fill_code_counts_in_tree()
 
     def fill_code_counts_in_tree(self):
-        """ Count instances of each code for current coder and in the selected file.
+        """ Calculate the frequency of each code and category for this coder and the selected file.
+        Add a list item to each code that can be used to display in treeWidget.
         If the tab 'AI assisted coding' is active, the codings will be counted
         across all files, not only the currently selected one, because the AI assisted 
-        coding is not working on a per-file basis.    
-        Called by: fill_tree, tab_changed
+        coding is not working on a per-file basis.
         """
-
-        ai_mode = self.ui.tabWidget.currentIndex() == 1
+        
+        ai_assisted_coding = self.ui.tabWidget.currentIndex() == 1
+        if self.file_ is None and not ai_assisted_coding:
+            # delete count if no file selected
+            iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+            while iterator.value():
+                item = iterator.value()
+                item.setText(3, '')
+                iterator += 1  # Move to the next item
+            return
+            
         cur = self.app.conn.cursor()
-        if ai_mode:
-            sql = "select count(cid) from code_text where cid=? and owner=?"
-        else:  # documents
-            sql = "select count(cid) from code_text where cid=? and fid=? and owner=?"
-        it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
-        item = it.value()
-        count = 0
-        while item and count < 10000:
-            if item.text(1)[0:4] == "cid:":
-                cid = str(item.text(1)[4:])
-                try:
-                    if ai_mode:
-                        cur.execute(sql, [cid, self.app.settings['codername']])
-                        result = cur.fetchone()
-                    else:  # document mode
-                        if self.file_ is None:
-                            result = [0]  # will delete the count because no file is selected
-                        else:
-                            cur.execute(sql, [cid, self.file_['id'], self.app.settings['codername']])
-                            result = cur.fetchone()
-                    if result[0] > 0:
-                        item.setText(3, str(result[0]))
-                        item.setToolTip(3, self.app.settings['codername'])
-                    else:
-                        item.setText(3, "")
-                except Exception as e:
-                    msg = f"Fill code counts error\n{e}\n{sql}\ncid: {cid}\n"
-                    if not ai_mode:
-                        msg += f"self.file_['id']: {self.file_['id']}\n"
-                    else:
-                        msg += '(AI assisted coding)\n'
-                    logger.debug(msg)
-                    item.setText(3, "")
-            it += 1
-            item = it.value()
-            count += 1
+        code_counts = []
+        for c in self.codes:
+            parameters = [c['cid']]
+            if ai_assisted_coding:
+                sql = "select code_name.catid, count(code_text_visible.cid) from code_text_visible join code_name " \
+                      "on code_name.cid=code_text_visible.cid where code_text_visible.cid=?"
+            else:  # documents
+                sql = "select code_name.catid, count(code_text_visible.cid) from code_text_visible join code_name " \
+                      "on code_name.cid=code_text_visible.cid where code_text_visible.cid=?" \
+                       "and code_text_visible.fid=?"
+                parameters.append(self.file_['id'])
+            cur.execute(sql, parameters)
+            result = cur.fetchone()
+            code_counts.append([c['cid'], result[0], result[1]])
+        categories = deepcopy(self.categories)
+        # Set up category counts
+        for category in categories:
+            category['count'] = 0
+        # Add the number of codes directly under each category to the category
+        for category in categories:
+            for code in code_counts:
+                if code[1] == category['catid']:
+                    category['count'] += code[2]
+        # Find leaf categories, add to above categories, and gradually remove leaves
+        # until only top categories are left
+        sub_categories = copy(categories)
+        counter = 0
+        while len(sub_categories) > 0 or counter < 10000:
+            leaf_list = []
+            branch_list = []
+            for cat in sub_categories:
+                for cat2 in sub_categories:
+                    if cat['catid'] == cat2['supercatid']:
+                        branch_list.append(cat)
+            for category in sub_categories:
+                if category not in branch_list:
+                    leaf_list.append(category)
+            # Add totals higher category
+            for leaf_category in leaf_list:
+                for category in categories:
+                    if category['catid'] == leaf_category['supercatid']:
+                        category['count'] += leaf_category['count']
+                sub_categories.remove(leaf_category)
+            counter += 1
+
+        # Fill tree item counts
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            item = iterator.value()
+            if item.text(1).startswith("catid"):
+                catid = int(item.text(1)[6:])
+                for category in categories:
+                    if catid == category['catid']:
+                        item.setText(3, str(category['count']))
+            else:
+                cid = int(item.text(1)[4:])
+                for code in code_counts:
+                    if cid == code[0]:
+                        item.setText(3, str(code[2]))
+                        break
+            iterator += 1  # Move to the next item
 
     def get_codes_and_categories(self):
         """ Called from init, delete category/code.
@@ -829,7 +896,7 @@ class DialogCodeText(QtWidgets.QWidget):
             # Get coded examples
             txt += "\n\n" + _("Examples:") + "\n"
             cur = self.app.conn.cursor()
-            cur.execute("select seltext from code_text where length(seltext) > 0 and cid=? order by random() limit 3",
+            cur.execute("select seltext from code_text_visible where length(seltext) > 0 and cid=? order by random() limit 3",
                         [int(selected.text(1)[4:])])
             res = cur.fetchall()
             for i, r in enumerate(res):
@@ -937,7 +1004,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.search_index += 1
         if self.search_index >= len(self.search_indices):
             self.search_index = 0
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         next_result = self.search_indices[self.search_index]
         # next_result is a tuple containing a dictionary of
         # ({name, id, fullltext, memo, owner, date}, char position, search string length)
@@ -950,12 +1017,11 @@ class DialogCodeText(QtWidgets.QWidget):
             self.load_file(next_result[0])
             self.ui.lineEdit_search.setText(self.search_term)
         cursor.setPosition(cursor.position() + next_result[2])
-        self.ui.textEdit.setTextCursor(cursor)
-
+        self.ui.plainTextEdit.setTextCursor(cursor)
         # Highlight selected text
         cursor.setPosition(next_result[1])
         cursor.setPosition(cursor.position() + next_result[2], QtGui.QTextCursor.MoveMode.KeepAnchor)
-        self.ui.textEdit.setTextCursor(cursor)
+        self.ui.plainTextEdit.setTextCursor(cursor)
         self.ui.label_search_totals.setText(f"{self.search_index + 1} / {len(self.search_indices)}")
         self.scroll_text_into_view()
 
@@ -967,7 +1033,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.search_index -= 1
         if self.search_index < 0:
             self.search_index = len(self.search_indices) - 1
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         prev_result = self.search_indices[self.search_index]
         # prev_result is a tuple containing a dictionary of
         # (name, id, fullltext, memo, owner, date) and char position and search string length
@@ -976,7 +1042,7 @@ class DialogCodeText(QtWidgets.QWidget):
             self.ui.lineEdit_search.setText(self.search_term)
         cursor.setPosition(prev_result[1])
         cursor.setPosition(cursor.position() + prev_result[2], QtGui.QTextCursor.MoveMode.KeepAnchor)
-        self.ui.textEdit.setTextCursor(cursor)
+        self.ui.plainTextEdit.setTextCursor(cursor)
         self.ui.label_search_totals.setText(f"{self.search_index + 1} / {len(self.search_indices)}")
         self.scroll_text_into_view()
 
@@ -985,7 +1051,7 @@ class DialogCodeText(QtWidgets.QWidget):
          Enter is alway a search option. """
 
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         action_char3 = QtGui.QAction(_("Automatic search 3 or more characters"))
         action_char5 = QtGui.QAction(_("Automatic search 5 or more characters"))
         if self.search_type != 3:
@@ -998,56 +1064,116 @@ class DialogCodeText(QtWidgets.QWidget):
         if action == action_char3:
             self.search_type = 3
             self.ui.lineEdit_search.textEdited.connect(self.search_for_text)
-            # self.ui.lineEdit_search.returnPressed.disconnect(self.search_for_text)
             return
         if action == action_char5:
             self.search_type = 5
             self.ui.lineEdit_search.textEdited.connect(self.search_for_text)
-            # self.ui.lineEdit_search.returnPressed.disconnect(self.search_for_text)
             return
 
     def button_auto_code_menu(self, position):
-        """ Options to auto-code all instances, first instance or last instance in a file. """
+        """ Options to auto-code all instances, first instance or last instance in a file.
+        For Exact text matches. """
 
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         msg = ""
-        if self.all_first_last == "all":
+        if self.autocode_all_first_last_within == "all":
             msg = " *"
         else:
             msg = ""
         action_all = QtGui.QAction(_("all matches in file") + msg)
-        if self.all_first_last == "first":
+        if self.autocode_all_first_last_within == "first":
             msg = " *"
         else:
             msg = ""
         action_first = QtGui.QAction(_("first match in file") + msg)
-        if self.all_first_last == "last":
+        if self.autocode_all_first_last_within == "last":
             msg = " *"
         else:
             msg = ""
         action_last = QtGui.QAction(_("last match in file") + msg)
+        if self.autocode_all_first_last_within.startswith("code_within_code "):
+            msg = f" * cid:{self.autocode_all_first_last_within.split(' ')[1]}"
+        else:
+            msg = ""
+        action_code_within_code = QtGui.QAction(_("code within code") + msg)
         menu.addAction(action_all)
         menu.addAction(action_first)
         menu.addAction(action_last)
+        menu.addAction(action_code_within_code)
         action = menu.exec(self.ui.pushButton_auto_code.mapToGlobal(position))
         if action is None:
             return
         if action == action_all:
-            self.all_first_last = "all"
+            self.autocode_all_first_last_within = "all"
         if action == action_first:
-            self.all_first_last = "first"
+            self.autocode_all_first_last_within = "first"
         if action == action_last:
-            self.all_first_last = "last"
+            self.autocode_all_first_last_within = "last"
+        if action == action_code_within_code:
+            ui = DialogSelectItems(self.app, self.codes, _("Select code"), "single")
+            ok = ui.exec()
+            if not ok:
+                return
+            code_ = ui.get_selected()
+            if not code_:
+                return
+            self.autocode_all_first_last_within = f"code_within_code {code_['cid']}"
+
+    def button_auto_code_frag_menu(self, position):
+        """ Options to auto-code all instances, first instance or last instance in a file.
+        For fragments of a sentence to code the full sentence. """
+
+        menu = QtWidgets.QMenu()
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
+        msg = ""
+        if self.autocode_frag_all_first_within == "all":
+            msg = " *"
+        else:
+            msg = ""
+        action_all = QtGui.QAction(_("all matches in file") + msg)
+        if self.autocode_frag_all_first_within == "first":
+            msg = " *"
+        else:
+            msg = ""
+        action_first = QtGui.QAction(_("first match in file") + msg)
+        if self.autocode_frag_all_first_within == "last":
+            msg = " *"
+        else:
+            msg = ""
+        if self.autocode_frag_all_first_within.startswith("code_within_code "):
+            msg = f" * cid:{self.autocode_frag_all_first_within.split(' ')[1]}"
+        else:
+            msg = ""
+        action_code_within_code = QtGui.QAction(_("code within code") + msg)
+        menu.addAction(action_all)
+        menu.addAction(action_first)
+        menu.addAction(action_code_within_code)
+        action = menu.exec(self.ui.pushButton_auto_code.mapToGlobal(position))
+        if action is None:
+            return
+        if action == action_all:
+            self.autocode_frag_all_first_within = "all"
+        if action == action_first:
+            self.autocode_frag_all_first_within = "first"
+        if action == action_code_within_code:
+            ui = DialogSelectItems(self.app, self.codes, _("Select code"), "single")
+            ok = ui.exec()
+            if not ok:
+                return
+            code_ = ui.get_selected()
+            if not code_:
+                return
+            self.autocode_frag_all_first_within = f"code_within_code {code_['cid']}"
 
     def text_edit_recent_codes_menu(self, position):
         """ Alternative context menu.
         Shows a list of recent codes to select from.
         Called by R key press in the text edit pane, only if there is some selected text. """
 
-        if self.ui.textEdit.toPlainText() == "":
+        if self.ui.plainTextEdit.toPlainText() == "":
             return
-        selected_text = self.ui.textEdit.textCursor().selectedText()
+        selected_text = self.ui.plainTextEdit.textCursor().selectedText()
         if selected_text == "":
             return
         if len(self.recent_codes) == 0:
@@ -1055,7 +1181,7 @@ class DialogCodeText(QtWidgets.QWidget):
         menu = QtWidgets.QMenu()
         for item in self.recent_codes:
             menu.addAction(item['name'])
-        action = menu.exec(self.ui.textEdit.mapToGlobal(position))
+        action = menu.exec(self.ui.plainTextEdit.mapToGlobal(position))
         if action is None:
             return
         # Remaining actions will be the submenu codes
@@ -1066,15 +1192,13 @@ class DialogCodeText(QtWidgets.QWidget):
         """ Context menu for textEdit.
         Mark, unmark, annotate, copy, memo coded, coded importance. """
 
-        if self.ui.textEdit.toPlainText() == "" or self.edit_mode:
+        if self.ui.plainTextEdit.toPlainText() == "" or self.edit_mode:
             return
-        cursor = self.ui.textEdit.cursorForPosition(position)
-        selected_text = self.ui.textEdit.textCursor().selectedText()
+        cursor = self.ui.plainTextEdit.cursorForPosition(position)
+        selected_text = self.ui.plainTextEdit.textCursor().selectedText()
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet('font-size:' + str(self.app.settings['fontsize']) + 'pt')
+        menu.setStyleSheet(f"font-size:{self.app.settings['fontsize']}pt")
         menu.setToolTipsVisible(True)
-        action_annotate = None
-        action_copy = None
         action_code_memo = None
         action_edit_annotate = None
         action_important = None
@@ -1157,7 +1281,7 @@ class DialogCodeText(QtWidgets.QWidget):
         if not self.ui.groupBox.isHidden():
             action_hide_top_groupbox = menu.addAction(_("Hide control panel (H)"))
 
-        action = menu.exec(self.ui.textEdit.mapToGlobal(position))
+        action = menu.exec(self.ui.plainTextEdit.mapToGlobal(position))
         if action is None:
             return
         if action == action_important:
@@ -1216,8 +1340,8 @@ class DialogCodeText(QtWidgets.QWidget):
             if self.file_ is None:
                 Message(self.app, _('Warning'), _("No file was selected"), "warning").exec()
                 return
-            selected_text = self.ui.textEdit.textCursor().selectedText()
-            start_pos = self.ui.textEdit.textCursor().selectionStart() + self.file_['start']
+            selected_text = self.ui.plainTextEdit.textCursor().selectedText()
+            start_pos = self.ui.plainTextEdit.textCursor().selectionStart() + self.file_['start']
             ai_chat_signal_emitter.newTextChatSignal.emit(int(self.file_['id']),
                                                           self.file_['name'],
                                                           selected_text,
@@ -1243,8 +1367,7 @@ class DialogCodeText(QtWidgets.QWidget):
             return
         coded_list = []
         for item in self.code_text:
-            if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= position + self.file_['start'] <= item['pos1']:
                 coded_list.append(item)
         if not coded_list:
             return
@@ -1305,7 +1428,7 @@ class DialogCodeText(QtWidgets.QWidget):
         if not in_vivo:
             self.add_code(catid)
         else:
-            self.add_code(catid, code_name=self.ui.textEdit.textCursor().selectedText())
+            self.add_code(catid, code_name=self.ui.plainTextEdit.textCursor().selectedText())
         new_code = None
         for c in self.codes:
             if c not in codes_copy:
@@ -1317,7 +1440,7 @@ class DialogCodeText(QtWidgets.QWidget):
             # Find existing code name that matches in vivo selection
             new_code = None
             for c in self.codes:
-                if c['name'] == self.ui.textEdit.textCursor().selectedText():
+                if c['name'] == self.ui.plainTextEdit.textCursor().selectedText():
                     new_code = c
         self.recursive_set_current_item(self.ui.treeWidget.invisibleRootItem(), new_code['name'])
         self.mark()
@@ -1333,8 +1456,7 @@ class DialogCodeText(QtWidgets.QWidget):
             return
         coded_text_list = []
         for item in self.code_text:
-            if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= position + self.file_['start'] <= item['pos1']:
                 coded_text_list.append(item)
         if not coded_text_list:
             return
@@ -1417,13 +1539,12 @@ class DialogCodeText(QtWidgets.QWidget):
         # Need to get coded segments at this position
         if position is None:
             # Called via button
-            position = self.ui.textEdit.textCursor().position()
+            position = self.ui.plainTextEdit.textCursor().position()
         if self.file_ is None:
             return
         coded_text_list = []
         for item in self.code_text:
             if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername'] and \
                     ((not important and item['important'] == 1) or (important and item['important'] != 1)):
                 coded_text_list.append(item)
         if not coded_text_list:
@@ -1493,13 +1614,12 @@ class DialogCodeText(QtWidgets.QWidget):
 
         if position is None:
             # Called via button
-            position = self.ui.textEdit.textCursor().position()
+            position = self.ui.plainTextEdit.textCursor().position()
         if self.file_ is None:
             return
         coded_text_list = []
         for item in self.code_text:
-            if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= position + self.file_['start'] <= item['pos1']:
                 coded_text_list.append(item)
         if not coded_text_list:
             return
@@ -1531,7 +1651,7 @@ class DialogCodeText(QtWidgets.QWidget):
         for i in self.code_text:
             if text_item['cid'] == i['cid'] and text_item['seltext'] == i['seltext'] \
                     and text_item['pos0'] == i['pos0'] and text_item['pos1'] == i['pos1'] \
-                    and text_item['owner'] == self.app.settings['codername']:
+                    and text_item['owner'] == i['owner']:
                 i['memo'] = memo
         self.app.delete_backup = False
         self.get_coded_text_update_eventfilter_tooltips()
@@ -1596,7 +1716,7 @@ class DialogCodeText(QtWidgets.QWidget):
         """ Copy text to clipboard for external use.
         For example adding text to another document. """
 
-        selected_text = self.ui.textEdit.textCursor().selectedText()
+        selected_text = self.ui.plainTextEdit.textCursor().selectedText()
         cb = QtWidgets.QApplication.clipboard()
         cb.setText(selected_text)
 
@@ -1606,7 +1726,7 @@ class DialogCodeText(QtWidgets.QWidget):
         Assign selected text to current hovered code. """
 
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         selected = self.ui.treeWidget.currentItem()
         action_add_code_to_category = None
         action_add_category_to_category = None
@@ -1778,15 +1898,16 @@ class DialogCodeText(QtWidgets.QWidget):
             return
         text_ = ""
         cur = self.app.conn.cursor()
-        sql = "select code_name.name, pos0,pos1, seltext, code_text.memo "
-        sql += "from code_text join code_name on code_text.cid = code_name.cid "
-        sql += "where length(code_text.memo)>0 and fid=? and code_text.owner=? order by pos0"
-        cur.execute(sql, [self.file_['id'], self.app.settings['codername']])
+        sql = "select code_name.name, pos0,pos1, seltext, code_text_visible.memo, code_text_visible.owner "
+        sql += "from code_text_visible join code_name on code_text_visible.cid = code_name.cid "
+        sql += "where length(code_text_visible.memo)>0 and fid=? order by pos0"
+        cur.execute(sql, [self.file_['id']])
         res = cur.fetchall()
         if not res:
             return
         for r in res:
-            text_ += f'[{r[1]}-{r[2]}] ' + _("Code: ") + f'{r[0]}\n'
+            text_ += f'[{r[1]}-{r[2]}] ' + _("Code: ") + f'{r[0]}'
+            text_ += " (" + r[5] + ")\n" # coder/owner
             text_ += _("Text: ") + f"{r[3]}\n"
             text_ += _("Memo: ") + f"{r[4]}\n\n"
         ui = DialogMemo(self.app, _("Memos for file: ") + self.file_['name'], text_)
@@ -1801,10 +1922,10 @@ class DialogCodeText(QtWidgets.QWidget):
             return
         text_ = ""
         cur = self.app.conn.cursor()
-        sql = "select substr(source.fulltext,pos0+1 ,pos1-pos0), pos0, pos1, annotation.memo "
-        sql += "from annotation join source on annotation.fid = source.id "
-        sql += "where fid=? and annotation.owner=? order by pos0"
-        cur.execute(sql, [self.file_['id'], self.app.settings['codername']])
+        sql = "select substr(source.fulltext,pos0+1 ,pos1-pos0), pos0, pos1, annotation_visible.memo "
+        sql += "from annotation_visible join source on annotation_visible.fid = source.id "
+        sql += "where fid=? order by pos0"
+        cur.execute(sql, [self.file_['id']])
         res = cur.fetchall()
         if not res:
             return
@@ -1947,26 +2068,25 @@ class DialogCodeText(QtWidgets.QWidget):
                 self.help()
                 return
 
-        if not self.ui.textEdit.hasFocus():
+        if not self.ui.plainTextEdit.hasFocus():
             return
         # Ignore all other key events if edit mode is active
         if self.edit_mode:
             return
         key = event.key()
         # mod = QtGui.QGuiApplication.keyboardModifiers()
-        cursor_pos = self.ui.textEdit.textCursor().position()
-        selected_text = self.ui.textEdit.textCursor().selectedText()
+        cursor_pos = self.ui.plainTextEdit.textCursor().position()
+        selected_text = self.ui.plainTextEdit.textCursor().selectedText()
         codes_here = []
         for item in self.code_text:
-            if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1']:
                 codes_here.append(item)
         # Hash display character position
         if key == QtCore.Qt.Key.Key_Exclam:
             Message(self.app, _("Text position") + " " * 20, _("Character position: ") + str(cursor_pos)).exec()
             return
         if key == QtCore.Qt.Key.Key_Dollar:
-            self.shift_code_positions(self.ui.textEdit.textCursor().position() + self.file_['start'])
+            self.shift_code_positions(self.ui.plainTextEdit.textCursor().position() + self.file_['start'])
             return
         # Annotate selected
         if key == QtCore.Qt.Key.Key_A and selected_text != "":
@@ -1974,7 +2094,7 @@ class DialogCodeText(QtWidgets.QWidget):
             return
         # Bookmark
         if key == QtCore.Qt.Key.Key_B and self.file_ is not None:
-            text_pos = self.ui.textEdit.textCursor().position() + self.file_['start']
+            text_pos = self.ui.plainTextEdit.textCursor().position() + self.file_['start']
             cur = self.app.conn.cursor()
             cur.execute("update project set bookmarkfile=?, bookmarkpos=?", [self.file_['id'], text_pos])
             self.app.conn.commit()
@@ -1994,7 +2114,7 @@ class DialogCodeText(QtWidgets.QWidget):
         if key == QtCore.Qt.Key.Key_M:
             self.coded_text_memo(cursor_pos)
             return
-        if key == QtCore.Qt.Key.Key_N and self.ui.textEdit.textCursor().selectedText() != '':
+        if key == QtCore.Qt.Key.Key_N and self.ui.plainTextEdit.textCursor().selectedText() != '':
             self.mark_with_new_code(False)
             return
         # Overlapping codes cycle
@@ -2017,8 +2137,8 @@ class DialogCodeText(QtWidgets.QWidget):
             self.mark_with_new_code(in_vivo=True)
             return
         # Recent codes context menu
-        if key == QtCore.Qt.Key.Key_R and self.file_ is not None and self.ui.textEdit.textCursor().selectedText() != "":
-            self.text_edit_recent_codes_menu(self.ui.textEdit.cursorRect().topLeft())
+        if key == QtCore.Qt.Key.Key_R and self.file_ is not None and self.ui.plainTextEdit.textCursor().selectedText() != "":
+            self.text_edit_recent_codes_menu(self.ui.plainTextEdit.cursorRect().topLeft())
             return
         # Search, with or without selected
         if key == QtCore.Qt.Key.Key_S and self.file_ is not None:
@@ -2033,7 +2153,7 @@ class DialogCodeText(QtWidgets.QWidget):
             self.overlaps_at_pos_idx = 0
         item = self.overlaps_at_pos[self.overlaps_at_pos_idx]
         # Remove formatting
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         cursor.setPosition(int(item['pos0'] - self.file_['start']), QtGui.QTextCursor.MoveMode.MoveAnchor)
         cursor.setPosition(int(item['pos1'] - self.file_['start']), QtGui.QTextCursor.MoveMode.KeepAnchor)
         cursor.setCharFormat(QtGui.QTextCharFormat())
@@ -2059,10 +2179,9 @@ class DialogCodeText(QtWidgets.QWidget):
 
         self.overlaps_at_pos = []
         self.overlaps_at_pos_idx = 0
-        pos = self.ui.textEdit.textCursor().position()
+        pos = self.ui.plainTextEdit.textCursor().position()
         for item in self.code_text:
             if item['pos0'] <= pos + self.file_['start'] <= item['pos1']:
-                # logger.debug("Code name for selected pos0:" + str(item['pos0'])+" pos1:"+str(item['pos1'])
                 self.overlaps_at_pos.append(item)
         if len(self.overlaps_at_pos) < 2:
             self.overlaps_at_pos = []
@@ -2089,7 +2208,7 @@ class DialogCodeText(QtWidgets.QWidget):
         Called by export_option_selected
         """
 
-        if len(self.ui.textEdit.document().toPlainText()) == 0:
+        if len(self.ui.plainTextEdit.document().toPlainText()) == 0:
             return
         filename = f"{self.file_['name']}.odt"
         exp_dir = ExportDirectoryPathDialog(self.app, filename)
@@ -2099,7 +2218,7 @@ class DialogCodeText(QtWidgets.QWidget):
         tw = QtGui.QTextDocumentWriter()
         tw.setFileName(filepath)
         tw.setFormat(b'ODF')  # byte array needed for Windows 10
-        tw.write(self.ui.textEdit.document())
+        tw.write(self.ui.plainTextEdit.document())
         msg = _("Coded text file exported: ") + filepath
         self.parent_textEdit.append(msg)
         Message(self.app, _('Coded text file exported'), msg, "information").exec()
@@ -2109,9 +2228,9 @@ class DialogCodeText(QtWidgets.QWidget):
         Called by export_option_selected.
         """
 
-        if len(self.ui.textEdit.document().toPlainText()) == 0:
+        if len(self.ui.plainTextEdit.document().toPlainText()) == 0:
             return
-        plain_text = self.ui.textEdit.document().toPlainText()
+        plain_text = self.ui.plainTextEdit.document().toPlainText()
         # Prepare code text with name and ordering
         code_text2 = deepcopy(self.code_text)
         code_ids_used = []
@@ -2179,9 +2298,9 @@ class DialogCodeText(QtWidgets.QWidget):
          code tags are surrounded by double braces:
          {{codename{{some coded text}}codename}}. """
 
-        if len(self.ui.textEdit.document().toPlainText()) == 0:
+        if len(self.ui.plainTextEdit.document().toPlainText()) == 0:
             return
-        plain_text = self.ui.textEdit.document().toPlainText()
+        plain_text = self.ui.plainTextEdit.document().toPlainText()
         # Prepare code text with name and ordering
         code_text2 = deepcopy(self.code_text)
         code_ids_used = []
@@ -2258,7 +2377,7 @@ class DialogCodeText(QtWidgets.QWidget):
         # Change start and end code positions using alt arrow left and alt arrow right
         # and shift arrow left, shift arrow right
 
-        if type(event) == QtGui.QKeyEvent and object_ is self.ui.textEdit:
+        if type(event) == QtGui.QKeyEvent and object_ is self.ui.plainTextEdit:
             key = event.key()
             mod = event.modifiers()
             first_key_press = event.type() == QtCore.QEvent.Type.KeyPress and not event.isAutoRepeat()
@@ -2268,7 +2387,7 @@ class DialogCodeText(QtWidgets.QWidget):
             if diff.microseconds < 100000:
                 if mod in (QtCore.Qt.KeyboardModifier.AltModifier, QtCore.Qt.KeyboardModifier.ShiftModifier) \
                       and key in (QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right):
-                    return True # consume rapid shift + left clicks, etc. without changing selection
+                    return True  # consume rapid shift + left clicks, etc. without changing selection
                 else:
                     return False
             # Ctrl + E Edit mode - must be detected here as Ctrl E is overridden in editable textEdit
@@ -2278,11 +2397,10 @@ class DialogCodeText(QtWidgets.QWidget):
             # Ignore all other key events if edit mode is active
             if self.edit_mode:
                 return False
-            cursor_pos = self.ui.textEdit.textCursor().position()
+            cursor_pos = self.ui.plainTextEdit.textCursor().position()
             codes_here = []
             for item in self.code_text:
-                if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1'] and \
-                        item['owner'] == self.app.settings['codername']:
+                if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1']:
                     codes_here.append(item)
             code_ = None
             if len(codes_here) == 0:
@@ -2344,7 +2462,7 @@ class DialogCodeText(QtWidgets.QWidget):
 
         if not code_:
             return
-        if code_['pos1'] + 1 >= len(self.ui.textEdit.toPlainText()):
+        if code_['pos1'] + 1 >= len(self.ui.plainTextEdit.toPlainText()):
             return
         code_['pos1'] += 1
         cur = self.app.conn.cursor()
@@ -2422,7 +2540,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 indexes.append(ct)
                 tt_code_text.append(ct)
         indexes = sorted(indexes, key=itemgetter('pos0'))
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         cur_pos = cursor.position()
         end_pos = 0
         found_larger = False
@@ -2442,9 +2560,9 @@ class DialogCodeText(QtWidgets.QWidget):
             end_pos = indexes[0]['pos1'] - self.file_['start']
             msg = "1" + msg
         if not found_larger:
-            cursor = self.ui.textEdit.textCursor()
+            cursor = self.ui.plainTextEdit.textCursor()
             cursor.setPosition(0)
-            self.ui.textEdit.setTextCursor(cursor)
+            self.ui.plainTextEdit.setTextCursor(cursor)
         self.unlight()
         msg = " " + _("Code:") + " " + msg
         # Highlight the code in the text
@@ -2453,7 +2571,7 @@ class DialogCodeText(QtWidgets.QWidget):
             if c['cid'] == cid:
                 color = c['color']
         cursor.setPosition(cur_pos)
-        self.ui.textEdit.setTextCursor(cursor)
+        self.ui.plainTextEdit.setTextCursor(cursor)
         cursor.setPosition(cur_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
         cursor.setPosition(end_pos, QtGui.QTextCursor.MoveMode.KeepAnchor)
         brush = QBrush(QColor(color))
@@ -2497,7 +2615,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 indexes.append(ct)
                 tt_code_text.append(ct)
         indexes = sorted(indexes, key=itemgetter('pos0'), reverse=True)
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         cur_pos = cursor.position()
         end_pos = 0
         found_smaller = False
@@ -2524,7 +2642,7 @@ class DialogCodeText(QtWidgets.QWidget):
             if c['cid'] == cid:
                 color = c['color']
         cursor.setPosition(cur_pos)
-        self.ui.textEdit.setTextCursor(cursor)
+        self.ui.plainTextEdit.setTextCursor(cursor)
         cursor.setPosition(cur_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
         cursor.setPosition(end_pos, QtGui.QTextCursor.MoveMode.KeepAnchor)
         brush = QBrush(QColor(color))
@@ -3024,22 +3142,21 @@ class DialogCodeText(QtWidgets.QWidget):
     def file_menu(self, position):
         """ Context menu for listWidget files to get to the next file and
         to go to the file with the latest codings by this coder.
-        Each file dictionary item in self.filenames contains:
+        Sorting files.
+        Each file dictionary item in self.files contains:
         {'id', 'name', 'memo', 'characters'= number of characters in the file,
         'start' = showing characters from this position, 'end' = showing characters to this position}
 
         Args:
-            position : """
+            position :
+        """
 
         selected = self.ui.listWidget.currentItem()
-        if selected is None:
+        if not selected:
             return
-        file_ = None
-        for f in self.filenames:
-            if selected.text() == f['name']:
-                file_ = f
+        file_ = next((f for f in self.files if f['name'] == selected.text()), None)
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         action_next = None
         action_latest = None
         action_next_chars = None
@@ -3053,18 +3170,28 @@ class DialogCodeText(QtWidgets.QWidget):
                 (file_['mediapath'][:6] == '/docs/' or file_['mediapath'][:5] == 'docs:'):
             action_view_original_text = menu.addAction(_("view original text file"))
         if len(self.app.get_text_filenames()) > 1:
-            if len(self.filenames) != 1:
+            if len(self.files) != 1:
                 action_next = menu.addAction(_("Next file"))
             action_latest = menu.addAction(_("File with latest coding"))
             action_show_files_like = menu.addAction(_("Show files like"))
             action_show_by_attribute = menu.addAction(_("Show files by attributes"))
             action_show_case_files = menu.addAction(_("Show case files"))
-        if file_['characters'] > self.app.settings['codetext_chunksize']:
+        if file_ is not None and file_['characters'] > self.app.settings['codetext_chunksize']:
             action_next_chars = menu.addAction(str(self.app.settings['codetext_chunksize']) + _(" next  characters"))
             if file_['start'] > 0:
                 action_prev_chars = menu.addAction(
                     str(self.app.settings['codetext_chunksize']) + _(" previous  characters"))
         action_go_to_bookmark = menu.addAction(_("Go to bookmark"))
+        action_mark_speakers = menu.addAction(_("Mark speakers"))
+        sort_menu = QtWidgets.QMenu(_("Sort"))
+        sort_menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
+        action_sort_name_asc = sort_menu.addAction(_("Sort by name ascending"))
+        action_sort_name_desc = sort_menu.addAction(_("Sort by name descending"))
+        action_sort_case_asc = sort_menu.addAction(_("Sort by case ascending"))
+        action_sort_case_desc = sort_menu.addAction(_("Sort by case descending"))
+        action_sort_date_asc = sort_menu.addAction(_("Sort by date ascending"))
+        action_sort_date_desc = sort_menu.addAction(_("Sort by date descending"))
+        menu.addMenu(sort_menu)
         action = menu.exec(self.ui.listWidget.mapToGlobal(position))
         if action is None:
             return
@@ -3088,6 +3215,20 @@ class DialogCodeText(QtWidgets.QWidget):
             self.show_case_files()
         if action == action_show_by_attribute:
             self.get_files_from_attributes()
+        if action == action_mark_speakers:
+            self.mark_speakers()
+        if action == action_sort_name_asc:
+            self.get_files(None, "name asc")
+        if action == action_sort_name_desc:
+            self.get_files(None, "name desc")
+        if action == action_sort_case_asc:
+            self.get_files(None, "case asc")
+        if action == action_sort_case_desc:
+            self.get_files(None, "case desc")
+        if action == action_sort_date_asc:
+            self.get_files(None, "date asc")
+        if action == action_sort_date_desc:
+            self.get_files(None, "date desc")
 
     def view_original_text_file(self):
         """ View original text file.
@@ -3103,7 +3244,7 @@ class DialogCodeText(QtWidgets.QWidget):
             webbrowser.open(doc_path)
             return
         logger.error("Cannot open text file in browser " + self.file_['mediapath'])
-        print("code_text.view_original_text_file. Cannot open text file in browser " + self.file_['mediapath'])
+        print(f"code_text.view_original_text_file. Cannot open text file in browser {self.file_['mediapath']}")
 
     def show_case_files(self):
         """ Show files of specified case.
@@ -3132,7 +3273,7 @@ class DialogCodeText(QtWidgets.QWidget):
         If blank, show all files. """
 
         dialog = QtWidgets.QInputDialog(self)
-        dialog.setStyleSheet("* {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
         dialog.setWindowTitle(_("Show files like"))
         dialog.setWindowFlags(dialog.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
         dialog.setInputMode(QtWidgets.QInputDialog.InputMode.TextInput)
@@ -3167,8 +3308,8 @@ class DialogCodeText(QtWidgets.QWidget):
         i = 0
         try:
             while file_['start'] + i < file_['end'] and not line_ending:
-                if file_['fulltext'][file_[
-                                         'start'] + i - 1] == "\n":  # ... + i - 1] because we want to include the line break in the chunk, and text[start:i] would otherwise exclude it
+                # ... + i - 1] Want to include the line break in the chunk, text[start:i] would otherwise exclude it
+                if file_['fulltext'][file_['start'] + i - 1] == "\n":
                     line_ending = True
                 else:
                     i += 1
@@ -3198,8 +3339,8 @@ class DialogCodeText(QtWidgets.QWidget):
             i = self.app.settings['codetext_chunksize']
             line_ending = False
             while i > 0 and not line_ending:
-                if file_['fulltext'][
-                    i - 1] == "\n":  # [i - 1] because we want to include the line break in the chunk, and text[start:i] would otherwise exclude it
+                # [i - 1] Want to include the line break in the chunk, and text[start:i] would otherwise exclude it
+                if file_['fulltext'][i - 1] == "\n":
                     line_ending = True
                 else:
                     i -= 1
@@ -3246,12 +3387,12 @@ class DialogCodeText(QtWidgets.QWidget):
         """ Go to next file in list. Button. """
 
         if self.file_ is None:
-            self.load_file(self.filenames[0])
+            self.load_file(self.files[0])
             self.ui.listWidget.setCurrentRow(0)
             return
-        for i in range(0, len(self.filenames) - 1):
-            if self.file_ == self.filenames[i]:
-                found = self.filenames[i + 1]
+        for i in range(0, len(self.files) - 1):
+            if self.file_ == self.files[i]:
+                found = self.files[i + 1]
                 self.ui.listWidget.setCurrentRow(i + 1)
                 self.load_file(found)
                 self.search_term = ""
@@ -3266,7 +3407,7 @@ class DialogCodeText(QtWidgets.QWidget):
         result = cur.fetchone()
         if result is None:
             return
-        for i, f in enumerate(self.filenames):
+        for i, f in enumerate(self.files):
             if f['id'] == result[0]:
                 self.ui.listWidget.setCurrentRow(i)
                 self.load_file(f)
@@ -3285,7 +3426,7 @@ class DialogCodeText(QtWidgets.QWidget):
         cur = self.app.conn.cursor()
         cur.execute("select bookmarkfile, bookmarkpos from project")
         result = cur.fetchone()
-        for i, f in enumerate(self.filenames):
+        for i, f in enumerate(self.files):
             if f['id'] == result[0]:
                 f['start'] = 0
                 if f['end'] != f['characters']:
@@ -3297,26 +3438,69 @@ class DialogCodeText(QtWidgets.QWidget):
                     self.load_file(f)
                     self.search_term = ""
                     # Set text cursor position and also highlight one character, to show location.
-                    text_cursor = self.ui.textEdit.textCursor()
+                    text_cursor = self.ui.plainTextEdit.textCursor()
                     text_cursor.setPosition(result[1])
                     endpos = result[1] - 1
                     if endpos < 0:
                         endpos = 0
                     text_cursor.setPosition(endpos, QtGui.QTextCursor.MoveMode.KeepAnchor)
-                    self.ui.textEdit.setTextCursor(text_cursor)
+                    self.ui.plainTextEdit.setTextCursor(text_cursor)
                 except Exception as e:
                     logger.debug(str(e))
                 break
+
+    def edit_coder_names(self):
+        ui_coder_names = DialogCoderNames(self.app, extended_options=False)
+        if (ui_coder_names.exec() == QtWidgets.QDialog.DialogCode.Accepted and 
+           ui_coder_names.coder_names_changed):
+            self.update_coder_names()
+            
+    def update_coder_names(self):
+        """Update ui elements related to the coder names,
+        also close contents in tab_reports since they must 
+        update coder names as well."""
+        # Update UI as coders visibility may have changed
+        self.annotations = self.app.get_annotations()
+        self.get_coded_text_update_eventfilter_tooltips()
+        self.fill_code_counts_in_tree()
+        self.ui.lineEdit_coder.setText(self.app.settings['codername'])
+        # close contents in tab_reports since they must update coder names as well 
+        contents = self.tab_reports.layout()
+        if contents:
+            for i in reversed(range(contents.count())):
+                contents.itemAt(i).widget().close()
+                contents.itemAt(i).widget().setParent(None)
+            
+    def mark_speakers(self):
+        if self.file_ is not None: 
+            ui_speaker = DialogSpeakers(self.app, self.file_['id'], self.file_['name'])
+            if ui_speaker.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                self.update_dialog_codes_and_categories()
+                if self.app.conn is not None and speaker_coder_name not in self.app.get_coder_names_in_project(only_visible=True):
+                    msg = _('The coder "{}" is currently hidden. Do you want to make it visible, so you can see the speaker codings?').format(speaker_coder_name)
+                    msg_box = Message(self.app, _('Speaker coding'), msg, 'Information')
+                    msg_box.setStandardButtons(
+                        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+                    msg_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Yes)
+                    reply = msg_box.exec()
+                    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                        cur = self.app.conn
+                        cur.execute('update coder_names set visibility=1 where name=?', (speaker_coder_name,))
+                        cur.commit()
+                        self.update_coder_names()
+                        
+        else:
+            Message(self.app, _('Mark speakers'), _('No text file selected.'), 'critical').exec()
 
     def listwidgetitem_view_file(self):
         """ When listwidget item is pressed load the file.
         The selected file is then displayed for coding.
         Note: file segment is also loaded from listWidget context menu """
 
-        if len(self.filenames) == 0:
+        if len(self.files) == 0:
             return
         item_name = self.ui.listWidget.currentItem().text()
-        for f in self.filenames:
+        for f in self.files:
             if f['name'] == item_name:
                 self.file_ = f
                 self.load_file(self.file_)
@@ -3327,7 +3511,7 @@ class DialogCodeText(QtWidgets.QWidget):
         """ File selection changed. """
 
         row = self.ui.listWidget.currentRow()
-        self.load_file(self.filenames[row])
+        self.load_file(self.files[row])
 
     def load_file(self, file_):
         """ Load and display file text for this file.
@@ -3374,12 +3558,12 @@ class DialogCodeText(QtWidgets.QWidget):
                         :-1]  # having '\n' at the end of the text sometimes creates an empty line in QTextEdit, so we omit it
 
         if self.file_['name'][-3:].lower() == ".md":
-            highlighter = MarkdownHighlighter(self.ui.textEdit, self.app)
+            highlighter = MarkdownHighlighter(self.ui.plainTextEdit, self.app)
         else:
-            highlighter = MarkdownHighlighter(self.ui.textEdit, self.app)
+            highlighter = MarkdownHighlighter(self.ui.plainTextEdit, self.app)
             highlighter.highlighting_rules = []
 
-        self.ui.textEdit.setPlainText(self.text)
+        self.ui.plainTextEdit.setPlainText(self.text)
         self.get_coded_text_update_eventfilter_tooltips()
         self.fill_code_counts_in_tree()
         self.show_all_codes_in_text()  # Deactivates the show_selected_code if this is active
@@ -3396,14 +3580,14 @@ class DialogCodeText(QtWidgets.QWidget):
 
         if self.file_ is None:
             return
-        sql_values = [int(self.file_['id']), self.app.settings['codername'], self.file_['start'], self.file_['end']]
-        # Get code text for this file and for this coder
+        sql_values = [int(self.file_['id']), self.file_['start'], self.file_['end']]
+        # Get code text for this file and for visible coders
         self.code_text = []
         # seltext length, longest first, so overlapping shorter text is superimposed.
-        sql = "select code_text.ctid, code_text.cid, fid, seltext, pos0, pos1, code_text.owner, code_text.date, " \
-              "code_text.memo, important, name"
-        sql += " from code_text join code_name on code_text.cid = code_name.cid"
-        sql += " where fid=? and code_text.owner=? "
+        sql = "select code_text_visible.ctid, code_text_visible.cid, fid, seltext, pos0, pos1, code_text_visible.owner, code_text_visible.date, " \
+              "code_text_visible.memo, important, name"
+        sql += " from code_text_visible join code_name on code_text_visible.cid = code_name.cid"
+        sql += " where fid=?"
         # For file text which is currently loaded
         sql += " and pos0 >=? and pos1 <=? "
         sql += "order by length(seltext) desc, important asc"
@@ -3432,7 +3616,7 @@ class DialogCodeText(QtWidgets.QWidget):
 
         if self.text is None or self.text == "":
             return
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         cursor.setPosition(0, QtGui.QTextCursor.MoveMode.MoveAnchor)
         cursor.setPosition(len(self.text) - 1, QtGui.QTextCursor.MoveMode.KeepAnchor)
         cursor.setCharFormat(QtGui.QTextCharFormat())
@@ -3445,13 +3629,13 @@ class DialogCodeText(QtWidgets.QWidget):
         For defined colours in color_selector, make text light on dark, and conversely dark on light
         """
 
-        if self.file_ is None or self.ui.textEdit.toPlainText() == "":
+        if self.file_ is None or self.ui.plainTextEdit.toPlainText() == "":
             return
         # Add coding highlights
         codes = {x['cid']: x for x in self.codes}
         for item in self.code_text:
             fmt = QtGui.QTextCharFormat()
-            cursor = self.ui.textEdit.textCursor()
+            cursor = self.ui.plainTextEdit.textCursor()
             cursor.setPosition(int(item['pos0'] - self.file_['start']), QtGui.QTextCursor.MoveMode.MoveAnchor)
             cursor.setPosition(int(item['pos1'] - self.file_['start']), QtGui.QTextCursor.MoveMode.KeepAnchor)
             color = codes.get(item['cid'], {}).get('color', "#777777")  # default gray
@@ -3480,10 +3664,10 @@ class DialogCodeText(QtWidgets.QWidget):
         for note in self.annotations:
             if len(self.file_.keys()) > 0:  # will be zero if using autocode and no file is loaded
                 # Cursor pos could be negative if annotation was for an earlier text portion
-                cursor = self.ui.textEdit.textCursor()
+                cursor = self.ui.plainTextEdit.textCursor()
                 if note['fid'] == self.file_['id'] and \
                         0 <= int(note['pos0']) - self.file_['start'] < int(note['pos1']) - self.file_['start'] <= \
-                        len(self.ui.textEdit.toPlainText()):
+                        len(self.ui.plainTextEdit.toPlainText()):
                     cursor.setPosition(int(note['pos0']) - self.file_['start'],
                                        QtGui.QTextCursor.MoveMode.MoveAnchor)
                     cursor.setPosition(int(note['pos1']) - self.file_['start'],
@@ -3514,7 +3698,7 @@ class DialogCodeText(QtWidgets.QWidget):
                             overlaps.append([j['pos0'], i['pos1']])
                         elif j['pos1'] != i['pos0']:  # j['pos0'] < i['pos0']:
                             overlaps.append([j['pos1'], i['pos0']])
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         for o in overlaps:
             fmt = QtGui.QTextCharFormat()
             fmt.setUnderlineStyle(QtGui.QTextCharFormat.UnderlineStyle.SingleUnderline)
@@ -3544,9 +3728,9 @@ class DialogCodeText(QtWidgets.QWidget):
         if item.text(1).split(':')[0] == 'catid':  # Cannot mark with category
             return
         cid = int(item.text(1).split(':')[1])
-        selected_text = self.ui.textEdit.textCursor().selectedText()
-        pos0 = self.ui.textEdit.textCursor().selectionStart() + self.file_['start']
-        pos1 = self.ui.textEdit.textCursor().selectionEnd() + self.file_['start']
+        selected_text = self.ui.plainTextEdit.textCursor().selectedText()
+        pos0 = self.ui.plainTextEdit.textCursor().selectionStart() + self.file_['start']
+        pos1 = self.ui.plainTextEdit.textCursor().selectionEnd() + self.file_['start']
         if pos0 == pos1:
             return
 
@@ -3585,7 +3769,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 msg += _("Do you want to store the AI interpretation in a memo together with the coding?<br/><br/>")
                 msg += '<i>' + memo.replace('\n', '<br/>') + '</i></p>'
                 reply = QtWidgets.QMessageBox.question(
-                    self, 'AI Interpretation', msg,
+                    self, _('AI Interpretation'), msg,
                     QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
                     QtWidgets.QMessageBox.StandardButton.Yes
                 )
@@ -3648,7 +3832,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.fill_code_counts_in_tree()
 
     def unmark(self, location):
-        """ Remove code marking by this coder from selected text in current file.
+        """ Remove code marking by all visible coders from selected text in current file.
         Called by text_edit_context_menu
         Adjust for start of text file, as this may be a smaller portion of the full text file.
 
@@ -3661,8 +3845,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.clear_edit_variables()
         unmarked_list = []
         for item in self.code_text:
-            if item['pos0'] <= location + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= location + self.file_['start'] <= item['pos1']:
                 unmarked_list.append(item)
         if not unmarked_list:
             return
@@ -3702,9 +3885,9 @@ class DialogCodeText(QtWidgets.QWidget):
             Message(self.app, _('Warning'), _("No file was selected"), "warning").exec()
             return
         self.clear_edit_variables()
-        pos0 = self.ui.textEdit.textCursor().selectionStart()
-        pos1 = self.ui.textEdit.textCursor().selectionEnd()
-        text_length = len(self.ui.textEdit.toPlainText())
+        pos0 = self.ui.plainTextEdit.textCursor().selectionStart()
+        pos1 = self.ui.plainTextEdit.textCursor().selectionEnd()
+        text_length = len(self.ui.plainTextEdit.toPlainText())
         if pos0 >= text_length or pos1 > text_length:
             return
         item = None
@@ -3822,7 +4005,7 @@ class DialogCodeText(QtWidgets.QWidget):
             Message(self.app, _('Warning'), _("Cannot have blank text marks"), "warning").exec()
             return
 
-        ui = DialogSelectItems(self.app, self.filenames, _("Select files to code"), "many")
+        ui = DialogSelectItems(self.app, self.files, _("Select files to code"), "many")
         ok = ui.exec()
         if not ok:
             return
@@ -3931,9 +4114,10 @@ class DialogCodeText(QtWidgets.QWidget):
         """ Code full sentence based on text fragment.
         Activated via self.ui.pushButton_auto_code_frag_this_file
         Opens a dialog to select text files for autocoding.
+        Button Right-click options are: all (default), first, last, code within code.
         """
 
-        ui = DialogSelectItems(self.app, self.filenames, _("Select files to code"), "many")
+        ui = DialogSelectItems(self.app, self.files, _("Select files to code"), "many")
         ok = ui.exec()
         if not ok:
             return
@@ -3996,33 +4180,51 @@ class DialogCodeText(QtWidgets.QWidget):
                 sentences = f['fulltext'].split(ending)
                 pos0 = 0
                 codes_added = 0
+                surround_codes = []
+                if self.autocode_frag_all_first_within.startswith("code_within_code"):
+                    cur.execute("select pos0,pos1 from code_text where cid=? and fid=? and owner=?",
+                                [int(self.autocode_frag_all_first_within.split()[1]), f['id'], self.app.settings['codername']])
+                    surround_codes = cur.fetchall()
+                    if not surround_codes:
+                        return
+
                 for sentence in sentences:
                     if (find_text in sentence and not regex_pattern) or (regex_pattern and regex_pattern.search(sentence)):
                         i = {'cid': cid, 'fid': int(f['id']), 'seltext': str(sentence),
                              'pos0': pos0, 'pos1': pos0 + len(sentence),
                              'owner': self.app.settings['codername'], 'memo': "",
                              'date': datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")}
-                        # Possible IntegrityError: UNIQUE constraint failed
-                        try:
-                            codes_added += 1
-                            cur.execute("insert into code_text (cid,fid,seltext,pos0,pos1,\
-                                owner,memo,date) values(?,?,?,?,?,?,?,?)",
-                                        (i['cid'], i['fid'], i['seltext'], i['pos0'],
-                                         i['pos1'], i['owner'], i['memo'], i['date']))
-                            # Record a list of undo sql
-                            undo = {
-                                "sql": "delete from code_text where cid=? and fid=? and pos0=? and pos1=? and owner=?",
-                                "cid": i['cid'], "fid": i['fid'], "pos0": i['pos0'], "pos1": i['pos1'],
-                                "owner": i['owner']
-                            }
-                            undo_list.append(undo)
-                        except Exception as e:
-                            print("Autocode insert error ", str(e))
-                            logger.debug(_("Autocode insert error ") + str(e))
-                    pos0 += len(sentence) + len(ending)
+                        # For code within a code, if selected
+                        found_code_in_code = False
+                        if self.autocode_frag_all_first_within.startswith("code_within_code"):
+                            for surround_code in surround_codes:
+                                if i['pos0'] >= surround_code[0] and i['pos1'] <= surround_code[1]:
+                                    found_code_in_code = True
+                                    #print("Found", surround_code[0], "[", i['pos0'], i['pos1'], "]", surround_code[1], sentence)
+
+                        if self.autocode_frag_all_first_within in ("all", "first") or found_code_in_code:
+                            try:
+                                codes_added += 1
+                                cur.execute("insert into code_text (cid,fid,seltext,pos0,pos1,\
+                                    owner,memo,date) values(?,?,?,?,?,?,?,?)",
+                                            (i['cid'], i['fid'], i['seltext'], i['pos0'],
+                                             i['pos1'], i['owner'], i['memo'], i['date']))
+                                # Store a list of undo sql
+                                undo = {
+                                    "sql": "delete from code_text where cid=? and fid=? and pos0=? and pos1=? and owner=?",
+                                    "cid": i['cid'], "fid": i['fid'], "pos0": i['pos0'], "pos1": i['pos1'],
+                                    "owner": i['owner']
+                                }
+                                undo_list.append(undo)
+                                self.app.conn.commit()
+                            except Exception as e:  # Possible Unique constraint fail
+                                print("Autocode insert error ", str(e))
+                                logger.debug(_("Autocode insert error ") + str(e))
+                    pos0 += len(sentence) + len(ending)  # move forward
+                    if codes_added == 1 and self.autocode_frag_all_first_within == "first":
+                        break
                 if codes_added > 0:
                     msg += _("File: ") + f"{f['name']} {codes_added}" + _(" added codes") + "\n"
-            self.app.conn.commit()
         except Exception as e_:
             print(e_)
             self.app.conn.rollback()  # revert all changes
@@ -4046,8 +4248,8 @@ class DialogCodeText(QtWidgets.QWidget):
 
     def auto_code(self):
         """ Autocode text in one file or all files with currently selected code.
-        Button menu option to auto-code all, first or last instances in files.
-        Split multiple find textx with pipe |
+        Button menu option to auto-code all, first or last instances in files, or to code within an existing code.
+        Split multiple find texts with pipe |
         Activated using self.ui.pushButton_auto_code
         """
 
@@ -4080,9 +4282,9 @@ class DialogCodeText(QtWidgets.QWidget):
         # Regex, pipe | has different meaning, so do not split into separate texts
         if self.ui.checkBox_auto_regex.isChecked():
             find_texts = [find_text]
-        if len(self.filenames) == 0:
+        if len(self.files) == 0:
             return
-        ui = DialogSelectItems(self.app, self.filenames, _("Select files to code"), "many")
+        ui = DialogSelectItems(self.app, self.files, _("Select files to code"), "many")
         ok = ui.exec()
         if not ok:
             return
@@ -4128,13 +4330,30 @@ class DialogCodeText(QtWidgets.QWidget):
                         text_starts = [match.start() for match in re.finditer(re.escape(find_txt), file_text)]
                         text_ends = [match.end() for match in re.finditer(re.escape(find_txt), file_text)]
 
-                    # Trim to first or last instance if option selected
-                    if self.all_first_last == "first" and len(text_starts) > 1:
+                    # Trim to first instance if option selected
+                    if self.autocode_all_first_last_within == "first" and len(text_starts) > 1:
                         text_starts = [text_starts[0]]
                         text_ends = [text_ends[0]]
-                    if self.all_first_last == "last" and len(text_starts) > 1:
+                    # Trim to last instance if option selected
+                    if self.autocode_all_first_last_within == "last" and len(text_starts) > 1:
                         text_starts = [text_starts[-1]]
                         text_ends = [text_ends[-1]]
+                    # Trim to within_existing_code instances if this option is selected
+                    if self.autocode_all_first_last_within.startswith("code_within_code"):
+                        cur.execute("select pos0,pos1 from code_text where cid=? and fid=? and owner=?",
+                                    [int(self.autocode_all_first_last_within.split()[1]), f['id'], self.app.settings['codername']])
+                        res = cur.fetchall()
+                        within_starts = []
+                        within_ends = []
+                        for r in res:
+                            for i in range(0, len(text_starts)):
+                                if text_starts[i] >= r[0] and text_ends[i] <= r[1]:
+                                    within_starts.append(text_starts[i])
+                                    within_ends.append(text_ends[i])
+                        text_starts = within_starts
+                        text_ends = within_ends
+                    if not text_starts:
+                        return
 
                     # Add new items to database
                     for index in range(len(text_starts)):
@@ -4154,6 +4373,7 @@ class DialogCodeText(QtWidgets.QWidget):
                                 "owner": item['owner']}
                             undo_list.append(undo)
                         except sqlite3.IntegrityError as e:
+                            # print(_("Autocode insert error ") + str(e))  # Possible a duplicate entry
                             logger.debug(_("Autocode insert error ") + str(e))
                         self.app.delete_backup = False
                 self.app.conn.commit()
@@ -4200,16 +4420,16 @@ class DialogCodeText(QtWidgets.QWidget):
             cursor.execute("update case_text set pos0=?, pos1=? where caseid=?",
                            [ca[1], ca[2], ca[0]])
         self.clear_edit_variables()
-        self.ui.textEdit.installEventFilter(self.eventFilterTT)
+        self.ui.plainTextEdit.installEventFilter(self.eventFilterTT)
         self.annotations = self.app.get_annotations()
         self.load_file(self.file_)
         self.update_file_tooltip()
         self.highlight()
-        text_cursor = self.ui.textEdit.textCursor()
-        if self.edit_pos > len(self.ui.textEdit.toPlainText()):
-            self.edit_pos = len(self.ui.textEdit.toPlainText()) - 1
+        text_cursor = self.ui.plainTextEdit.textCursor()
+        if self.edit_pos > len(self.ui.plainTextEdit.toPlainText()):
+            self.edit_pos = len(self.ui.plainTextEdit.toPlainText()) - 1
         text_cursor.setPosition(self.edit_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
-        self.ui.textEdit.setTextCursor(text_cursor)
+        self.ui.plainTextEdit.setTextCursor(text_cursor)
         msg = _("Text reverted to prior to edit")
         Message(self.app, _("Undo last edited text"), msg).exec()
 
@@ -4271,7 +4491,7 @@ class DialogCodeText(QtWidgets.QWidget):
         if res_case:
             self.edit_original_case_assignment = res_case
 
-        temp_edit_pos = self.ui.textEdit.textCursor().position() + self.file_['start']
+        temp_edit_pos = self.ui.plainTextEdit.textCursor().position() + self.file_['start']
         if temp_edit_pos > 0:
             self.edit_pos = temp_edit_pos
         self.ui.groupBox.hide()
@@ -4287,22 +4507,22 @@ class DialogCodeText(QtWidgets.QWidget):
             self.file_['start'] = 0
             self.file_['end'] = len(file_result['fulltext'])
             self.text = file_result['fulltext']
-            self.ui.textEdit.setText(self.text)
+            self.ui.plainTextEdit.setPlainText(self.text)
         self.prev_text = copy(self.text)
-        self.ui.textEdit.removeEventFilter(self.eventFilterTT)
+        self.ui.plainTextEdit.removeEventFilter(self.eventFilterTT)
         self.get_cases_codings_annotations()
-        self.ui.textEdit.setTextInteractionFlags(
+        self.ui.plainTextEdit.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextEditorInteraction |
             Qt.TextInteractionFlag.TextEditable
         )        
         self.ed_highlight()
         self.edit_mode_has_changed = False
-        self.ui.textEdit.textChanged.connect(self.update_positions)
-        text_cursor = self.ui.textEdit.textCursor()
+        self.ui.plainTextEdit.textChanged.connect(self.update_positions)
+        text_cursor = self.ui.plainTextEdit.textCursor()
         if self.edit_pos >= len(self.text):
             self.edit_pos = len(self.text) - 1
         text_cursor.setPosition(self.edit_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
-        self.ui.textEdit.setTextCursor(text_cursor)
+        self.ui.plainTextEdit.setTextCursor(text_cursor)
 
     def edit_mode_off(self):
         """ Show widgets.
@@ -4319,7 +4539,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.widget_left.show()
         self.prev_text = ""
         if self.edit_mode_has_changed:
-            self.text = self.ui.textEdit.toPlainText()
+            self.text = self.ui.plainTextEdit.toPlainText()
             self.file_['fulltext'] = self.text
             self.file_['end'] = len(self.text)
             cur = self.app.conn.cursor()
@@ -4334,26 +4554,22 @@ class DialogCodeText(QtWidgets.QWidget):
             self.ed_update_casetext()
             # Update vectorstore
             if self.app.settings['ai_enable'] == 'True':
-                self.app.ai.sources_vectorstore.import_document(self.file_['id'], self.file_['name'], self.text,
-                                                                update=True)
-            else:
-                # AI is disabled. Delete the file from the vectorstore. It will be reimported later when the AI is enabled again. 
-                self.app.ai.sources_vectorstore.delete_document(self.file_['id'])
+                self.app.ai.sources_vectorstore.import_document(self.file_['id'], self.file_['name'], self.text)
 
-        self.ui.textEdit.setTextInteractionFlags(  # make the textEdit read only by removing the 'TextEditable' flag
+        self.ui.plainTextEdit.setTextInteractionFlags(  # make the textEdit read only by removing the 'TextEditable' flag
             Qt.TextInteractionFlag.TextSelectableByMouse |
             Qt.TextInteractionFlag.TextSelectableByKeyboard
         ) 
-        self.ui.textEdit.installEventFilter(self.eventFilterTT)
+        self.ui.plainTextEdit.installEventFilter(self.eventFilterTT)
         self.annotations = self.app.get_annotations()
         self.load_file(self.file_)
         self.update_file_tooltip()
         self.highlight()
-        text_cursor = self.ui.textEdit.textCursor()
-        if self.edit_pos > len(self.ui.textEdit.toPlainText()):
-            self.edit_pos = len(self.ui.textEdit.toPlainText()) - 1
+        text_cursor = self.ui.plainTextEdit.textCursor()
+        if self.edit_pos > len(self.ui.plainTextEdit.toPlainText()):
+            self.edit_pos = len(self.ui.plainTextEdit.toPlainText()) - 1
         text_cursor.setPosition(self.edit_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
-        self.ui.textEdit.setTextCursor(text_cursor)
+        self.ui.plainTextEdit.setTextCursor(text_cursor)
 
     def update_positions(self):
         """ Update positions for code text, annotations and case text as each character changes
@@ -4376,7 +4592,7 @@ class DialogCodeText(QtWidgets.QWidget):
         if self.no_codes_annotes_cases:
             return
 
-        self.text = self.ui.textEdit.toPlainText()
+        self.text = self.ui.plainTextEdit.toPlainText()
         diff = diff_match_patch.diff_match_patch()
         diff_list = diff.diff_main(self.prev_text, self.text)
         # print(diff_list)
@@ -4558,7 +4774,7 @@ class DialogCodeText(QtWidgets.QWidget):
         # No need to update positions (unless entire file is a case)
         if self.no_codes_annotes_cases or not self.edit_mode:
             return
-        self.text = self.ui.textEdit.toPlainText()
+        self.text = self.ui.plainTextEdit.toPlainText()
         # n is how many context lines to show
         d = list(difflib.unified_diff(self.prev_text, self.text, n=0))
         if len(d) < 4:
@@ -4714,8 +4930,8 @@ class DialogCodeText(QtWidgets.QWidget):
         format_ = QtGui.QTextCharFormat()
         format_.setFontFamily(self.app.settings['font'])
         format_.setFontPointSize(self.app.settings['docfontsize'])
-        self.ui.textEdit.blockSignals(True)
-        cursor = self.ui.textEdit.textCursor()
+        self.ui.plainTextEdit.blockSignals(True)
+        cursor = self.ui.plainTextEdit.textCursor()
         for item in self.ed_casetext:
             if item['newpos0'] is not None:
                 cursor.setPosition(int(item['newpos0']), QtGui.QTextCursor.MoveMode.MoveAnchor)
@@ -4737,21 +4953,21 @@ class DialogCodeText(QtWidgets.QWidget):
                 format_.setFontUnderline(True)
                 format_.setUnderlineColor(QtCore.Qt.GlobalColor.red)
                 cursor.setCharFormat(format_)
-        self.ui.textEdit.blockSignals(False)
+        self.ui.plainTextEdit.blockSignals(False)
 
     def remove_formatting(self):
         """ Remove formatting from text edit on changed text.
          Useful when pasting mime data (rich text or html) from clipboard. """
 
-        self.ui.textEdit.blockSignals(True)
+        self.ui.plainTextEdit.blockSignals(True)
         format_ = QtGui.QTextCharFormat()
         format_.setFontFamily(self.app.settings['font'])
         format_.setFontPointSize(self.app.settings['docfontsize'])
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         cursor.setPosition(0, QtGui.QTextCursor.MoveMode.MoveAnchor)
-        cursor.setPosition(len(self.ui.textEdit.toPlainText()), QtGui.QTextCursor.MoveMode.KeepAnchor)
+        cursor.setPosition(len(self.ui.plainTextEdit.toPlainText()), QtGui.QTextCursor.MoveMode.KeepAnchor)
         cursor.setCharFormat(format_)
-        self.ui.textEdit.blockSignals(False)
+        self.ui.plainTextEdit.blockSignals(False)
 
     def get_cases_codings_annotations(self):
         """ Get all linked cases, coded text and annotations for this file.
@@ -4865,7 +5081,7 @@ class DialogCodeText(QtWidgets.QWidget):
             selected_id = int(code_item.text(1).split(':')[1])
             selected_is_code = True
 
-        ui = DialogAiSearch(self.app, 'search', selected_id, selected_is_code)
+        ui = DialogAiSearch(self.app, 'search', selected_id, selected_is_code, self.tree_sort_option)
         ret = ui.exec()
         if ret == QtWidgets.QDialog.DialogCode.Accepted:
             self.ai_search_code_name = ui.selected_code_name
@@ -4886,7 +5102,7 @@ class DialogCodeText(QtWidgets.QWidget):
             self.ui.listWidget_ai.clear()
             self.ai_search_current_result_index = None
             self.ai_search_spinner_timer.start(500)
-            self.ui.textEdit.setText(_('Searching for related data, please wait...'))
+            self.ui.plainTextEdit.setPlainText(_('Searching for related data, please wait...'))
 
             # Phase 1: find similar chunks of data from the vectorstore
             self.app.ai.ai_async_is_canceled = False
@@ -4904,10 +5120,10 @@ class DialogCodeText(QtWidgets.QWidget):
 
         if self.app.ai.ai_async_is_canceled:
             self.ai_search_running = False
-            self.ui.textEdit.setText('')
+            self.ui.plainTextEdit.setPlainText('')
             return
         if chunks is None or len(chunks) == 0:
-            self.ui.textEdit.setText('')
+            self.ui.plainTextEdit.setPlainText('')
             msg = _('AI: No related data found for "') + self.ai_search_code_name + '".'
             Message(self.app, _('AI Search'), msg, "warning").exec()
             self.ai_search_running = False
@@ -4924,7 +5140,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 chunk_start = chunk.metadata['start_index']
                 chunk_end = chunk_start + len(chunk.page_content)
                 code_ids_str = "(" + ", ".join(map(str, self.ai_search_code_ids)) + ")"
-                codings_sql = f'select pos0, pos1 from code_text where fid={chunk_source_id} AND cid in {code_ids_str}'
+                codings_sql = f'select pos0, pos1 from code_text_visible where fid={chunk_source_id} AND cid in {code_ids_str}'
                 cur = self.app.conn.cursor()
                 cur.execute(codings_sql)
                 codings = cur.fetchall()
@@ -4947,14 +5163,14 @@ class DialogCodeText(QtWidgets.QWidget):
             chunks = filtered_chunks
 
         if len(chunks) == 0:
-            self.ui.textEdit.setText('')
+            self.ui.plainTextEdit.setPlainText('')
             msg = _('AI: No new data found for "') + self.ai_search_code_name + _(
                 '" beside what has already been coded with this code.')
             Message(self.app, _('AI Search'), msg, "warning").exec()
             self.ai_search_running = False
             return
 
-        self.ui.textEdit.setText(_('Potentially related data found, inspecting it closer. Please be patient...'))
+        self.ui.plainTextEdit.setPlainText(_('Potentially related data found, inspecting it closer. Please be patient...'))
 
         # 2) Send the first "ai_search_analysis_max_count" chunks to the llm for further analysis 
         self.ai_search_similar_chunk_list = chunks  # save to allow analyzing more chunks later
@@ -4987,7 +5203,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 self.ai_search_running = False
                 if len(self.ai_search_results) == 0:  # nothing found
                     self.ai_search_update_listview_action()
-                    self.ui.textEdit.setText('')
+                    self.ui.plainTextEdit.setPlainText('')
                     msg = _('The closer inspection of the first ') + str(self.ai_search_chunks_pos) + \
                           _('pieces of data yielded no results. You can continue to inspect more by clicking on "find '
                             'more" in the list on the left.')
@@ -4995,7 +5211,7 @@ class DialogCodeText(QtWidgets.QWidget):
         else:  # search finished
             self.ai_search_running = False
             if len(self.ai_search_results) == 0:  # nothing found
-                self.ui.textEdit.setText('')
+                self.ui.plainTextEdit.setPlainText('')
                 self.ai_search_update_listview_action()
                 msg = _(
                     'Upon closer inspection, no pieces of data relevant to your search query could be identified. '
@@ -5143,7 +5359,7 @@ class DialogCodeText(QtWidgets.QWidget):
     def open_doc_selection(self, doc_id, sel_start, sel_end):
         """ Open document and select a certain part. """
 
-        for i, f in enumerate(self.filenames):
+        for i, f in enumerate(self.files):
             if f['id'] == doc_id:
                 f['start'] = 0
                 if f['end'] != f['characters']:  # partially loaded
@@ -5154,14 +5370,14 @@ class DialogCodeText(QtWidgets.QWidget):
                     self.ui.listWidget.setCurrentRow(i)
                     self.load_file(f)
                     # Set text cursor position
-                    text_cursor = self.ui.textEdit.textCursor()
+                    text_cursor = self.ui.plainTextEdit.textCursor()
                     text_cursor.setPosition(sel_start)
                     endpos = sel_end
                     if endpos < 0:
                         endpos = 0
                     text_cursor.setPosition(endpos, QtGui.QTextCursor.MoveMode.KeepAnchor)
-                    self.ui.textEdit.setTextCursor(text_cursor)
-                    self.ui.textEdit.setFocus()
+                    self.ui.plainTextEdit.setTextCursor(text_cursor)
+                    self.ui.plainTextEdit.setFocus()
                     QtCore.QTimer.singleShot(20, self.scroll_text_into_view)  # scroll into view after window is updated
                 except Exception as e:
                     logger.debug(str(e))
@@ -5169,13 +5385,13 @@ class DialogCodeText(QtWidgets.QWidget):
 
     def scroll_text_into_view(self):
         """ Scroll so the selection is in the middle of the screen. """
-        cursor = self.ui.textEdit.textCursor()
+        cursor = self.ui.plainTextEdit.textCursor()
         if cursor.hasSelection():
-            cursor_rect = self.ui.textEdit.cursorRect(cursor)
+            cursor_rect = self.ui.plainTextEdit.cursorRect(cursor)
             vertical_center = cursor_rect.center().y()
-            vertical_scrollbar = self.ui.textEdit.verticalScrollBar()
+            vertical_scrollbar = self.ui.plainTextEdit.verticalScrollBar()
             current_scroll_pos = vertical_scrollbar.value()
-            desired_scroll_pos = current_scroll_pos + (vertical_center - self.ui.textEdit.viewport().height() // 2)
+            desired_scroll_pos = current_scroll_pos + (vertical_center - self.ui.plainTextEdit.viewport().height() // 2)
             vertical_scrollbar.setValue(desired_scroll_pos)
 
     def ai_search_update_spinner(self):
@@ -5208,8 +5424,8 @@ class DialogCodeText(QtWidgets.QWidget):
             return
 
         # Get the adjusted start and end positions from the text editor's current selection
-        pos0 = self.ui.textEdit.textCursor().selectionStart() + self.file_['start']
-        pos1 = self.ui.textEdit.textCursor().selectionEnd() + self.file_['start']
+        pos0 = self.ui.plainTextEdit.textCursor().selectionStart() + self.file_['start']
+        pos1 = self.ui.plainTextEdit.textCursor().selectionEnd() + self.file_['start']
         if pos0 == pos1:
             return
 
@@ -5310,6 +5526,7 @@ class ToolTipEventFilter(QtCore.QObject):
                         text_ += item['name'] + "</em>"
                         if self.app.settings['showids']:
                             text_ += " [ctid:" + str(item['ctid']) + "]"
+                        text_ += " (" + item['owner'] + ")"
                         text_ += "<br />" + seltext
                         if item['memo'] != "":
                             memo_text = item['memo']
@@ -5329,7 +5546,7 @@ class ToolTipEventFilter(QtCore.QObject):
             # Check annotations
             for ann in self.annotations:
                 if ann['pos0'] - self.offset <= pos <= ann['pos1'] - self.offset and self.file_id == ann['fid']:
-                    text_ += "<p>" + _("ANNOTATED:") + ann['memo'] + "</p>"
+                    text_ += "<p>" + _("ANNOTATED") + " (" + ann['owner'] + "): " + ann['memo'] + "</p>"
             if text_ != "":
                 receiver.setToolTip(text_)
         # Call Base Class Method to Continue Normal Event Processing

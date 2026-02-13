@@ -16,9 +16,11 @@ If not, see <https://www.gnu.org/licenses/>.
 
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
+https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 from binascii import b2a_hex
-from copy import deepcopy
+from copy import copy, deepcopy
 import datetime
 import fitz
 import logging
@@ -54,6 +56,7 @@ from .confirm_delete import DialogConfirmDelete
 from .helpers import Message, ExportDirectoryPathDialog
 from .GUI.ui_dialog_code_pdf import Ui_Dialog_code_pdf
 from .memo import DialogMemo
+from .coder_names import DialogCoderNames
 from .report_attributes import DialogSelectAttributeParameters
 from .reports import DialogReportCoderComparisons, DialogReportCodeFrequencies  # for isinstance()
 from .report_codes import DialogReportCodes
@@ -159,7 +162,8 @@ class DialogCodePdf(QtWidgets.QWidget):
         self.ui.treeWidget.setStyleSheet(tree_font)
         doc_font = f'font: {self.app.settings["docfontsize"]}pt "{self.app.settings["font"]}";'
         self.ui.textEdit.setStyleSheet(doc_font)
-        self.ui.label_coder.setText(f"Coder: {self.app.settings['codername']}")
+        self.ui.lineEdit_coder.setText(self.app.settings['codername'])
+        self.ui.pushButton_coder.clicked.connect(self.edit_coder_names)
         self.ui.textEdit.setPlainText("")
         self.ui.textEdit.setAutoFillBackground(True)
         self.ui.textEdit.setToolTip("")
@@ -356,39 +360,62 @@ class DialogCodePdf(QtWidgets.QWidget):
             except ValueError:
                 pass
 
-    def get_files(self, ids=None):
+    def get_files(self, ids=None, sort="name asc"):
         """ Get pdf files with additional details and fill list widget.
          Called by: init, get_files_from_attributes, show_files_like
-         param:
+         args:
          ids: list, fill with ids to limit file selection.
+         sort : String Sort options, name asc, name, desc, case asc, case desc
          """
 
         if ids is None:
             ids = []
         self.ui.listWidget.clear()
-        self.filenames = self.app.get_pdf_filenames(ids)
+        self.files = self.app.get_pdf_filenames(ids)
         # Fill additional details about each file in the memo
         cur = self.app.conn.cursor()
-        sql = "select length(fulltext), fulltext from source where id=?"
-        sql_codings = "select count(cid) from code_text where fid=? and owner=?"
-        for f in self.filenames:
-            cur.execute(sql, [f['id'], ])
-            res = cur.fetchone()
-            if res is None:  # Safety catch
-                res = [0, ""]
-            tt = _("Characters: ") + str(res[0])
-            f['characters'] = res[0]
-            f['start'] = 0
-            f['end'] = res[0]
-            f['fulltext'] = res[1]
-            cur.execute(sql_codings, [f['id'], self.app.settings['codername']])
-            res = cur.fetchone()
-            tt += f"\n{_('Codings:')} {res[0]}"
-            tt += f"\n{_('From:')} {f['start']} - {f['end']}"
-            item = QtWidgets.QListWidgetItem(f['name'])
-            if f['memo'] != "":
-                tt += f"\nMemo: {f['memo']}"
-            item.setToolTip(tt)
+        sql_length = "select length(fulltext), fulltext from source where id=?"
+        sql_codings = "select count(cid) from code_text_visible where fid=?"
+        sql_case = "SELECT group_concat(cases.name) from cases join case_text on case_text.caseid=cases.caseid where case_text.fid=?"
+        for file_ in self.files:
+            tt = _("Date: ") + f"{file_['date'].split()[0]}\n"  # Date without timestamp
+            cur.execute(sql_case, [file_['id']])
+            res_cases = cur.fetchone()
+            if res_cases and res_cases[0] is not None:
+                tt += _("Case: ") + f"{res_cases[0]}\n"
+            cur.execute(sql_length, [file_['id'], ])
+            res_length = cur.fetchone()
+            if res_length is None:  # Safety catch
+                res_length = [0, ""]
+            tt += _("Characters: ") + str(res_length[0])
+            file_['characters'] = res_length[0]
+            file_['start'] = 0
+            file_['end'] = res_length[0]
+            file_['fulltext'] = res_length[1]
+            cur.execute(sql_codings, [file_['id']])
+            res_codings = cur.fetchone()
+            tt += f"\n{_('Codings:')} {res_codings[0]}"
+            tt += f"\n{_('From:')} {file_['start']} - {file_['end']}"
+            if file_['memo'] != "":
+                tt += f"\nMemo: {file_['memo']}"
+            file_['tooltip'] = tt
+        # Sorting the file list
+        if sort == "name asc":
+            self.files = sorted(self.files, key=lambda x: x['name'])
+        if sort == "name desc":
+            self.files = sorted(self.files, key=lambda x: x['name'], reverse=True)
+        if sort == "case asc":
+            self.files = sorted(self.files, key=lambda x: x['case'])
+        if sort == "case desc":
+            self.files = sorted(self.files, key=lambda x: x['case'], reverse=True)
+        if sort == "date asc":
+            self.files = sorted(self.files, key=lambda x: x['date'])
+        if sort == "date desc":
+            self.files = sorted(self.files, key=lambda x: x['date'], reverse=True)
+        # Fill list widget
+        for file_ in self.files:
+            item = QtWidgets.QListWidgetItem(file_['name'])
+            item.setToolTip(file_['tooltip'])
             self.ui.listWidget.addItem(item)
         self.file_ = None
         self.code_text = []  # Must be before clearing textEdit, as next calls cursorChanged
@@ -409,8 +436,8 @@ class DialogCodePdf(QtWidgets.QWidget):
             res = [0, ""]
         tt = _("Characters: ") + str(res[0])
         f = {'characters': res[0], 'start': 0, 'end': res[0], 'fulltext': res[1]}
-        sql_codings = "select count(cid) from code_text where fid=? and owner=?"
-        cur.execute(sql_codings, [self.file_['id'], self.app.settings['codername']])
+        sql_codings = "select count(cid) from code_text_visible where fid=?"
+        cur.execute(sql_codings, [self.file_['id']])
         res = cur.fetchone()
         tt += f"\n{_('Codings:')} {res[0]}"
         tt += f"\n{_('From:')} {f['start']} - {f['end']}"
@@ -640,51 +667,84 @@ class DialogCodePdf(QtWidgets.QWidget):
         self.fill_code_counts_in_tree()
 
     def fill_code_counts_in_tree(self):
-        """ Count instances of each code for current coder and in the selected file.
-        Called by: fill_tree
+        """ Calculate the frequency of each code and category for this coder and the selected file.
+        Add a list item to each code that can be used to display in treeWidget.
+        If the tab 'AI assisted coding' is active, the codings will be counted
+        across all files, not only the currently selected one, because the AI assisted
+        coding is not working on a per-file basis.
         """
 
         if self.file_ is None:
             return
         cur = self.app.conn.cursor()
-        sql = "select count(cid) from code_text where cid=? and fid=? and owner=?"
-        it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
-        item = it.value()
-        count = 0
-        while item and count < 10000:
-            if item.text(1)[0:4] == "cid:":
-                cid = str(item.text(1)[4:])
-                try:
-                    cur.execute(sql, [cid, self.file_['id'], self.app.settings['codername']])
-                    result = cur.fetchone()
-                    if result[0] > 0:
-                        item.setText(3, str(result[0]))
-                        item.setToolTip(3, self.app.settings['codername'])
-                    else:
-                        item.setText(3, "")
-                except Exception as e:
-                    msg = f"Fill code counts error\n{e}\n{sql}\n"
-                    msg += f"cid: {cid}\n"
-                    msg += "self.file_['id'] " + f"{self.file_['id']}\n"
-                    logger.debug(msg)
-                    item.setText(3, "")
-            it += 1
-            item = it.value()
-            count += 1
+        code_counts = []
+        for c in self.codes:
+            parameters = [c['cid'], self.file_['id']]
+            sql = "select code_name.catid, count(code_text_visible.cid) from code_text_visible join code_name " \
+                  "on code_name.cid=code_text_visible.cid where code_text_visible.cid=? " \
+                  "and code_text_visible.fid=?"
+            cur.execute(sql, parameters)
+            result = cur.fetchone()
+            code_counts.append([c['cid'], result[0], result[1]])
+        categories = deepcopy(self.categories)
+        # Set up category counts
+        for category in categories:
+            category['count'] = 0
+        # Add the number of codes directly under each category to the category
+        for category in categories:
+            for code in code_counts:
+                if code[1] == category['catid']:
+                    category['count'] += code[2]
+        # Find leaf categories, add to above categories, and gradually remove leaves
+        # until only top categories are left
+        sub_categories = copy(categories)
+        counter = 0
+        while len(sub_categories) > 0 or counter < 10000:
+            leaf_list = []
+            branch_list = []
+            for cat in sub_categories:
+                for cat2 in sub_categories:
+                    if cat['catid'] == cat2['supercatid']:
+                        branch_list.append(cat)
+            for category in sub_categories:
+                if category not in branch_list:
+                    leaf_list.append(category)
+            # Add totals higher category
+            for leaf_category in leaf_list:
+                for category in categories:
+                    if category['catid'] == leaf_category['supercatid']:
+                        category['count'] += leaf_category['count']
+                sub_categories.remove(leaf_category)
+            counter += 1
+
+        # Fill tree item counts
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            item = iterator.value()
+            if item.text(1).startswith("catid"):
+                catid = int(item.text(1)[6:])
+                for category in categories:
+                    if catid == category['catid']:
+                        item.setText(3, str(category['count']))
+            else:
+                cid = int(item.text(1)[4:])
+                for code in code_counts:
+                    if cid == code[0]:
+                        item.setText(3, str(code[2]))
+                        break
+            iterator += 1  # Move to the next item
 
     def get_collapsed(self, item):
         """ On category collapse or expansion signal, find the collapsed parent category items.
         This will fill the self.app.collapsed_categories and is the expanded/collapsed tree is then replicated across
         other areas of the app. """
 
-        #print(item.text(0), item.text(1), "Expanded:", item.isExpanded())
         if item.text(1)[:3] == "cid":
             return
         if not item.isExpanded() and item.text(1) not in self.app.collapsed_categories:
             self.app.collapsed_categories.append(item.text(1))
         if item.isExpanded() and item.text(1) in self.app.collapsed_categories:
             self.app.collapsed_categories.remove(item.text(1))
-        print("pdf", self.app.collapsed_categories)
 
     def get_codes_and_categories(self):
         """ Called from init, delete category/code.
@@ -693,6 +753,23 @@ class DialogCodePdf(QtWidgets.QWidget):
         self.codes, self.categories = self.app.get_codes_categories()
 
     # Header section widgets
+    def edit_coder_names(self):
+        ui_coder_names = DialogCoderNames(self.app, extended_options=False)
+        if (ui_coder_names.exec() == QtWidgets.QDialog.DialogCode.Accepted and 
+            ui_coder_names.coder_names_changed):
+            # Update UI as coders visibility may have changed
+            self.annotations = self.app.get_annotations()
+            self.get_coded_text_update_eventfilter_tooltips()
+            self.display_page_text_objects()
+            self.fill_code_counts_in_tree()
+            self.ui.lineEdit_coder.setText(self.app.settings['codername'])   
+            # close contents in tab_reports since they must update coder names as well 
+            contents = self.tab_reports.layout()
+            if contents:
+                for i in reversed(range(contents.count())):
+                    contents.itemAt(i).widget().close()
+                    contents.itemAt(i).widget().setParent(None)
+
 
     # Search for text methods
     def search_for_text(self):
@@ -1035,8 +1112,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             return
         coded_text_list = []
         for item in self.code_text:
-            if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= position + self.file_['start'] <= item['pos1']:
                 coded_text_list.append(item)
         if not coded_text_list:
             return
@@ -1125,7 +1201,6 @@ class DialogCodePdf(QtWidgets.QWidget):
         coded_text_list = []
         for item in self.code_text:
             if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername'] and \
                     ((not important and item['important'] == 1) or (important and item['important'] != 1)) and \
                     ctid is None:
                 coded_text_list.append(item)
@@ -1174,8 +1249,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             return
         coded_text_list = []
         for item in self.code_text:
-            if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername'] and ctid is None:
+            if item['pos0'] <= position + self.file_['start'] <= item['pos1'] and ctid is None:
                 coded_text_list.append(item)
             if ctid is not None and ctid == item['ctid']:
                 coded_text_list.append(item)
@@ -1210,7 +1284,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         for i in self.code_text:
             if text_item['cid'] == i['cid'] and text_item['seltext'] == i['seltext'] \
                     and text_item['pos0'] == i['pos0'] and text_item['pos1'] == i['pos1'] \
-                    and text_item['owner'] == self.app.settings['codername']:
+                    and text_item['owner'] == i['owner']:
                 i['memo'] = memo
         self.app.delete_backup = False
         self.get_coded_text_update_eventfilter_tooltips()
@@ -1485,7 +1559,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             # Get coded examples
             txt += f"\n{_('EXAMPLES:')}\n"
             cur = self.app.conn.cursor()
-            cur.execute("select seltext from code_text where length(seltext) > 0 and cid=? order by random() limit 3",
+            cur.execute("select seltext from code_text_visible where length(seltext) > 0 and cid=? order by random() limit 3",
                         [int(selected.text(1)[4:])])
             res = cur.fetchall()
             for i, r in enumerate(res):
@@ -1630,8 +1704,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         selected_text = self.ui.textEdit.textCursor().selectedText()
         codes_here = []
         for item in self.code_text:
-            if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1']:
                 codes_here.append(item)
         # Hash display character position
         if key == QtCore.Qt.Key.Key_Exclam:
@@ -1811,8 +1884,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             cursor_pos = self.ui.textEdit.textCursor().position()
             codes_here = []
             for item in self.code_text:
-                if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1'] and \
-                        item['owner'] == self.app.settings['codername']:
+                if item['pos0'] <= cursor_pos + self.file_['start'] <= item['pos1']:
                     codes_here.append(item)
             if len(codes_here) == 1:
                 # Key event can be too sensitive, adjusted  for millisecond gap
@@ -2352,21 +2424,20 @@ class DialogCodePdf(QtWidgets.QWidget):
     def file_menu(self, position):
         """ Context menu for listWidget files to get to the next file and
         to go to the file with the latest codings by this coder.
-        Each file dictionary item in self.filenames contains:
+        Each file dictionary item in self.files contains:
         {'id', 'name', 'memo', 'characters'= number of characters in the file,
         'start' = showing characters from this position, 'end' = showing characters to this position}
 
-        param:
-            position : """
+        args:
+            position :
+        """
 
         selected = self.ui.listWidget.currentItem()
-        file_ = None
-        if selected is not None:
-            for f in self.filenames:
-                if selected.text() == f['name']:
-                    file_ = f
+        if not selected:
+            return
+        file_ = next((f for f in self.files if f['name'] == selected.text()), None)
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         action_next = None
         action_latest = None
         action_show_files_like = None
@@ -2380,12 +2451,21 @@ class DialogCodePdf(QtWidgets.QWidget):
                 len(file_['mediapath']) > 6 and \
                 (file_['mediapath'][:6] == '/docs/' or file_['mediapath'][:5] == 'docs:'):
             action_view_original_file = menu.addAction(_("View original text file"))
-        if len(self.filenames) > 1:
+        if len(self.files) > 1:
             action_next = menu.addAction(_("Next file"))
             action_latest = menu.addAction(_("File with latest coding"))
             action_show_files_like = menu.addAction(_("Show files like"))
             action_show_by_attribute = menu.addAction(_("Show files by attributes"))
             action_show_case_files = menu.addAction(_("Show case files"))
+        sort_menu = QtWidgets.QMenu(_("Sort"))
+        sort_menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
+        action_sort_name_asc = sort_menu.addAction(_("Sort by name ascending"))
+        action_sort_name_desc = sort_menu.addAction(_("Sort by name descending"))
+        action_sort_case_asc = sort_menu.addAction(_("Sort by case ascending"))
+        action_sort_case_desc = sort_menu.addAction(_("Sort by case descending"))
+        action_sort_date_asc = sort_menu.addAction(_("Sort by date ascending"))
+        action_sort_date_desc = sort_menu.addAction(_("Sort by date descending"))
+        menu.addMenu(sort_menu)
         action = menu.exec(self.ui.listWidget.mapToGlobal(position))
         if action is None:
             return
@@ -2403,6 +2483,18 @@ class DialogCodePdf(QtWidgets.QWidget):
             self.show_case_files()
         if action == action_show_by_attribute:
             self.get_files_from_attributes()
+        if action == action_sort_name_asc:
+            self.get_files(None, "name asc")
+        if action == action_sort_name_desc:
+            self.get_files(None, "name desc")
+        if action == action_sort_case_asc:
+            self.get_files(None, "case asc")
+        if action == action_sort_case_desc:
+            self.get_files(None, "case desc")
+        if action == action_sort_date_asc:
+            self.get_files(None, "date asc")
+        if action == action_sort_date_desc:
+            self.get_files(None, "date desc")
 
     def view_original_file(self):
         """ View original pdf file. Opens in browser or other OS default software.
@@ -2471,12 +2563,12 @@ class DialogCodePdf(QtWidgets.QWidget):
         """ Go to next file in list. Button. """
 
         if self.file_ is None:
-            self.load_file(self.filenames[0])
+            self.load_file(self.files[0])
             self.ui.listWidget.setCurrentRow(0)
             return
-        for i in range(0, len(self.filenames) - 1):
-            if self.file_ == self.filenames[i]:
-                found = self.filenames[i + 1]
+        for i in range(0, len(self.files) - 1):
+            if self.file_ == self.files[i]:
+                found = self.files[i + 1]
                 self.ui.listWidget.setCurrentRow(i + 1)
                 self.load_file(found)
                 self.search_term = ""
@@ -2487,14 +2579,14 @@ class DialogCodePdf(QtWidgets.QWidget):
         Files menu option.
         """
 
-        sql = "SELECT code_text.fid FROM code_text join source on source.id=code_text.fid \
-            where code_text.owner=? and lower(source.mediapath) like '%pdf' order by code_text.date desc limit 1"
+        sql = "SELECT code_text_visible.fid FROM code_text_visible join source on source.id=code_text_visible.fid \
+            where lower(source.mediapath) like '%pdf' order by code_text_visible.date desc limit 1"
         cur = self.app.conn.cursor()
-        cur.execute(sql, [self.app.settings['codername']])
+        cur.execute(sql)
         result = cur.fetchone()
         if result is None:
             return
-        for i, filedata in enumerate(self.filenames):
+        for i, filedata in enumerate(self.files):
             if filedata['id'] == result[0]:
                 self.ui.listWidget.setCurrentRow(i)
                 self.load_file(filedata)
@@ -2506,10 +2598,10 @@ class DialogCodePdf(QtWidgets.QWidget):
         The selected file is then displayed for coding.
         Note: file segment is also loaded from listWidget context menu """
 
-        if len(self.filenames) == 0:
+        if len(self.files) == 0:
             return
         item_name = self.ui.listWidget.currentItem().text()
-        for f in self.filenames:
+        for f in self.files:
             if f['name'] == item_name:
                 self.file_ = f
                 self.load_file(self.file_)
@@ -2548,7 +2640,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         """ File selection changed. """
 
         row = self.ui.listWidget.currentRow()
-        self.load_file(self.filenames[row])
+        self.load_file(self.files[row])
 
     def load_file(self, file_):
         """ Load and display file pdf object in qgraphicsscene and text for this file.
@@ -2982,6 +3074,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             cursor.mergeCharFormat(fmt)
             # cursor.setCharFormat(fmt)
             tooltip_item_text = graphics_item_code['name']
+            tooltip_item_text += " (" + graphics_item_code['owner'] + ")"
             if graphics_item_code['memo'] is not None and graphics_item_code['memo'] != "":
                 tooltip_item_text += "\n" + _("Memo: ") + graphics_item_code['memo']
             if graphics_item_code['important'] == 1:
@@ -3151,15 +3244,14 @@ class DialogCodePdf(QtWidgets.QWidget):
 
         if self.file_ is None:
             return
-        sql_values = [int(self.file_['id']),
-                      self.app.settings['codername']]  # , self.file_['start'], self.file_['end']]
-        # Get code text for this file and for this coder
+        sql_values = [int(self.file_['id'])]  # , self.file_['start'], self.file_['end']]
+        # Get code text for this file and for all visible coders
         self.code_text = []
         # seltext length, longest first, so overlapping shorter text is superimposed.
-        sql = "select code_text.ctid, code_text.cid, fid, seltext, pos0, pos1, code_text.owner, code_text.date, " \
-              "code_text.memo, important, name"
-        sql += " from code_text join code_name on code_text.cid = code_name.cid"
-        sql += " where fid=? and code_text.owner=? "
+        sql = "select code_text_visible.ctid, code_text_visible.cid, fid, seltext, pos0, pos1, code_text_visible.owner, code_text_visible.date, " \
+              "code_text_visible.memo, important, name"
+        sql += " from code_text_visible join code_name on code_text_visible.cid = code_name.cid"
+        sql += " where fid=?"
         # sql += " and pos0 >=? and pos1 <=? "  # problem area, removed
         sql += "order by length(seltext) desc, important asc"
         cur = self.app.conn.cursor()
@@ -3419,7 +3511,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         self.display_page_text_objects()
 
     def unmark(self, position=None, ctid=None):
-        """ Remove code marking by this coder from selected text in current file.
+        """ Remove code marking by any visible coder from selected text in current file.
         Called by text_edit_context_menu, graphicsview_menu
         Adjust for start of text file, as this may be a smaller portion of the full text file.
         Coded text items may be based ona text cursor location, if selected by the text edit,
@@ -3433,8 +3525,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             return
         unmarked_list = []
         for item in self.code_text:
-            if position and item['pos0'] <= position + self.file_['start'] <= item['pos1'] and \
-                    item['owner'] == self.app.settings['codername']:
+            if position and item['pos0'] <= position + self.file_['start'] <= item['pos1']:
                 unmarked_list.append(item)
             if ctid and ctid == item['ctid']:
                 unmarked_list.append(item)
@@ -3625,12 +3716,9 @@ class DialogCodePdf(QtWidgets.QWidget):
             color = 0
         return fontname, fontsize, color
 
-    @staticmethod
-    def help():
+    def help(self):
         """ Open help for transcribe section in browser. """
-
-        url = "https://github.com/ccbogel/QualCoder/wiki/4.3.-Coding-Text-on-PDFs"
-        webbrowser.open(url)
+        self.app.help_wiki("4.3.-Coding-Text-on-PDFs")
 
 
 class ToolTipEventFilter(QtCore.QObject):
@@ -3708,6 +3796,7 @@ class ToolTipEventFilter(QtCore.QObject):
                         text_ += item['name'] + "</em>"
                         if self.app.settings['showids']:
                             text_ += f" [ctid:{item['ctid']}]"
+                        text_ += " (" + item['owner'] + ")"
                         text_ += "<br />" + seltext
                         if item['memo'] != "":
                             text_ += "<br /><em>" + _("MEMO: ") + item['memo'] + "</em>"
@@ -3723,7 +3812,7 @@ class ToolTipEventFilter(QtCore.QObject):
             # Check annotations
             for ann in self.annotations:
                 if ann['pos0'] - self.offset <= pos <= ann['pos1'] - self.offset and self.file_id == ann['fid']:
-                    text_ += "<p>" + _("ANNOTATED:") + ann['memo'] + "</p>"
+                    text_ += "<p>" + _("ANNOTATED") + " (" + ann['owner'] + "): " + ann['memo'] + "</p>"
             if text_ != "":
                 receiver.setToolTip(text_)
         # Call Base Class Method to Continue Normal Event Processing

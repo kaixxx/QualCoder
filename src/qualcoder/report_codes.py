@@ -17,7 +17,9 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
+
 import sqlite3
 from copy import deepcopy
 import csv
@@ -125,7 +127,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         self.ui.pushButton_run_report.clicked.connect(self.search)
         self.ui.pushButton_run_report.setIcon(qta.icon('mdi6.play', options=[{'scale_factor': 2}]))
         self.ui.label_exports.setPixmap(qta.icon('mdi6.export').pixmap(22, 22))
-        self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable'))
+        self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable', options=[{'scale_factor': 1.3}]))
         self.ui.pushButton_search_next.setIcon(qta.icon('mdi6.arrow-right'))
         self.ui.pushButton_search_next.pressed.connect(self.search_results_next)
         options = ["", _("Top categories by case"), _("Top categories by file"), _("Categories by case"),
@@ -190,7 +192,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         self.app.settings['dialogreportcodes_splitter_v1'] = max(sizes_vert[1], 10)
         self.app.settings['dialogreportcodes_splitter_v2'] = max(sizes_vert[2], 10)
 
-    def get_files_and_cases(self):
+    def get_files_and_cases(self, file_sort="name asc"):
         """ Get source files with additional details and fill files list widget.
         Get cases and fill case list widget
         Called from : init, manage_files.delete manage_files.delete_button_multiple_files
@@ -204,15 +206,15 @@ class DialogReportCodes(QtWidgets.QDialog):
         sql_text_codings = "select count(cid) from code_text where fid=?"
         sql_av_codings = "select count(cid) from code_av where id=?"
         sql_image_codings = "select count(cid) from code_image where id=?"
-        item = QtWidgets.QListWidgetItem("")
-        item.setToolTip(_("No file selection"))
-        self.ui.listWidget_files.addItem(item)
-        for f in self.files:
-            cur.execute(sql, [f['id'], ])
+        root_item = QtWidgets.QListWidgetItem("")
+        root_item.setToolTip(_("No file selection"))
+        self.ui.listWidget_files.addItem(root_item)
+        for file_ in self.files:
+            cur.execute(sql, [file_['id'], ])
             res = cur.fetchone()
             if res is None:  # safety catch
                 res = [0]
-            tt = ""
+            tt = f"{file_['date']}\n"
             if res[1] is None or res[1][0:5] == "docs:":
                 tt += _("Text file\n")
                 tt += _("Characters: ") + str(res[0])
@@ -222,11 +224,11 @@ class DialogReportCodes(QtWidgets.QDialog):
                 tt += _("Audio")
             if res[1] is not None and (res[1][0:6] == "video:" or res[1][0:6] == "/video"):
                 tt += _("Video")
-            cur.execute(sql_text_codings, [f['id']])
+            cur.execute(sql_text_codings, [file_['id']])
             txt_res = cur.fetchone()
-            cur.execute(sql_av_codings, [f['id']])
+            cur.execute(sql_av_codings, [file_['id']])
             av_res = cur.fetchone()
-            cur.execute(sql_image_codings, [f['id']])
+            cur.execute(sql_image_codings, [file_['id']])
             img_res = cur.fetchone()
             tt += _("\nCodings: ")
             if txt_res[0] > 0:
@@ -235,12 +237,23 @@ class DialogReportCodes(QtWidgets.QDialog):
                 tt += str(av_res[0])
             if img_res[0] > 0:
                 tt += str(img_res[0])
-            item = QtWidgets.QListWidgetItem(f['name'])
-            if f['memo'] != "":
-                tt += _("\nMEMO: ") + f['memo']
-            item.setToolTip(tt)
+            if file_['memo'] != "":
+                tt += _("\nMEMO: ") + file_['memo']
+            file_['tooltip'] = tt
+        # Sorting the file list
+        if file_sort == "name asc":
+            self.files = sorted(self.files, key=lambda x: x['name'])
+        if file_sort == "name desc":
+            self.files = sorted(self.files, key=lambda x: x['name'], reverse=True)
+        if file_sort == "date asc":
+            self.files = sorted(self.files, key=lambda x: x['date'])
+        if file_sort == "date desc":
+            self.files = sorted(self.files, key=lambda x: x['date'], reverse=True)
+        for file_ in self.files:
+            item = QtWidgets.QListWidgetItem(file_['name'])
+            item.setToolTip(file_['tooltip'])
             self.ui.listWidget_files.addItem(item)
-
+        # Cases
         self.ui.listWidget_cases.clear()
         self.cases = self.app.get_casenames()
         item = QtWidgets.QListWidgetItem("")
@@ -253,6 +266,13 @@ class DialogReportCodes(QtWidgets.QDialog):
                 tt = _("MEMO: ") + c['memo']
             item.setToolTip(tt)
             self.ui.listWidget_cases.addItem(item)
+        if not self.cases:
+            self.ui.listWidget_cases.setHidden(True)
+            view = self.ui.comboBox_matrix.view()
+            print("hiding")
+            view.setRowHidden(1, True)
+            view.setRowHidden(3, True)
+            view.setRowHidden(5, True)
 
     def get_codes_categories_coders(self):
         """ Called from init, delete category. Load codes, categories, and coders. """
@@ -293,10 +313,14 @@ class DialogReportCodes(QtWidgets.QDialog):
         """ Context menu for file selection. """
 
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         action_all_files = menu.addAction(_("Select all files"))
         action_files_like = menu.addAction(_("Select files like"))
         action_files_none = menu.addAction(_("Select none"))
+        action_sort_name_asc = menu.addAction(_("Sort by name ascending"))
+        action_sort_name_desc = menu.addAction(_("Sort by name descending"))
+        action_sort_date_asc = menu.addAction(_("Sort by date ascending"))
+        action_sort_date_desc = menu.addAction(_("Sort by date descending"))
         action = menu.exec(self.ui.listWidget_files.mapToGlobal(position))
         if action == action_all_files:
             self.ui.listWidget_files.selectAll()
@@ -323,15 +347,25 @@ class DialogReportCodes(QtWidgets.QDialog):
                     self.ui.listWidget_files.item(i).setSelected(True)
                 else:
                     self.ui.listWidget_files.item(i).setSelected(False)
+        if action == action_sort_name_asc:
+            self.get_files_and_cases("name asc")
+        if action == action_sort_name_desc:
+            self.get_files_and_cases("name desc")
+        if action == action_sort_date_asc:
+            self.get_files_and_cases("date asc")
+        if action == action_sort_date_desc:
+            self.get_files_and_cases("date desc")
 
     def listwidget_cases_menu(self, position):
         """ Context menu for case selection. """
 
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         action_all_cases = menu.addAction(_("Select all cases"))
         action_cases_like = menu.addAction(_("Select cases like"))
         action_cases_none = menu.addAction(_("Select none"))
+        action_cases_name_ascending = menu.addAction(_("Sort by name ascending"))
+        action_cases_name_descending = menu.addAction(_("Sort by name descending"))
         action = menu.exec(self.ui.listWidget_cases.mapToGlobal(position))
         if action == action_all_cases:
             self.ui.listWidget_cases.selectAll()
@@ -339,10 +373,14 @@ class DialogReportCodes(QtWidgets.QDialog):
         if action == action_cases_none:
             for i in range(self.ui.listWidget_cases.count()):
                 self.ui.listWidget_cases.item(i).setSelected(False)
+        if action == action_cases_name_ascending:
+            self.ui.listWidget_cases.sortItems(Qt.SortOrder.AscendingOrder)
+        if action == action_cases_name_descending:
+            self.ui.listWidget_cases.sortItems(Qt.SortOrder.DescendingOrder)
         if action == action_cases_like:
             # Input dialog narrow, so code below
             dialog = QtWidgets.QInputDialog(None)
-            dialog.setStyleSheet("* {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+            dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
             dialog.setWindowTitle(_("Select some cases"))
             dialog.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
             dialog.setInputMode(QtWidgets.QInputDialog.InputMode.TextInput)
@@ -364,7 +402,6 @@ class DialogReportCodes(QtWidgets.QDialog):
         This will fill the self.app.collapsed_categories and is the expanded/collapsed tree is then replicated across
         other areas of the app. """
 
-        #print(item.text(0), item.text(1), "Expanded:", item.isExpanded())
         if item.text(1)[:3] == "cid":
             return
         if not item.isExpanded() and item.text(1) not in self.app.collapsed_categories:
@@ -452,7 +489,8 @@ class DialogReportCodes(QtWidgets.QDialog):
                 top_item.setBackground(0, QBrush(QtGui.QColor(c['color']), Qt.BrushStyle.SolidPattern))
                 color = TextColor(c['color']).recommendation
                 top_item.setForeground(0, QBrush(QtGui.QColor(color)))
-                top_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                top_item.setFlags(
+                    Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
                 top_item.setToolTip(0, '')
                 if len(c['name']) > 52:
                     top_item.setText(0, f"{c['name'][:25]}..{c['name'][-25:]}")
@@ -477,7 +515,8 @@ class DialogReportCodes(QtWidgets.QDialog):
                     child.setBackground(0, QBrush(QtGui.QColor(c['color']), Qt.BrushStyle.SolidPattern))
                     color = TextColor(c['color']).recommendation
                     child.setForeground(0, QBrush(QtGui.QColor(color)))
-                    child.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                    child.setFlags(
+                        Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
                     child.setToolTip(0, '')
                     if len(c['name']) > 52:
                         child.setText(0, f"{c['name'][:25]}..{c['name'][-25:]}")
@@ -534,8 +573,9 @@ class DialogReportCodes(QtWidgets.QDialog):
                 tree_item.setSelected(False)
         if action == action_like:
             # Need to unselect where mouse click occurred
-            clicked_selected = self.ui.treeWidget.selectedItems()[0]
-            clicked_selected.setSelected(False)
+            if self.ui.treeWidget.selectedItems():
+                clicked_selected = self.ui.treeWidget.selectedItems()[0]
+                clicked_selected.setSelected(False)
             # Input dialog narrow, so code below
             dialog = QtWidgets.QInputDialog(None)
             dialog.setStyleSheet("* {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
@@ -548,7 +588,8 @@ class DialogReportCodes(QtWidgets.QDialog):
             if not ok:
                 return
             selection_text = str(dialog.textValue())
-            tree_items = self.ui.treeWidget.findItems(selection_text, Qt.MatchFlag.MatchContains | Qt.MatchFlag.MatchRecursive, 0)
+            tree_items = self.ui.treeWidget.findItems(selection_text,
+                                                      Qt.MatchFlag.MatchContains | Qt.MatchFlag.MatchRecursive, 0)
             for tree_item in tree_items:
                 if 'cid' in tree_item.text(1):
                     tree_item.setSelected(True)
@@ -571,6 +612,8 @@ class DialogReportCodes(QtWidgets.QDialog):
             self.export_csv_file()
         if text_ == "xlsx":
             self.export_xlsx_file()
+        if text_ in ("iramuteq", "IRaMuTeQ"):
+            self.export_iramuteq_file()
         self.ui.comboBox_export.setCurrentIndex(0)
 
     def export_matrix(self):
@@ -626,8 +669,8 @@ class DialogReportCodes(QtWidgets.QDialog):
         if len(self.ui.textEdit.document().toPlainText()) == 0:
             return
         filepath, ok = QtWidgets.QFileDialog.getSaveFileName(self,
-                                                            _("Save Text File"), self.app.settings['directory'],
-                                                            "Text Files(*.txt)")
+                                                             _("Save Text File"), self.app.settings['directory'],
+                                                             "Text Files(*.txt)")
         # options=QtWidgets.QFileDialog.Option.DontUseNativeDialog)
         if filepath is None or not ok:
             return
@@ -644,6 +687,66 @@ class DialogReportCodes(QtWidgets.QDialog):
         Message(self.app, _('Report exported'), msg, "information").exec()
         self.parent_textEdit.append(msg)
 
+    def export_iramuteq_file(self):
+        """Export report to IRaMuTeQ text format,."""
+        if not self.results:
+            return
+
+        # Demander à l'utilisateur où sauvegarder le fichier
+        filepath, ok = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            _("Save IRaMuTeQ File"),
+            self.app.settings['directory'],
+            "Text Files (*.txt)"
+        )
+        if not filepath or not ok:
+            return
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            for data in self.results:
+                # Construire la ligne de métadonnées
+                metadata_parts = [
+                    f"*{data['file_or_case']}_{data['file_or_casename']}",
+                    f"*coder_{data['coder']}",
+                    f"*codename_{data['codename']}"
+                ]
+
+                # Ajouter les catégories
+                categories = self.categories_of_code(data['cid'])
+                for category in categories:
+                    metadata_parts.append(f"*category_{category}")
+
+                # Ajouter les variables de fichier et de cas si la case est cochée
+                if self.ui.checkBox_variables.isChecked():
+                    cur = self.app.conn.cursor()
+                    # Variables de fichier
+                    cur.execute("select name, value from attribute where attr_type='file' and id=?", [data['fid']])
+                    file_vars = cur.fetchall()
+                    for name, value in file_vars:
+                        metadata_parts.append(f"*filevar_{name}_{value}")
+                    # Variables de cas (si c'est un cas)
+                    if data['file_or_case'] == "Case":
+                        cur.execute("select name, value from attribute where attr_type='case' and id=?",
+                                    [data['caseid']])
+                        case_vars = cur.fetchall()
+                        for name, value in case_vars:
+                            metadata_parts.append(f"*casevar_{name}_{value}")
+
+                # Écrire la ligne de métadonnées
+                f.write("**** " + " ".join(metadata_parts) + "\n")
+
+                # Écrire le texte ou la description du média
+                if data['result_type'] == 'text':
+                    f.write(f"{data['text']}\n\n")
+                elif data['result_type'] == 'image':
+                    f.write(f"image (id: imid:{data['imid']})\n\n")
+                elif data['result_type'] == 'av':
+                    f.write(f"audio/video (id: avid:{data['avid']})\n\n")
+
+        msg = _("Report exported in IRaMuTeQ format: ") + filepath
+        Message(self.app, _('Report exported'), msg, "information").exec()
+        self.parent_textEdit.append(msg)
+
     def export_odt_file(self):
         """ Export report to open document format with .odt ending.
         QTextWriter supports plaintext, ODF and HTML .
@@ -652,8 +755,9 @@ class DialogReportCodes(QtWidgets.QDialog):
         if len(self.ui.textEdit.document().toPlainText()) == 0:
             return
         filepath, ok = QtWidgets.QFileDialog.getSaveFileName(self,
-                                                            _("Save Open Document Text File"), self.app.settings['directory'],
-                                                            "ODT Files(*.odt)")
+                                                             _("Save Open Document Text File"),
+                                                             self.app.settings['directory'],
+                                                             "ODT Files(*.odt)")
         # options=QtWidgets.QFileDialog.Option.DontUseNativeDialog)
         if filepath is None or not ok:
             return
@@ -720,8 +824,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         # Create data rows
         csv_data = []
         for row, data in enumerate(self.results):
-            csv_data_row = []
-            csv_data_row.append(data['file_or_casename'])
+            csv_data_row = [data['file_or_casename']]
             if inserted_col == 1:  # For Case results, insert the Filename data
                 csv_data_row.append(data['filename'])
             csv_data_row.append(data['coder'])
@@ -842,8 +945,8 @@ class DialogReportCodes(QtWidgets.QDialog):
             if inserted_col == 1:  # For Case results, insert the Filename data
                 ws.cell(column=2, row=row + 2, value=data['filename'])
             ws.cell(column=2 + inserted_col, row=row + 2, value=data['coder'])
-            #tODO
-            '''align_cell = ws.cell(column=2 + inserted_col, row=row + 2)
+            ''' TODO 
+            align_cell = ws.cell(column=2 + inserted_col, row=row + 2)
             align_cell.value = data['coder']
             align_cell.alignment = Alignment(wrap_text=True, vertical='top')'''
             coding_id = ""
@@ -886,8 +989,8 @@ class DialogReportCodes(QtWidgets.QDialog):
                     ws.cell(column=case_vars_start_column + case_var_pos, row=row + 2, value=value)
 
         filepath, ok = QtWidgets.QFileDialog.getSaveFileName(self,
-                                                            _("Save Excel File"), self.app.settings['directory'],
-                                                            "XLSX Files(*.xlsx)")
+                                                             _("Save Excel File"), self.app.settings['directory'],
+                                                             "XLSX Files(*.xlsx)")
         # options=QtWidgets.QFileDialog.Option.DontUseNativeDialog)
         if filepath is None or not ok:
             return
@@ -935,8 +1038,8 @@ class DialogReportCodes(QtWidgets.QDialog):
         if len(self.ui.textEdit.document().toPlainText()) == 0:
             return
         filepath, ok = QtWidgets.QFileDialog.getSaveFileName(self,
-                                                            _("Save HTML File"), self.app.settings['directory'],
-                                                            "HTML Files(*.html)")
+                                                             _("Save HTML File"), self.app.settings['directory'],
+                                                             "HTML Files(*.html)")
         # options=QtWidgets.QFileDialog.Option.DontUseNativeDialog)
         if filepath is None or not ok:
             return
@@ -1221,18 +1324,19 @@ class DialogReportCodes(QtWidgets.QDialog):
         ok = attr_ui.exec()
         if not ok:
             self.attributes = temp_attributes
-            self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable'))
+            self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable', options=[{'scale_factor': 1.3}]))
             self.ui.pushButton_attributeselect.setToolTip(_("Attributes"))
             if self.attributes:
-                self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable-box'))
+                self.ui.pushButton_attributeselect.setIcon(
+                    qta.icon('mdi6.variable-box', options=[{'scale_factor': 1.3}]))
             return
         # As List containing (1) list of attributes, within (2) [List of attributes, boolean type]
         self.attributes = attr_ui.parameters
         if len(self.attributes) == 1:  # The and /or boolean operator only
-            self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable'))
+            self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable', options=[{'scale_factor': 1.3}]))
             self.ui.pushButton_attributeselect.setToolTip(_("Attributes"))
             return
-        self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable-box'))
+        self.ui.pushButton_attributeselect.setIcon(qta.icon('mdi6.variable-box', options=[{'scale_factor': 1.3}]))
         self.ui.pushButton_attributeselect.setToolTip(attr_ui.tooltip_msg)
         self.attributes_msg = attr_ui.tooltip_msg
         # Used ..?
@@ -1795,8 +1899,8 @@ class DialogReportCodes(QtWidgets.QDialog):
             try:
                 image = Image.open(abs_path)
                 w, h = image.size
-            except FileNotFoundError:
-                pass
+            except (FileNotFoundError, Image.DecompressionBombError) as err:
+                logger.warning(str(err))
             res_dict = {"fid": res[0], "area": w * h, "filename": res[1]}
             file_areas.append(res_dict)
 
@@ -2024,11 +2128,14 @@ class DialogReportCodes(QtWidgets.QDialog):
                 pos1 = len(self.ui.textEdit.toPlainText())
                 cursor.setPosition(pos0, QtGui.QTextCursor.MoveMode.MoveAnchor)
                 cursor.setPosition(pos1, QtGui.QTextCursor.MoveMode.KeepAnchor)
-                if self.ui.checkBox_text_context.isChecked() and self.app.settings['report_text_context_style'] == 'Bold':
+                if self.ui.checkBox_text_context.isChecked() and self.app.settings[
+                    'report_text_context_style'] == 'Bold':
                     cursor.setCharFormat(fmt_bold)
-                if self.ui.checkBox_text_context.isChecked() and self.app.settings['report_text_context_style'] == 'Italic':
+                if self.ui.checkBox_text_context.isChecked() and self.app.settings[
+                    'report_text_context_style'] == 'Italic':
                     cursor.setCharFormat(fmt_italic)
-                if self.ui.checkBox_text_context.isChecked() and self.app.settings['report_text_context_style'] == 'Bigger':
+                if self.ui.checkBox_text_context.isChecked() and self.app.settings[
+                    'report_text_context_style'] == 'Bigger':
                     cursor.setCharFormat(fmt_larger)
                 pos0 = len(self.ui.textEdit.toPlainText())
                 self.ui.textEdit.insertPlainText(row['posttext'])
@@ -2124,6 +2231,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         """
 
         text_edit.append("\n")
+        pdf_path = ""
         path_ = self.app.project_path + img['mediapath']
         if img['mediapath'][0:7] == "images:":
             path_ = img['mediapath'][7:]
@@ -2278,6 +2386,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         action_unmark = None
         action_important = None
         action_change_code_to = None
+        action_apply_additional_code = None
         code_here = None
         for row in self.results:
             if row['textedit_start'] <= pos < row['textedit_end']:
@@ -2312,7 +2421,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         if action == action_important:
             self.mark_important(code_here)
         if action == action_change_code_to:
-                self.change_code_to_another_code(code_here)
+            self.change_code_to_another_code(code_here)
         if action == action_apply_additional_code:
             self.apply_additional_code(code_here)
         if action == action_copy:
@@ -2377,7 +2486,8 @@ class DialogReportCodes(QtWidgets.QDialog):
             if existing_code['result_type'] == 'text':
                 cur.execute("update code_text set cid=? where ctid=?", [replacement_code['cid'], existing_code['ctid']])
             if existing_code['result_type'] == 'image':
-                cur.execute("update code_image set cid=? where imid=?", [replacement_code['cid'], existing_code['imid']])
+                cur.execute("update code_image set cid=? where imid=?",
+                            [replacement_code['cid'], existing_code['imid']])
             if existing_code['result_type'] == 'av':
                 cur.execute("update code_av set cid=? where avid=?", [replacement_code['cid'], existing_code['avid']])
             self.app.conn.commit()
@@ -2418,19 +2528,19 @@ class DialogReportCodes(QtWidgets.QDialog):
             if existing_code['result_type'] == 'text':
                 cur.execute("insert into code_text (cid,fid,seltext,pos0,pos1,owner,\
                             memo,date, important) values(?,?,?,?,?,?,'',?,null)", (new_code['cid'],
-                                                                               existing_code['fid'],
-                                                                               existing_code['text'],
-                                                                               existing_code['pos0'],
-                                                                               existing_code['pos1'],
-                                                                               owner,
-                                                                               now_date))
+                                                                                   existing_code['fid'],
+                                                                                   existing_code['text'],
+                                                                                   existing_code['pos0'],
+                                                                                   existing_code['pos1'],
+                                                                                   owner,
+                                                                                   now_date))
             if existing_code['result_type'] == 'image':
                 cur.execute(
                     "insert into code_image (id,x1,y1,width,height,cid,memo,date,owner, important, pdf_page) "
                     "values(?,?,?,?,?,?,'',?,?,null,?)",
-                                                    (existing_code['fid'], existing_code['x1'], existing_code['y1'],
-                                                     existing_code['width'], existing_code['height'],
-                                                     new_code['cid'], now_date, owner, existing_code['pdf_page']))
+                    (existing_code['fid'], existing_code['x1'], existing_code['y1'],
+                     existing_code['width'], existing_code['height'],
+                     new_code['cid'], now_date, owner, existing_code['pdf_page']))
             if existing_code['result_type'] == 'av':
                 cur.execute("insert into code_av (id, pos0, pos1, cid, memo, date, owner, important) "
                             "values(?,?,?,?,'',?,?, null)",
@@ -2814,14 +2924,17 @@ class DialogReportCodes(QtWidgets.QDialog):
                             self.te[row][col].insertHtml(self.matrix_heading(r, self.te[row][col]))
                             if r['result_type'] == 'text' and memo_choice in (_("Only memos"), _("Only coded memos")):
                                 self.te[row][col].append(r['coded_memo'])
-                            if r['result_type'] == 'text' and memo_choice not in (_("Only memos"), _("Only coded memos")):
+                            if r['result_type'] == 'text' and memo_choice not in (
+                                    _("Only memos"), _("Only coded memos")):
                                 self.te[row][col].append(r['text'])
-                                if memo_choice in (_("Also all memos"), _("Also coded memos")) and r['coded_memo'] != "":
+                                if memo_choice in (_("Also all memos"), _("Also coded memos")) and r[
+                                    'coded_memo'] != "":
                                     self.te[row][col].append(f"{_('MEMO:')} {r['coded_memo']}")
                                 self.te[row][col].insertPlainText("\n")
                             if r['result_type'] == 'image' and memo_choice in (_("Only memos"), _("Only coded memos")):
                                 self.te[row][col].append(r['coded_memo'])
-                            if r['result_type'] == 'image' and memo_choice not in (_("Only memos"), _("Only coded memos")):
+                            if r['result_type'] == 'image' and memo_choice not in (
+                                    _("Only memos"), _("Only coded memos")):
                                 self.put_image_into_textedit(r, counter, self.te[row][col])
                             if r['result_type'] == 'av' and memo_choice not in (_("Only memos"), _("Only coded memos")):
                                 self.te[row][col].insertPlainText(f"{r['text']}\n")
@@ -2837,10 +2950,12 @@ class DialogReportCodes(QtWidgets.QDialog):
                             self.te[row][col].insertHtml(self.matrix_heading(r, self.te[row][col]))
                             if r['result_type'] == 'text' and memo_choice in (_("Only memos"), _("Only coded memos")):
                                 self.te[row][col].append(r['coded_memo'])
-                            if r['result_type'] == 'text' and memo_choice not in (_("Only memos"), _("Only coded memos")):
+                            if r['result_type'] == 'text' and memo_choice not in (
+                                    _("Only memos"), _("Only coded memos")):
                                 self.te[row][col].append(r['text'])
                                 try:
-                                    if memo_choice in (_("Also all memos"), "Also coded memos") and r['coded_memo'] != "":
+                                    if memo_choice in (_("Also all memos"), "Also coded memos") and r[
+                                        'coded_memo'] != "":
                                         self.te[row][col].append(_("MEMO: ") + r['coded_memo'])
                                 except TypeError as err:
                                     msg = str(err)
@@ -2850,7 +2965,8 @@ class DialogReportCodes(QtWidgets.QDialog):
                                 self.te[row][col].insertPlainText("\n")
                             if r['result_type'] == 'image' and memo_choice in (_("Only memos"), _("Only coded memos")):
                                 self.te[row][col].append(r['coded_memo'])
-                            if r['result_type'] == 'image' and memo_choice not in (_("Only memos"), _("Only coded memos")):
+                            if r['result_type'] == 'image' and memo_choice not in (
+                                    _("Only memos"), _("Only coded memos")):
                                 self.put_image_into_textedit(r, counter, self.te[row][col])
                             if r['result_type'] == 'av' and memo_choice not in (_("Only memos"), _("Only coded memos")):
                                 self.te[row][col].insertPlainText(r['text'] + "\n")

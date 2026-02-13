@@ -17,6 +17,7 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 from PyQt6 import QtWidgets, QtCore
@@ -77,31 +78,29 @@ about = '<h1 class="western">About QualCoder</h1>\
 <p>QualCoderVersion</p>\
 <p>Optional: Install VLC for audio and video coding.<br /> \
 Optional: Install ffmpeg for waveform images.</p>\
-<p>Tested on: Ubuntu 24.04, Windows 11, used on macOS and on other Linux distros.</p>\
+<p>Tested on: Windows 11.</p>\
 <p></p>\
 <h2 class="western">Acknowledgements</h2>\
 <p>Ronggui Huang and Zhang Gehao for creating RQDA, which inspired this software.<br /> \
 Mike MacCana for the source code for the docx module.<br /> \
 User: bit4 on stackoverflow who presented the source code to convert html to text.<br /> \
 ebooklib: Aleksandar Erkalović https://github.com/aerkalov.<br /> \
-The VideoLAN team for the bindings to VLC. https://github.com/oaubert/python-vlc.<br /> \
-The ffmpeg team. https://ffmpeg.org/ used with waveform and spectrograph images.<br /> \
+The VideoLAN team for the bindings to VLC.<br /> \
 Julius Reich for creating the QualCoder logo.<br /> \
-Kai Droege for developing and testing the code to incorporate artificial intelligence models for AI coding.<br /> \
- To various members on github for supporting this project.</p>\
-<h2 class="western">Other details</h2\
+Kai Dröge for developing and testing the code to incorporate artificial intelligence models for AI, and more.<br /> \
+Justin Missaghieh--Poncet for French translations and setting up the new manual <a href="https://qualcoder-org.github.io" target="_blank">https://qualcoder-org.github.io</a><br /> \
+Lorenzo Salomón for Spanish translations.<br /> \
+Jofen Kihlstrom for Swedish translations.<br /> \
+To various members on github for supporting this project.</p>\
+<h2 class="western">Other details</h2> \
 <p>The qda data folder contains folders for imported documents, \
 images, audio and video. It also contains the sqlite database, named data.qda, which stores the coding data.</p>\
-<p>QualCoder creates a .qualcoder folder inside your home directory. \
-This contains QualCoder.log, config.ini (for settings) and \
-recent_project.txt. The config file contains the name of the current coder, \
-default working directory, selected font and other parameters.</p>\
 <p>QualCoder is written in python3 using Qt6 for the graphical interface.</p>\
 <p>The REFI-QDA Project import and export seem to work ok, but are not guaranteed to work.</p>\
-<p>Created by Colin Curtain BPharm GradDipComp PhD, python programmer, Lecturer University of Tasmania.</p>\
+<p>Created by Colin Curtain BPharm GradDipComp PhD, programmer, Lecturer University of Tasmania.</p>\
 <h2>Citation</h2>\
-Curtain, C. Droege, K. (2025) QualCoder 3.7 [Computer software]. \
-Retrieved from https://github.com/ccbogel/QualCoder/releases/tag/3.7\
+Curtain, C. Dröge, K. (2026) QualCoderVersion [Computer software]. \
+Retrieved from https://github.com/ccbogel/QualCoder/releases/tag/3.8\
 <h2 class="western">Licenses</h2>\
 <h3>LGPL-3.0 License</h3>\
 <p>This file is part of QualCoder.</p>\
@@ -112,7 +111,7 @@ Foundation, either version 3 of the License, or (at your option) any later versi
 without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. \
 See the GNU General Public License for more details.</p>\
 <p>You should have received a copy of the GNU Lesser General Public License along with QualCoder. \
-If not, see &lt;https://www.gnu.org/licenses/&gt;. </p>\
+If not, see <a href="https://www.gnu.org/licenses">https://www.gnu.org/licenses</a>  </p>\
 <h3>License for highlighter.py code</h3>\
 <p>## Copyright (C) 2013 Riverbank Computing Limited.<br />\
 ## Copyright (C) 2010 Nokia Corporation and/or its subsidiary(-ies).<br />\
@@ -175,12 +174,13 @@ OTHER DEALINGS IN THE SOFTWARE.'
 menu_shortcuts = '<h1>Menu key shortcuts</h1>\n\
 <table><tr><td><b>Menu shortcuts</b></td><td><b>Project menu shortcuts</b></td>\n\
 <td><b>Files and Cases menu shortcuts</b></td></tr>\n\
-<tr><td>Alt 1 Open Project menu</td><td>Ctrl N New project</td><td>Alt F Manage files</td></tr>\n\
+<tr><td>Alt 1 Open Project menu</td><td>Ctrl N New project (macOS Cmd N)</td><td>\n\
+Alt F Manage files (macOS Option F)</td></tr>\n\
 <tr><td>Alt 2 Open Files and Cases menu</td><td>Ctrl O Open project</td><td>Alt C Manage cases</td></tr>\n\
 <tr><td>Alt 3 Open Coding menu</td><td>Alt X Close project</td><td>Alt J Manage journals</td></tr>\n\
 <tr><td>Alt 4 Open Reports menu</td><td>Ctrl M Project memo</td><td>Alt A Manage attributes</td></tr>\n\
 <tr><td>Alt 5 Open Help menu</td><td>Alt S Settings</td><td>Alt R Manage references</td></tr>\n\
-<tr><td><br/></td><td>Ctrl Q Exit</td><td>Ctrl I Import survey</td></tr>\n\
+<tr><td><br/></td><td>Ctrl Q Exit (macOS Cmd Q)</td><td>Ctrl I Import survey</td></tr>\n\
 </table><br/><table>\n\
 <tr><td><b>Coding menu shortcuts</b></td><td><b>Reports menu shortcuts</b></td><td><b>Help menu shortcuts</b></td></tr>\n\
 <tr><td>Alt T Code text</td><td>Alt K Coding reports</td><td>Alt H Contents - in web browser</td></tr>\n\
@@ -212,14 +212,14 @@ manage_section_shortcuts = '<h1>Manage menu section key shortcuts</h1><table>\n\
 </table>'
 
 view_av_shortcuts = '<br /><h2>Manage files - view A/V shortcuts</h2>\n\
-Alt minus Rewind 30 seconds.<br />Ctrl R Rewind 5 seconds<br />Alt plus Forward 30 seconds<br />\n\
-Ctrl S OR Ctrl P Start/pause. On start rewind 1 second<br />\n\
+Alt minus Rewind 30 seconds.<br />Ctrl R Rewind 5 seconds (macOS Cmd R)<br />Alt plus Forward 30 seconds<br />\n\
+Ctrl S OR Ctrl P Start/pause. On start rewind slightly (macOS Cmd S Cmd P)<br />\n\
 Ctrl T Insert timestamp in format [hh.mm.ss]<br />\n\
-Ctrl N Enter a new speakers name into shortcuts<br />\n\
+Ctrl N Enter a new speakers name into shortcuts (macOS use Button)<br />\n\
 Ctrl D Delete speaker names from shortcuts<br />\n\
 Ctrl 1 .. 8 Insert speaker in format [speaker name]<br />\n\
-Ctrl Shift &gt; Increase play rate<br />\n\
-Ctrl Shift &lt; Decrease play rate<br /><br />'
+Ctrl Shift &gt; Increase play rate (macOS Cmd Shift &gt;)<br />\n\
+Ctrl Shift &lt; Decrease play rate (macOS Cmd Shift &lt;)<br /><br />'
 
 menu_shortcuts_display = menu_shortcuts + manage_section_shortcuts + view_av_shortcuts
 

@@ -17,10 +17,13 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
-from copy import deepcopy
+from copy import deepcopy, copy
 import datetime
+
+import PIL.Image
 import fitz
 import html
 from io import BytesIO
@@ -46,6 +49,7 @@ from .GUI.ui_dialog_view_image import Ui_Dialog_view_image
 from .move_resize_rectangle import DialogMoveResizeRectangle
 from .helpers import ExportDirectoryPathDialog, Message
 from .memo import DialogMemo
+from .coder_names import DialogCoderNames
 from .report_attributes import DialogSelectAttributeParameters
 from .reports import DialogReportCoderComparisons, DialogReportCodeFrequencies  # for isinstance()
 from .report_codes import DialogReportCodes
@@ -123,11 +127,12 @@ class DialogCodeImage(QtWidgets.QDialog):
         tree_font = f'font: {self.app.settings["treefontsize"]}pt "{self.app.settings["font"]}";'
         self.ui.treeWidget.setStyleSheet(tree_font)
         self.ui.label_image.setStyleSheet(tree_font)  # Usually smaller font
-        self.ui.label_coder.setText(_("Coder: ") + self.app.settings['codername'])
         self.setWindowTitle(_("Image coding"))
         self.ui.horizontalSlider.valueChanged[int].connect(self.redraw_scene)
         self.ui.horizontalSlider.setToolTip(_("Key + or W zoom in. Key - or Q zoom out"))
 
+        self.ui.lineEdit_coder.setText(self.app.settings['codername'])
+        self.ui.pushButton_coder.clicked.connect(self.edit_coder_names)
         self.ui.pushButton_default_new_code_color.setIcon(qta.icon('mdi6.palette', options=[{'scale_factor': 1.4}]))
         self.ui.pushButton_default_new_code_color.pressed.connect(self.set_default_new_code_color)
         self.ui.pushButton_export.setIcon(qta.icon('mdi6.export', options=[{'scale_factor': 1.4}]))
@@ -217,6 +222,23 @@ class DialogCodeImage(QtWidgets.QDialog):
 
         self.codes, self.categories = self.app.get_codes_categories()
 
+    def edit_coder_names(self):
+        ui_coder_names = DialogCoderNames(self.app, extended_options=False)
+        if (ui_coder_names.exec() == QtWidgets.QDialog.DialogCode.Accepted and 
+            ui_coder_names.coder_names_changed):
+            # Update UI as coders visibility may have changed
+            self.get_coded_areas()
+            self.redraw_scene()
+            self.fill_code_counts_in_tree()
+            self.ui.lineEdit_coder.setText(self.app.settings['codername'])
+            # close contents in tab_reports since they must update coder names as well 
+            contents = self.tab_reports.layout()
+            if contents:
+                for i in reversed(range(contents.count())):
+                    contents.itemAt(i).widget().close()
+                    contents.itemAt(i).widget().setParent(None)
+                    
+
     def set_default_new_code_color(self):
         """ New code colours are usually generated randomly.
          This overrides the random approach, by setting a colout. """
@@ -285,7 +307,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.redraw_scene()
 
     def get_coded_areas(self):
-        """ Get the coded area details for the rectangles for the image file by current coder.
+        """ Get the coded area details for the rectangles for the image file by all visible coders.
         Order by area descending so when items are drawn to the scene. First largest to smallest on top.
         Called by load file, update_dialog_codes_and_categories,coded_media_dialog, undo_last_unmarked_code.
         """
@@ -295,31 +317,33 @@ class DialogCodeImage(QtWidgets.QDialog):
         cur = self.app.conn.cursor()
         self.code_areas = []
         if self.pdf_page is not None:
-            sql = "select imid,id,x1, y1, width, height, code_image.memo, code_image.date, code_image.owner, " \
-                  "code_image.cid, important, code_name.name, code_name.color, pdf_page from code_image " \
-                  "join code_name on code_name.cid=code_image.cid " \
-                  " where code_image.id=? and code_image.owner=? and width > 0 and height > 0 and pdf_page=?" \
+            sql = "select imid,id,x1, y1, width, height, code_image_visible.memo, code_image_visible.date, code_image_visible.owner, " \
+                  "code_image_visible.cid, important, code_name.name, code_name.color, pdf_page from code_image_visible " \
+                  "join code_name on code_name.cid=code_image_visible.cid " \
+                  " where code_image_visible.id=? and width > 0 and height > 0 and pdf_page=?" \
                   " order by width*height desc"
-            cur.execute(sql, [self.file_['id'], self.app.settings['codername'], self.pdf_page])
+            cur.execute(sql, [self.file_['id'], self.pdf_page])
         else:  # Images, jpg, png
-            sql = "select imid,id,x1, y1, width, height, code_image.memo, code_image.date, code_image.owner, " \
-                  "code_image.cid, important, code_name.name, code_name.color, pdf_page from code_image " \
-                  "join code_name on code_name.cid=code_image.cid " \
-                  " where code_image.id=? and code_image.owner=? and width > 0 and height > 0" \
+            sql = "select imid,id,x1, y1, width, height, code_image_visible.memo, code_image_visible.date, code_image_visible.owner, " \
+                  "code_image_visible.cid, important, code_name.name, code_name.color, pdf_page from code_image_visible " \
+                  "join code_name on code_name.cid=code_image_visible.cid " \
+                  " where code_image_visible.id=? and width > 0 and height > 0" \
                   " order by width*height desc"
-            cur.execute(sql, [self.file_['id'], self.app.settings['codername']])
+            cur.execute(sql, [self.file_['id']])
         results = cur.fetchall()
         keys = 'imid', 'id', 'x1', 'y1', 'width', 'height', 'memo', 'date', 'owner', 'cid', 'important', 'name', \
             'color', 'pdf_page'
         for row in results:
             self.code_areas.append(dict(zip(keys, row)))
 
-    def get_files(self, ids=None):
+    def get_files(self, ids=None, sort="name asc"):
         """ Load the image and pdf file data.
         Exclude those image and pdf file data where there are bad links.
         Fill List widget with the files.
-        param:
-            ids : list of Integer ids to restrict files """
+        args:
+            ids : list of Integer ids to restrict files
+            sort : String Sort options, name asc, name, desc, case asc, case desc
+        """
 
         if ids is None:
             ids = []
@@ -346,9 +370,35 @@ class DialogCodeImage(QtWidgets.QDialog):
         keys = 'name', 'id', 'memo', 'owner', 'date', 'mediapath'
         for row in result:
             self.files.append(dict(zip(keys, row)))
-        for f in self.files:
-            item = QtWidgets.QListWidgetItem(f['name'])
-            item.setToolTip(f['memo'])
+        sql_case = "SELECT group_concat(cases.name) from cases join case_text on case_text.caseid=cases.caseid " \
+                   "where case_text.fid=?"
+        for file_ in self.files:
+            tt = _("Date: ") + file_['date'].split()[0]
+            file_['case'] = ""
+            cur.execute(sql_case, [file_['id']])
+            res_cases = cur.fetchone()
+            if res_cases and res_cases[0] is not None:
+                tt += "\n" + _("Case: ") + f"{res_cases[0]}"
+                file_['case'] = f"{res_cases[0]}"
+            tt += f"\n{file_['memo']}"
+            file_['tooltip'] = tt
+        # Sorting the file list
+        if sort == "name asc":
+            self.files = sorted(self.files, key=lambda x: x['name'])
+        if sort == "name desc":
+            self.files = sorted(self.files, key=lambda x: x['name'], reverse=True)
+        if sort == "case asc":
+            self.files = sorted(self.files, key=lambda x: x['case'])
+        if sort == "case desc":
+            self.files = sorted(self.files, key=lambda x: x['case'], reverse=True)
+        if sort == "date asc":
+            self.files = sorted(self.files, key=lambda x: x['date'])
+        if sort == "date desc":
+            self.files = sorted(self.files, key=lambda x: x['date'], reverse=True)
+        # Fill list widget
+        for file_ in self.files:
+            item = QtWidgets.QListWidgetItem(file_['name'])
+            item.setToolTip(file_['tooltip'])
             self.ui.listWidget.addItem(item)
         self.clear_file()
 
@@ -516,20 +566,88 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.fill_code_counts_in_tree()
 
     def fill_code_counts_in_tree(self):
+        """ Calculate the frequency of each code and category for all visible coders and the selected file.
+        Add a list item to each code that can be used to display in treeWidget.
+        If the tab 'AI assisted coding' is active, the codings will be counted
+        across all files, not only the currently selected one, because the AI assisted
+        coding is not working on a per-file basis.
+        """
+
+        if self.file_ is None:
+            return
+        cur = self.app.conn.cursor()
+        code_counts = []
+        for c in self.codes:
+            parameters = [c['cid'], self.file_['id']]
+            sql = "select code_name.catid, count(code_image_visible.cid) from code_image_visible join code_name " \
+                "on code_name.cid=code_image_visible.cid where code_image_visible.cid=? " \
+                "and code_image_visible.id=?"
+            cur.execute(sql, parameters)
+            result = cur.fetchone()
+            code_counts.append([c['cid'], result[0], result[1]])
+        categories = deepcopy(self.categories)
+        # Set up category counts
+        for category in categories:
+            category['count'] = 0
+        # Add the number of codes directly under each category to the category
+        for category in categories:
+            for code in code_counts:
+                if code[1] == category['catid']:
+                    category['count'] += code[2]
+        # Find leaf categories, add to above categories, and gradually remove leaves
+        # until only top categories are left
+        sub_categories = copy(categories)
+        counter = 0
+        while len(sub_categories) > 0 or counter < 10000:
+            leaf_list = []
+            branch_list = []
+            for cat in sub_categories:
+                for cat2 in sub_categories:
+                    if cat['catid'] == cat2['supercatid']:
+                        branch_list.append(cat)
+            for category in sub_categories:
+                if category not in branch_list:
+                    leaf_list.append(category)
+            # Add totals higher category
+            for leaf_category in leaf_list:
+                for category in categories:
+                    if category['catid'] == leaf_category['supercatid']:
+                        category['count'] += leaf_category['count']
+                sub_categories.remove(leaf_category)
+            counter += 1
+
+        # Fill tree item counts
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            item = iterator.value()
+            if item.text(1).startswith("catid"):
+                catid = int(item.text(1)[6:])
+                for category in categories:
+                    if catid == category['catid']:
+                        item.setText(3, str(category['count']))
+            else:
+                cid = int(item.text(1)[4:])
+                for code in code_counts:
+                    if cid == code[0]:
+                        item.setText(3, str(code[2]))
+                        break
+            iterator += 1  # Move to the next item
+
+    '''def fill_code_counts_in_tree(self):
         """ Count instances of each code for current coder and in the selected file.
         Called by: fill_tree """
 
         if self.file_ is None:
             return
         cur = self.app.conn.cursor()
-        sql = "select count(cid) from code_image where cid=? and id=? and owner=?"
+        sql = "select count(cid) from code_image_visible where cid=? and id=?"
         it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
         item = it.value()
         count = 0
         while item and count < 10000:
             if item.text(1)[0:4] == "cid:":
                 cid = str(item.text(1)[4:])
-                cur.execute(sql, [cid, self.file_['id'], self.app.settings['codername']])
+                cur.execute(sql, [cid, self.file_['id']])
                 result = cur.fetchone()
                 if result[0] > 0:
                     item.setText(3, str(result[0]))
@@ -537,7 +655,7 @@ class DialogCodeImage(QtWidgets.QDialog):
                     item.setText(3, "")
             it += 1
             item = it.value()
-            count += 1
+            count += 1'''
 
     def get_collapsed(self, item):
         """ On category collapse or expansion signal, find the collapsed parent category items.
@@ -588,9 +706,9 @@ class DialogCodeImage(QtWidgets.QDialog):
     def go_to_latest_coded_file(self):
         """ Vertical splitter button activates this """
 
-        sql = "SELECT id FROM code_image where owner=? order by date desc limit 1"
+        sql = "SELECT id FROM code_image_visible order by date desc limit 1"
         cur = self.app.conn.cursor()
-        cur.execute(sql, [self.app.settings['codername'], ])
+        cur.execute(sql)
         result = cur.fetchone()
         if result is None:
             return
@@ -623,21 +741,27 @@ class DialogCodeImage(QtWidgets.QDialog):
         """ Context menu to select the next image alphabetically, or
          to select the image that was most recently coded """
 
-        if len(self.files) == 0:
-            return
         selected = self.ui.listWidget.currentItem()
-        file_ = None
-        for f in self.files:
-            if selected.text() == f['name']:
-                file_ = f
+        if not selected:
+            return
+        file_ = next((f for f in self.files if f['name'] == selected.text()), None)
         menu = QtWidgets.QMenu()
-        menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
         action_memo = menu.addAction(_("Open memo"))
         action_next = menu.addAction(_("Next file"))
         action_latest = menu.addAction(_("File with latest coding"))
         action_show_files_like = menu.addAction(_("Show files like"))
         action_show_case_files = menu.addAction(_("Show case files"))
         action_show_by_attribute = menu.addAction(_("Show files by attributes"))
+        sort_menu = QtWidgets.QMenu(_("Sort"))
+        sort_menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
+        action_sort_name_asc = sort_menu.addAction(_("Sort by name ascending"))
+        action_sort_name_desc = sort_menu.addAction(_("Sort by name descending"))
+        action_sort_case_asc = sort_menu.addAction(_("Sort by case ascending"))
+        action_sort_case_desc = sort_menu.addAction(_("Sort by case descending"))
+        action_sort_date_asc = sort_menu.addAction(_("Sort by date ascending"))
+        action_sort_date_desc = sort_menu.addAction(_("Sort by date descending"))
+        menu.addMenu(sort_menu)
         action = menu.exec(self.ui.listWidget.mapToGlobal(position))
         if action == action_memo:
             self.file_memo(file_)
@@ -653,6 +777,18 @@ class DialogCodeImage(QtWidgets.QDialog):
             self.show_case_files()
         if action == action_show_by_attribute:
             self.get_files_from_attributes()
+        if action == action_sort_name_asc:
+            self.get_files(None, "name asc")
+        if action == action_sort_name_desc:
+            self.get_files(None, "name desc")
+        if action == action_sort_case_asc:
+            self.get_files(None, "case asc")
+        if action == action_sort_case_desc:
+            self.get_files(None, "case desc")
+        if action == action_sort_date_asc:
+            self.get_files(None, "date asc")
+        if action == action_sort_date_desc:
+            self.get_files(None, "date desc")
 
     def show_case_files(self):
         """ Show files of specified case.
@@ -700,8 +836,6 @@ class DialogCodeImage(QtWidgets.QDialog):
         cur.execute('select id from source where name like ?', ['%' + text_ + '%'])
         res = cur.fetchall()
         file_ids = [r[0] for r in res]
-        '''for r in res:
-            file_ids.append(r[0])'''
         self.get_files(file_ids)
 
     def file_selection_changed(self):
@@ -818,7 +952,7 @@ class DialogCodeImage(QtWidgets.QDialog):
 
         if image.isNull():
             self.clear_file()
-            Message(self.app, _("Image Error"), _("Cannot open: ", "warning") + source_path).exec()
+            Message(self.app, _("Image Error"), _("Cannot open: ") + source_path).exec()
             logger.warning("Cannot open image: " + source_path)
             return
 
@@ -962,13 +1096,15 @@ class DialogCodeImage(QtWidgets.QDialog):
                     height = coded['width'] * self.scale
                     width = coded['height'] * self.scale
                 rect_item = QtWidgets.QGraphicsRectItem(x, y, width, height)
-                rect_item.setPen(QtGui.QPen(color, 2, QtCore.Qt.PenStyle.DashLine))
-                rect_item.setToolTip(tooltip)
                 if coded['owner'] == self.app.settings['codername']:
-                    if self.important and coded['important'] == 1:
-                        self.scene.addItem(rect_item)
-                    if not self.important:
-                        self.scene.addItem(rect_item)
+                    rect_item.setPen(QtGui.QPen(color, 2, QtCore.Qt.PenStyle.DashLine))
+                else:
+                    rect_item.setPen(QtGui.QPen(color, 2, QtCore.Qt.PenStyle.DotLine))
+                rect_item.setToolTip(tooltip)
+                if self.important and coded['important'] == 1:
+                    self.scene.addItem(rect_item)
+                if not self.important:
+                    self.scene.addItem(rect_item)
                 if self.show_code_captions == 1:
                     self.caption(x, y, code_name)
                 if self.show_code_captions == 2:
@@ -1316,7 +1452,12 @@ class DialogCodeImage(QtWidgets.QDialog):
         buffer = QBuffer()
         buffer.open(QBuffer.ReadWrite)
         img.save(buffer, "PNG")
-        pil_img = Image.open(BytesIO(buffer.data()))
+        try:
+            pil_img = Image.open(BytesIO(buffer.data()))
+        except PIL.Image.DecompressionBombError:
+            msg = _("Cannot open image with PIL. The image it too large.")
+            Message(self.app, _("Image highlight error"), msg).exec()
+            return
         background = ImageOps.grayscale(pil_img)  # Default gray
         if image_operation == "solarize":
             background = ImageOps.solarize(pil_img)  # Invert all pixel values above a threshold.
@@ -1362,6 +1503,15 @@ class DialogCodeImage(QtWidgets.QDialog):
                     print("Main img: w", background.width, "h", background.height)
         highlights.show()
 
+        exp_dlg = ExportDirectoryPathDialog(self.app, "Image_highlights.jpg")
+        filepath = exp_dlg.filepath
+        if filepath is None:
+            return
+        highlights.save(filepath)
+        msg = _('Image exported: ') + filepath
+        Message(self.app, _('Image saved'), msg, "information").exec()
+        self.parent_textEdit.append(msg)
+
     def text_box(self, draw, background_width, position, text, memo):
         """ Draw codename caption if show_code_captions=1, or codename plus memo if show_code_captions=2. """
 
@@ -1379,12 +1529,9 @@ class DialogCodeImage(QtWidgets.QDialog):
         draw.rectangle(bounding_box, fill="white")
         draw.text(position, text, font=font, fill="black")
 
-    @staticmethod
-    def help():
+    def help(self):
         """ Open help for transcribe section in browser. """
-
-        url = "https://github.com/ccbogel/QualCoder/wiki/4.4.-Coding-Images"
-        webbrowser.open(url)
+        self.app.help_wiki("4.4.-Coding-Images")
 
     def eventFilter(self, object_, event):
         """ Using this event filter to identify treeWidgetItem drop events.
@@ -1467,11 +1614,24 @@ class DialogCodeImage(QtWidgets.QDialog):
             return
         item = items[0]
         if len(items) > 1:
-            ui = DialogSelectItems(self.app, items, _("Select code"), "single")
+            # Make item unambigious for selection by adding owner
+            items_for_select = []
+            for it in items:
+                it_view = it.copy()
+                it_view['name'] = f"{it['name']} ({it['owner']})"
+                items_for_select.append(it_view)
+            ui = DialogSelectItems(self.app, items_for_select, _("Select code"), "single")
             ok = ui.exec()
             if not ok:
                 return
-            item = ui.get_selected()
+            selected = ui.get_selected()
+            if selected is None:
+                return
+            # Map back to original item (so we keep full dict as stored)
+            for it in items:
+                if it['imid'] == selected['imid']:
+                    item = it
+                    break        
         menu = QtWidgets.QMenu()
         menu.setStyleSheet("QMenu {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
         action_memo = menu.addAction(_('Memo'))
@@ -1574,7 +1734,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.app.delete_backup = False
 
     def find_coded_areas_for_pos(self, pos):
-        """ Find any coded areas for this position AND for this coder.
+        """ Find any coded areas for this position AND for all visible coders.
 
         params:
         :name pos:
@@ -1595,7 +1755,7 @@ class DialogCodeImage(QtWidgets.QDialog):
             pos = QtCore.QPointF(pix_w_scaled - pos.y(), pos.x())
         items = []
         for item in self.code_areas:
-            if item['id'] == self.file_['id'] and item['owner'] == self.app.settings['codername']:
+            if item['id'] == self.file_['id']:
                 if item['x1'] * self.scale <= pos.x() <= (item['x1'] + item['width']) * self.scale \
                         and item['y1'] * self.scale <= pos.y() <= (
                         item['y1'] + item['height']) * self.scale:
@@ -1615,6 +1775,7 @@ class DialogCodeImage(QtWidgets.QDialog):
                 if c['cid'] == i['cid']:
                     codename = c['name']
                     msg += codename
+                    msg += f" ({i['owner']})"
             msg += f"\nx:{int(i['x1'])} y:{int(i['y1'])}"
             msg += f" w:{int(i['width'])} h:{int(i['height'])}"
             area = i['width'] * i['height']
@@ -1705,8 +1866,10 @@ class DialogCodeImage(QtWidgets.QDialog):
             return
         code_ = self.ui.treeWidget.currentItem()
         if code_ is None:
+            Message(self.app, _("Coded area"), _("Select a code in the list first."), "warning").exec()
             return
         if code_.text(1)[0:3] == 'cat':
+            Message(self.app, _("Coded area"), _("Select a code in the list first."), "warning").exec()
             return
         cid = int(code_.text(1)[4:])  # must be integer
         code_name = code_.text(0)

@@ -17,6 +17,7 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Kai Droege (kaixxx)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 import os
@@ -47,6 +48,7 @@ import asyncio
 import configparser
 from Bio.Align import PairwiseAligner
 from pydantic import ValidationError
+import re
 
 max_memo_length = 1500  # Maximum length of the memo send to the AI
 
@@ -79,39 +81,51 @@ def extract_ai_memo(memo: str) -> str:
     else:
         return memo
     
-def get_available_models(api_base: str, api_key: str) -> list:
+def get_available_models(app, api_base: str, api_key: str) -> list:
     """Queries the API and returns a list of all AI models available from this provider."""
-    if api_base == '':
-        api_base = None
-    client = OpenAI(api_key=api_key, base_url=api_base)
-    response = client.models.list(timeout=4.0)
-    model_dict = response.model_dump().get('data', [])
-    model_list = sorted([model['id'] for model in model_dict])
+    msg = None
+    if app is not None:
+        msg = Message(app, _('AI Models'), _('Loading list of available AI models...'))
+        msg.setStandardButtons(QtWidgets.QMessageBox.StandardButton.NoButton)
+        msg.show()
+        QtWidgets.QApplication.processEvents()
+    try:        
+        if api_base == '':
+            api_base = None
+        client = OpenAI(api_key=api_key, base_url=api_base)
+        response = client.models.list(timeout=4.0)
+        model_dict = response.model_dump().get('data', [])
+        model_list = sorted([model['id'] for model in model_dict])
+    finally:
+        if msg is not None:
+            msg.deleteLater()
     return model_list
 
 def get_default_ai_models():
     ini_string = """
-[ai_model_OpenAI GPT4.1]
-desc = Powerful and large model from OpenAI, for complex tasks.
+[ai_model_OpenAI GPT5.2 reasoning]
+desc = Powerful model from OpenAI, with internal reasoning, for complex tasks.
 	You need an API-key from OpenAI and have paid for credits in your account.
 	OpenAI will charge a small amount for every use.
 access_info_url = https://platform.openai.com/api-keys
-large_model = gpt-4.1
+large_model = gpt-5.2
 large_model_context_window = 1000000
-fast_model = gpt-4.1-mini
+fast_model = gpt-5-mini
 fast_model_context_window = 128000
+reasoning_effort = medium
 api_base = 
 api_key = 
 
-[ai_model_OpenAI_GPT4o]
-desc = General use model from OpenAI, faster and cheaper than other options.
+[ai_model_OpenAI GPT5.2 no reasoning]
+desc = Powerful model from OpenAI, no reasoning, faster and cheaper.
 	You need an API-key from OpenAI and have paid for credits in your account.
 	OpenAI will charge a small amount for every use.
 access_info_url = https://platform.openai.com/api-keys
-large_model = gpt-4o
+large_model = gpt-5.2
 large_model_context_window = 1000000
-fast_model = gpt-4o-mini
+fast_model = gpt-5-mini
 fast_model_context_window = 128000
+reasoning_effort = low
 api_base = 
 api_key = 
 
@@ -126,32 +140,36 @@ large_model = alias-large
 large_model_context_window = 128000
 fast_model = alias-fast
 fast_model_context_window = 32000
-api_base = https://helmholtz-blablador.fz-juelich.de:8000/v1
+reasoning_effort = default
+api_base = https://api.helmholtz-blablador.fz-juelich.de/v1/
 api_key = 
 
 [ai_model_Blablador Huge]
-desc = Llama 3.1 405b, very large and powerful. Availability might change.
+desc = The largest and most powerful model currently running on Blablador. 
+    Availability might change.
 	Blablador is free to use and runs on a server of the Helmholtz Society,
 	a large non-profit research organization in Germany. To gain
 	access and get an API-key, you have to identify yourself once with your
 	university, ORCID, GitHub, or Google account.
 access_info_url = https://sdlaml.pages.jsc.fz-juelich.de/ai/guides/blablador_api_access/
-large_model = alias-llama3-huge
+large_model = alias-huge
 large_model_context_window = 128000
 fast_model = alias-fast
 fast_model_context_window = 128000
-api_base = https://helmholtz-blablador.fz-juelich.de:8000/v1
+reasoning_effort = default
+api_base = https://api.helmholtz-blablador.fz-juelich.de/v1/
 api_key = 
 
-[ai_model_Anthropic Claude]
+[ai_model_Anthropic Claude Sonnet 4.5]
 desc = Claude is a family of high quality models from Anthropic.
 	You need an API-key from Anthropic and credits in your account.
 	Anthropic will charge a small amount for every use.
 access_info_url = https://console.anthropic.com/settings/keys
-large_model = claude-opus-4-20250514
+large_model = claude-sonnet-4-5
 large_model_context_window = 200000
-fast_model = claude-sonnet-4-20250514
+fast_model = claude-sonnet-4-5
 fast_model_context_window = 200000
+reasoning_effort = medium
 api_base = https://api.anthropic.com/v1/
 api_key = 
 
@@ -164,6 +182,7 @@ large_model = gemini-2.5-flash
 large_model_context_window = 1000000
 fast_model = gemini-2.5-flash
 fast_model_context_window = 1000000
+reasoning_effort = default
 api_base = https://generativelanguage.googleapis.com/v1beta/openai/
 api_key = 
 
@@ -176,8 +195,21 @@ large_model = deepseek-chat
 large_model_context_window = 64000
 fast_model = deepseek-chat
 fast_model_context_window = 64000
+reasoning_effort = default
 api_base = https://api.deepseek.com
 api_key = 
+
+[ai_model_Mistral]
+desc = Mistral AI offers high-performance, open-source and proprietary language models, 
+    prioritizing transparency, privacy, and ethical AI for researchers and developers.
+access_info_url = https://mistral.ai
+large_model = mistral-large-latest
+large_model_context_window = 128000
+fast_model = mistral-small-latest
+fast_model_context_window = 128000
+reasoning_effort = default
+api_base = https://api.mistral.ai/v1
+api_key =
 
 [ai_model_OpenRouter]
 desc = OpenRouter is a unified interface to access many different AI language
@@ -188,6 +220,7 @@ large_model = deepseek/deepseek-chat:free
 large_model_context_window = 64000
 fast_model = deepseek/deepseek-chat:free
 fast_model_context_window = 64000
+reasoning_effort = default
 api_base = https://openrouter.ai/api/v1
 api_key = 
 
@@ -201,8 +234,10 @@ large_model =
 large_model_context_window = 32000
 fast_model = 
 fast_model_context_window = 32000
+reasoning_effort = default
 api_base = http://localhost:11434/v1/
 api_key = <no API key needed>
+
     """
     
     config = configparser.ConfigParser()
@@ -218,24 +253,118 @@ api_key = <no API key needed>
                 'large_model_context_window': config[section].get('large_model_context_window', '32768'),
                 'fast_model': config[section].get('fast_model', ''),
                 'fast_model_context_window': config[section].get('fast_model_context_window', '32768'),
+                'reasoning_effort': config[section].get('reasoning_effort', ''),
                 'api_base': config[section].get('api_base', ''),
                 'api_key': config[section].get('api_key', '')
             }
             ai_models.append(model)
     return ai_models
 
+def add_new_ai_model(current_models: list, new_name: str) -> tuple[list, int]:
+    """Adds a new AI profile to the list, sets some default values,
+    and returns the extended list as well as the index of the new model 
+
+    Args:
+        current_models (list): AI profiles
+        new_name (str): the name for the new profile
+
+    Returns:
+        tuple[list, int]: extended list, index of new profile
+    """
+    new_model = {
+        'name': new_name,
+        'desc': '',
+        'access_info_url': '',
+        'large_model': '',
+        'large_model_context_window': '32768',
+        'fast_model': '',
+        'fast_model_context_window': '32768',
+        'reasoning_effort': 'default',
+        'api_base': '',
+        'api_key': ''
+    }
+    current_models.append(new_model)
+    return current_models, len(current_models) - 1
+
 def update_ai_models(current_models: list, current_model_index: int) -> tuple[list, int]:
+    """Update the AI model definitions, and add new models from the default set
+
+    Args:
+        current_models (list): the current list from config.ini
+        current_model_index (int): the index of the currently selected model
+
+    Returns:
+        tuple[list, int]: updated list and current model index 
+    """
+    if current_model_index < 0 or current_model_index > (len(current_models) - 1):
+        current_model_index = 0
+
+    # add new models from the default model list
     default_models = get_default_ai_models()
     current_models_names = {model['name'] for model in current_models}
     for model in default_models:
         if not model['name'] in current_models_names:
-            if model['name'] == 'OpenAI GPT4.1': # insert this at the top, because it is the current default model
+            if model['name'] == 'OpenAI GPT5.1 reasoning': # insert this at the top, because it is the current default model
                 current_models.insert(0, model)
                 if current_model_index >= 0:
                     current_model_index += 1
+            elif model['name'] == 'OpenAI GPT5.1 no reasoning' and len(current_models) > 1: # insert this at the second position
+                current_models.insert(1, model)
+                if current_model_index >= 1:
+                    current_model_index += 1        
             else:
                 current_models.append(model)
+                
+    # Blablador: update config (api base, model alias)
+    curr_model = current_models[current_model_index]
+    if curr_model['api_base'] == 'https://helmholtz-blablador.fz-juelich.de:8000/v1' and curr_model['large_model'] != 'alias-large':
+        msg = _('You are using the "Blablador" service on an old server that will soon be disabled. '
+                'Your configuration will be updated automatically. Please test if the AI access still works as expected. '
+                'You might need to change to a different AI model in the settings dialog under "Advanced AI Settings".')
+        QtWidgets.QMessageBox(parent=None, title=_('AI Setup'), text=msg).exec()
+    for model in current_models:
+        if model['api_base'] == 'https://helmholtz-blablador.fz-juelich.de:8000/v1':
+            model['api_base'] = 'https://api.helmholtz-blablador.fz-juelich.de/v1/'
+        if model['large_model'] == 'alias-llama3-huge': # this alias is no longer available
+            model['large_model'] = 'alias-huge'
+        if model['fast_model'] == 'alias-llama3-huge':
+            model['fast_model'] = 'alias-huge'
+    
+    # add parameter "reasoning_effort"    
+    for model in current_models:
+        if model['reasoning_effort'] == '':
+            if model['large_model'].lower().find('gpt-5') > -1 or \
+                    model['large_model'].lower().find('o4') > -1 or \
+                    model['large_model'].lower().find('o3') > -1 or \
+                    model['large_model'].lower().find('o1') > -1 or \
+                    model['large_model'].lower().find('gpt-oss') > -1 or \
+                    model['large_model'].lower().find('qwen3') > -1 or \
+                    model['large_model'].lower().find('opus') > -1 or \
+                    model['large_model'].lower().find('sonnet') > -1 or \
+                    model['large_model'].lower().find('grok-4') > -1:
+                model['reasoning_effort'] = 'medium'
+            else:
+                model['reasoning_effort'] = 'default'
+    
+        # Correct an error in the QualCoder 3.8 release, where reasoning effort was set to medium for GPT-4.1:            
+        if model['large_model'].lower().find('gpt-4.1') > -1: 
+            model['reasoning_effort'] = 'default'
+    
     return current_models, current_model_index
+
+def strip_think_blocks(text: str) -> str:
+    """
+    Removes <think>...</think> blocks from an LLM response.
+    If the closing </think> is missing (e.g., during streaming),
+    removes everything from <think> to the end of the text.
+    """
+    # Case 1: Remove complete <think>...</think> blocks
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # Case 2: Remove unfinished <think> blocks (no closing tag yet)
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+
+    return text.strip()
 
 def ai_quote_search(quote: str, original: str) -> tuple[int, int]:
     """Searches the quote in the original text using the Smith-Waterman algorithm.
@@ -362,11 +491,18 @@ class AiLLM():
                         # Success, model was selected. But since the "change_settings" function will start 
                         # a new "init_llm" anyway, we are going to quit here
                         return    
+                
                 curr_model = self.app.ai_models[int(self.app.settings['ai_model_index'])]
+                                                    
+                # OpenAI: Check for outdated models:            
+                if curr_model['large_model'].find('gpt-4-turbo') > -1:
+                    self.parent_text_edit.append(_('AI: You are still using the outdated GPT-4 turbo. Consider switching to a newer model, such as GPT 4.1. Go to Project > Settings to change the AI profile and model.'))
+                
+                # Anthropic: Check for outdated models
+                if curr_model['large_model'] == 'claude-opus-4-20250514':
+                    self.parent_text_edit.append(_('AI: You are using the outdated Claude Opus 4 model from Anthropic. Consider switching to a newer model, such as Opus 4.1. Go to Project > Settings to change the AI profile and model.'))
                 
                 large_model = curr_model['large_model']
-                if large_model.find('gpt-4-turbo') > -1:
-                    self.parent_text_edit.append(_('AI: You are still using the outdated GPT-4 turbo. Consider switching to a newer model, such as GPT 4.1. Go to Project > Settings to change the AI profile and model.'))
                 self.large_llm_context_window = int(curr_model['large_model_context_window'])
                 fast_model = curr_model['fast_model']
                 self.fast_llm_context_window = int(curr_model['fast_model_context_window'])
@@ -406,52 +542,58 @@ class AiLLM():
                 top_p = float(self.app.settings.get('ai_top_p', '1.0'))
                 timeout = float(self.app.settings.get('ai_timeout', '30.0'))
                 self.app.settings['ai_timeout'] = str(timeout)
-                if api_base.find('openai.azure.com') != -1:  # using Microsoft Azure
-                    self.large_llm = AzureChatOpenAI(
-                                        azure_endpoint=api_base,
-                                        azure_deployment=large_model,    
-                                        api_version="2024-02-15-preview",
-                                        api_key=api_key,
-                                        temperature=temp,
-                                        top_p=top_p,
-                                        max_tokens=None,
-                                        timeout=timeout,
-                                        max_retries=2,
-                                        cache=False,
-                                        streaming=True
-                    )
-                    self.small_llm = AzureChatOpenAI(
-                                        azure_endpoint=api_base,
-                                        azure_deployment=large_model,    
-                                        api_version="2024-02-15-preview",
-                                        api_key=api_key,
-                                        temperature=temp,
-                                        top_p=top_p,
-                                        max_tokens=None,
-                                        timeout=timeout,
-                                        max_retries=2,
-                                        cache=False,
-                                        streaming=True
-                    )
-                else:  # OpenAI or 100% compatible api
-                    self.large_llm = ChatOpenAI(model=large_model, 
-                                        openai_api_key=api_key, 
-                                        openai_api_base=api_base, 
-                                        cache=False,
-                                        temperature=temp,
-                                        top_p=top_p,
-                                        streaming=True,
-                                        timeout=timeout,
-                                        )
-                    self.fast_llm = ChatOpenAI(model=fast_model, 
-                                        openai_api_key=api_key, 
-                                        openai_api_base=api_base, 
-                                        cache=False,
-                                        temperature=temp,
-                                        top_p=top_p,
-                                        streaming=True,
-                                        timeout=timeout,
-                                        )
+                if api_base.find('azure.com') != -1:  # using Microsoft Azure
+                    is_azure = True
+                    large_llm_params = {
+                        'azure_endpoint': api_base,
+                        'azure_deployment': large_model,    
+                        'api_version': '2024-12-01-preview',
+                        'api_key': api_key,
+                        'temperature': temp,
+                        'top_p': top_p,
+                        'max_tokens': None,
+                        'timeout': timeout,
+                        'max_retries': 2,
+                        'cache': False,
+                        'streaming': True
+                    }        
+                    fast_llm_params = large_llm_params.copy()
+                    fast_llm_params['model'] = fast_model
+                else: # OpenAI or compatible API
+                    is_azure = False
+                    large_llm_params = {
+                        'model': large_model, 
+                        'openai_api_key': api_key, 
+                        'openai_api_base': api_base, 
+                        'cache': False,
+                        'temperature': temp,
+                        'top_p': top_p,
+                        'streaming': True,
+                        'timeout': timeout,
+                    }   
+                    fast_llm_params = large_llm_params.copy()
+                    fast_llm_params['model'] = fast_model
+                    
+                if 'reasoning_effort' in curr_model and curr_model['reasoning_effort'] in ['low', 'medium', 'high']:
+                    large_llm_params['reasoning_effort'] = curr_model['reasoning_effort']
+                    # raise the timeout for reasoning models
+                    large_llm_params['timeout'] = (['low', 'medium', 'high'].index(curr_model['reasoning_effort']) + 1) * timeout
+                
+                if large_model.lower().find('claude') != -1:  # Anthropic
+                    # omitting top_p, since Antrhopic does not accept temperature and top_p at the same time
+                    try:
+                        large_llm_params.pop('top_p')
+                        fast_llm_params.pop('top_p')
+                    except:
+                        pass
+                
+                if is_azure:
+                    self.large_llm = AzureChatOpenAI(**large_llm_params)
+                    self.fast_llm = AzureChatOpenAI(**fast_llm_params)
+                else:    
+                    self.large_llm = ChatOpenAI(**large_llm_params)
+                    self.fast_llm = ChatOpenAI(**fast_llm_params)
+
                 self.ai_streaming_output = ''
                 self.app.settings['ai_enable'] = 'True'
                 
@@ -724,6 +866,7 @@ class AiLLM():
             logger.debug(e)
             res = self.large_llm.invoke(code_descriptions_prompt, config=config)            
         logger.debug(str(res.content))
+        res.content = strip_think_blocks(res.content)
         code_descriptions = list(json_repair.loads(str(res.content))['descriptions'])
         code_descriptions.insert(0, code_name) # insert the original as well
         return code_descriptions
@@ -869,6 +1012,7 @@ class AiLLM():
             # The returned JSON was malformed. Try it without validation and hope that "json_repair" will fix it below 
             logger.debug(e)
             res = self.large_llm.invoke(f'{prompt}', config=config)                  
+        res.content = strip_think_blocks(res.content)
         res_json = json_repair.loads(str(res.content))
         
         # analyse and format the answer

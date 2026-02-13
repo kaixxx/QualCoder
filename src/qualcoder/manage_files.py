@@ -17,47 +17,51 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 import datetime
-import os.path
+import re
 
 import fitz
-import sqlite3
 import ebooklib
 from ebooklib import epub
+import json
 import openpyxl
-import PIL
-from PIL import Image
-import qtawesome as qta
-from typing import Iterable, Any
-from shutil import copyfile, move
-from urllib.parse import urlparse
-import webbrowser
-import zipfile
-
-from PyQt6 import QtCore, QtGui, QtWidgets
+import os.path
 from pdfminer.converter import PDFPageAggregator
 from pdfminer.layout import LAParams, LTTextLine
 from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.pdfpage import PDFPage
+import PIL
+from PIL import Image
+from PyQt6 import QtCore, QtGui, QtWidgets
+import qtawesome as qta  # see: https://pictogrammers.com/library/mdi/
+import sqlite3
+from typing import Iterable, Any
+from shutil import copyfile, move
+from striprtf.striprtf import rtf_to_text
+from urllib.parse import urlparse
+import webbrowser
+import zipfile
 
-from .GUI.ui_dialog_manage_files import Ui_Dialog_manage_files
 from .add_attribute import DialogAddAttribute
 from .add_item_name import DialogAddItemName
+from .code_pdf import DialogCodePdf  # For isinstance update files
 from .code_text import DialogCodeText  # for isinstance()
 from .confirm_delete import DialogConfirmDelete
 from .docx import opendocx, getdocumenttext
 from .edit_textfile import DialogEditTextFile
+from .GUI.ui_dialog_manage_files import Ui_Dialog_manage_files
 from .helpers import ExportDirectoryPathDialog, Message, msecs_to_hours_mins_secs
 from .html_parser import *
 from .memo import DialogMemo
+from .pseudonyms import Pseudonyms
 from .report_codes import DialogReportCodes  # for isInstance()
 from .ris import Ris
 from .select_items import DialogSelectItems
 from .view_av import DialogViewAV, DialogCodeAV  # for isinstance update files
 from .view_image import DialogViewImage, DialogCodeImage  # for isinstance update files
-from .code_pdf import DialogCodePdf  # For isinstance update files
 
 # If VLC not installed, it will not crash
 vlc = None
@@ -83,12 +87,13 @@ class DialogManageFiles(QtWidgets.QDialog):
     CASE_COLUMN = 4
     ATTRIBUTE_START_COLUMN = 5
 
-    def __init__(self, app, parent_text_edit, tab_coding, tab_reports):
+    def __init__(self, app, parent_text_edit, tab_coding, tab_reports, main_window: QtWidgets.QMainWindow):
 
         self.app = app
         self.parent_text_edit = parent_text_edit
         self.tab_coding = tab_coding  # Tab widget coding for updates
         self.tab_reports = tab_reports  # Tab widget reports for updates
+        self.main_window = main_window
         self.rows_hidden = []  # For save display profile, as column_name \t operator \t value
         self.source = []  # Dictionaries of source files
         self.header_labels = []
@@ -107,6 +112,8 @@ class DialogManageFiles(QtWidgets.QDialog):
         self.av_dialog_open = None  # Used for opened AV dialog
         font = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         self.setStyleSheet(font)
+        self.ui.pushButton_pseudonyms.setIcon(qta.icon('mdi6.account-cancel-outline', options=[{'scale_factor': 1.4}]))
+        self.ui.pushButton_pseudonyms.clicked.connect(self.pseudonyms)
         self.ui.pushButton_create.setIcon(qta.icon('mdi6.pencil-outline', options=[{'scale_factor': 1.4}]))
         self.ui.pushButton_create.clicked.connect(self.create_text_file)
         self.ui.pushButton_view.setIcon(qta.icon('mdi6.magnify', options=[{'scale_factor': 1.4}]))
@@ -129,6 +136,8 @@ class DialogManageFiles(QtWidgets.QDialog):
         self.ui.pushButton_export_attributes.clicked.connect(self.export_attributes)
         self.ui.pushButton_undo.setIcon(qta.icon('mdi6.undo', options=[{'scale_factor': 1.4}]))
         self.ui.pushButton_undo.clicked.connect(self.undo_file_rename)
+        self.ui.pushButton_mark_speakers.setIcon(qta.icon('mdi6.pin-outline', options=[{'scale_factor': 1.3}]))
+        self.ui.pushButton_mark_speakers.pressed.connect(self.mark_speakers)
 
         self.ui.pushButton_display_save.setIcon(qta.icon('mdi6.table-plus', options=[{'scale_factor': 1.2}]))
         self.ui.pushButton_display_save.clicked.connect(self.table_display_save)
@@ -154,12 +163,23 @@ class DialogManageFiles(QtWidgets.QDialog):
         self.ui.tableWidget.horizontalHeader().setToolTip(_("Right click header row to hide columns"))
         self.load_file_data()
 
-    @staticmethod
-    def help():
+    def help(self):
         """ Open help for transcribe section in browser. """
+        self.app.help_wiki("3.2.-Files")
 
-        url = "https://github.com/ccbogel/QualCoder/wiki/3.2.-Files"
-        webbrowser.open(url)
+    def pseudonyms(self):
+        """ Pseudonymisation, data de-identification.
+        User created list of pseudonyms to replace senstitive wording, e.g. participant names.
+        The list must be crated before any text files or survey qualitative columns are imported.
+        The pseudonyms are case-sensistive.
+        The original to pseudonym list is stored in the qda folder as pseudonyms.json
+        This file can be removed and stored securely afte rthe data is imported.
+        Pseudonyms does not apply to PDF imports. Instead import plain text of the PDF. """
+
+        #Message(self.app, "Pseudonymisation", "UNDER CONSTRUCTION\nDOES NOT WORK YET").exec()
+        #return  # TODO work in progress
+        ui_pseudomyms = Pseudonyms(self.app)
+        ui_pseudomyms.exec()
 
     def table_display_save(self):
         """ Save rows and column settings for replicating table display.
@@ -441,12 +461,16 @@ class DialogManageFiles(QtWidgets.QDialog):
             action_filename_desc = menu.addAction(_("Order descending"))
             action_type = menu.addAction(_("File type order"))
         action_date_asc = None
+        action_date_desc = None
         if col == self.DATE_COLUMN:
             action_date_asc = menu.addAction(_("Order ascending"))
+            action_date_desc = menu.addAction(_("Order descending"))
         action_casename_asc = None
+        action_casename_desc = None
         action_assign_case = None
         if col == self.CASE_COLUMN:
             action_casename_asc = menu.addAction(_("Order ascending"))
+            action_casename_desc = menu.addAction(_("Order descending"))
             action_assign_case = menu.addAction(_("Assign case to file"))
         action_show_values_like = None
         action_hide_values_like = None
@@ -478,6 +502,7 @@ class DialogManageFiles(QtWidgets.QDialog):
         action_delete = None
         action_export_to_linked = None
         action_import_linked = None
+        action_mark_speakers = None
         if col == self.NAME_COLUMN:
             action_rename = menu.addAction(_("Rename database entry"))
             action_export = menu.addAction(_("Export"))
@@ -486,6 +511,10 @@ class DialogManageFiles(QtWidgets.QDialog):
                 action_export_to_linked = menu.addAction(_("Move file to externally linked file"))
             if mediapath is not None and mediapath != "" and mediapath[0] != "/":
                 action_import_linked = menu.addAction(_("Import linked file"))
+            if mediapath is None or \
+                    (mediapath is not None and len(mediapath) > 6 and (mediapath[:6] == '/docs/' or
+                                                                       mediapath[:5] == 'docs:')):
+                action_mark_speakers = menu.addAction(_('Mark speakers'))
         action_show_all = None
         if self.rows_hidden:
             action_show_all = menu.addAction(_("Show all rows Ctrl A"))
@@ -526,11 +555,15 @@ class DialogManageFiles(QtWidgets.QDialog):
         if action == action_filename_desc:
             self.load_file_data("filename desc")
         if action == action_date_asc:
-            self.load_file_data("date")
+            self.load_file_data("date asc")
+        if action == action_date_desc:
+            self.load_file_data("date desc")
         if action == action_type:
             self.load_file_data("filetype")
         if action == action_casename_asc:
-            self.load_file_data("casename")
+            self.load_file_data("casename asc")
+        if action == action_casename_desc:
+            self.load_file_data("casename desc")
         if action == action_order_by_value_asc:
             self.load_file_data("attribute asc:" + self.header_labels[col])
         if action == action_order_by_value_desc:
@@ -615,7 +648,9 @@ class DialogManageFiles(QtWidgets.QDialog):
                 return
             cb = QtWidgets.QApplication.clipboard()
             cb.setText(vancouver[0]['vancouver'].replace("\n", " "))
-
+        if action == action_mark_speakers:
+            self.mark_speakers()
+            
     def pdf_to_images(self, mediapath):
         """ Turn pdf to an image for each page. """
 
@@ -638,7 +673,7 @@ class DialogManageFiles(QtWidgets.QDialog):
             image_filename = filename + f"_p{i + 1}.jpg"
             # Not using os.path.join. Other methods 'might' look for the forward slash.
             destination = f"{self.app.project_path}/images/{image_filename}"
-            print(destination)
+            #print(destination)
             pymypdf_pixmap.save(destination)
             self.load_media_reference(f"/images/{image_filename}")
             self.parent_text_edit.append(_("Image loaded from pdf: ") + image_filename)
@@ -727,7 +762,7 @@ class DialogManageFiles(QtWidgets.QDialog):
         id = int(self.ui.tableWidget.item(row, self.ID_COLUMN).text())
         if self.app.settings['ai_enable'] == 'True':
             docs = self.app.get_file_texts(file_ids=[id])
-            self.app.ai.sources_vectorstore.import_document(docs[0]['id'], docs[0]['name'], docs[0]['fulltext'], True)
+            self.app.ai.sources_vectorstore.import_document(docs[0]['id'], docs[0]['name'], docs[0]['fulltext'])
 
     def undo_file_rename(self):
         """ Undo file name rename. """
@@ -944,6 +979,23 @@ class DialogManageFiles(QtWidgets.QDialog):
         self.update_files_in_dialogs()
         self.load_file_data()
         self.app.delete_backup = False
+        
+    def mark_speakers(self):
+        """ Mark the speakers in text files.
+         Note: User generated files (not loaded files) have medipath None.
+         When text file found open the text coding pane. """
+
+        try:
+            row = self.ui.tableWidget.currentRow()
+            if row == -1:
+                raise ValueError()
+            id_ = int(self.ui.tableWidget.item(row, self.ID_COLUMN).text())
+            text_item = next((item for item in self.source if item['id'] == id_ and item['fulltext']), None)
+            if not text_item:
+                raise ValueError()
+            self.main_window.text_coding(task='mark_speakers', doc_id=int(id_))
+        except (AttributeError, ValueError):
+            Message(self.app, _('Mark speakers'), _('No text file selected.'), 'critical').exec()
 
     def check_attribute_placeholders(self):
         """ Files can be added after attributes are in the project.
@@ -1024,13 +1076,14 @@ class DialogManageFiles(QtWidgets.QDialog):
         Fills table after data is loaded.
         param:
             order_by: string ""= name asc, "filename desc" = name desc,
-            "date" = date, "filetype" = mediapath,
-                "casename" = by alphabetic casename
+            "date asc" = date ascending, "date desc" = date descending, "filetype" = mediapath,
+                "casename asc" = by alphabetic casename ascending
+                "casename desc" = by alphabetic descending
                 "attribute:attribute name" selected attribute - ascending
                 "attribute desc: attribute name ttribute - descending
         """
 
-        # check a placeholder attribute is present for the file, add if missing
+        # Check a placeholder attribute is present for the file, add if missing
         self.check_attribute_placeholders()
         self.source = []
         cur = self.app.conn.cursor()
@@ -1040,18 +1093,28 @@ class DialogManageFiles(QtWidgets.QDialog):
               "order by upper(name)"
         if order_by == "filename desc":
             sql += " desc"
-        if order_by == "date":
+        if order_by == "date asc":
             sql = "select name, id, fulltext, mediapath, ifnull(memo,''), owner, date, av_text_id, risid from source " \
                   "order by date, upper(name)"
+        if order_by == "date desc":
+            sql = "select name, id, fulltext, mediapath, ifnull(memo,''), owner, date, av_text_id, risid from source " \
+                  "order by date desc, upper(name) desc"
         if order_by == "filetype":
             sql = "select name, id, fulltext, mediapath, ifnull(memo,''), owner, date, av_text_id, risid from source " \
                   "order by mediapath"
-        if order_by == "casename":
+        if order_by == "casename asc":
             sql = "select distinct source.name, source.id, source.fulltext, source.mediapath, ifnull(source.memo,''), "
-            sql += "source.owner, source.date, av_text_id "
+            sql += "source.owner, source.date, av_text_id, risid "
             sql += "from source left join case_text on source.id=case_text.fid "
             sql += "left join cases on cases.caseid=case_text.caseid "
             sql += "order by cases.name, source.name "
+
+        if order_by == "casename desc":
+            sql = "select distinct source.name, source.id, source.fulltext, source.mediapath, ifnull(source.memo,''), "
+            sql += "source.owner, source.date, av_text_id, risid "
+            sql += "from source left join case_text on source.id=case_text.fid "
+            sql += "left join cases on cases.caseid=case_text.caseid "
+            sql += "order by cases.name desc, source.name desc"
 
         if order_by[:14] == "attribute asc:":
             attribute_name = order_by[14:]
@@ -1087,7 +1150,9 @@ class DialogManageFiles(QtWidgets.QDialog):
             cur.execute(sql)
         result = cur.fetchall()
         for row in result:
-            icon, metadata = self.get_icon_and_metadata(row[1])
+            icon, metadata, err_ = self.get_icon_and_metadata(row[1])
+            if err_:
+                self.parent_text_edit.append(err_ + " : " + row[3])
             self.source.append({'name': row[0], 'id': row[1], 'fulltext': row[2],
                                 'mediapath': row[3], 'memo': row[4], 'owner': row[5], 'date': row[6],
                                 'av_text_id': row[7], 'risid': row[8], 'metadata': metadata, 'icon': icon,
@@ -1113,7 +1178,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                 res = cur.fetchone()
                 if res:
                     tmp = res[0]
-                    # For nicer display
+                    # Nicer display
                     if att_name == "Ref_authors":
                         tmp = tmp.replace(";", "\n")
                     s['attributes'].append(tmp)
@@ -1140,17 +1205,17 @@ class DialogManageFiles(QtWidgets.QDialog):
             icon = QtGui.QIcon(qta.icon('mdi6.text', options=[{'scale_factor': 1.2}]))
         if res[1] is not None and len(res[1]) > 0 and res[2] is None:
             metadata += _("Characters: ") + str(len(res[1]))
-            return icon, metadata
+            return icon, metadata, ""
         if res[2] is None:
             logger.debug("empty media path error")
-            return icon, metadata
+            return icon, metadata, ""
         if res[1] is not None and len(res[1]) > 5 and res[2][:6] == "/docs/":
             metadata += _("Characters: ") + str(len(res[1]))
-            return icon, metadata
+            return icon, metadata, ""
         if res[1] is not None and len(res[1]) > 5 and res[2][:5] == "docs:":
             metadata += _("Characters: ") + str(len(res[1]))
             icon = QtGui.QIcon(qta.icon('mdi6.text-box-check-outline', options=[{'scale_factor': 1.2}]))
-            return icon, metadata
+            return icon, metadata, ""
 
         abs_path = ""
         if 'audio:' == res[2][0:6]:
@@ -1169,7 +1234,10 @@ class DialogManageFiles(QtWidgets.QDialog):
                 w, h = image.size
             except (FileNotFoundError, PIL.UnidentifiedImageError):
                 metadata += _("Cannot locate media. ") + abs_path
-                return icon, metadata
+                return icon, metadata, "Not found error"
+            except PIL.Image.DecompressionBombError:
+                metadata += _("Image too large for PIL module. (DecompressionBombError): ") + abs_path
+                return icon, metadata, "DecompressionError"
             metadata += f"W: {w} x H: {h}"
         if res[2][:7] == "images:":
             icon = QtGui.QIcon(qta.icon('mdi6.image-check-outline', options=[{'scale_factor': 1.2}]))
@@ -1178,7 +1246,10 @@ class DialogManageFiles(QtWidgets.QDialog):
                 w, h = image.size
             except (FileNotFoundError, PIL.UnidentifiedImageError, AttributeError):
                 metadata += _("Cannot locate media. ") + abs_path
-                return icon, metadata
+                return icon, metadata, "Other error"
+            except PIL.Image.DecompressionBombError:
+                metadata += _("Image too large for PIL module. (DecompressionBombError): ") + abs_path
+                return icon, metadata, "DecompressionBombError"
             metadata += f"W: {w} x H: {h}"
         if res[2][:7] == "/video/":
             icon = QtGui.QIcon(qta.icon('mdi6.video-outline', options=[{'scale_factor': 1.2}]))
@@ -1191,7 +1262,7 @@ class DialogManageFiles(QtWidgets.QDialog):
         if res[2][:6] in ("/audio", "audio:", "/video", "video:"):
             if not os.path.exists(abs_path):
                 metadata += _("Cannot locate media. ") + abs_path
-                return icon, metadata
+                return icon, metadata, "Not found Error"
             if vlc:
                 try:
                     try:
@@ -1205,14 +1276,14 @@ class DialogManageFiles(QtWidgets.QDialog):
                     msecs = media.get_duration()
                     duration_txt = msecs_to_hours_mins_secs(msecs)
                     metadata += " " + _("Duration: ") + duration_txt
-                    return icon, metadata
+                    return icon, metadata, ""
                 except AttributeError as err:
                     logger.warning(str(err))
                     metadata += _("Cannot locate media. ") + f"{abs_path}\n{err}"
-                    return icon, metadata
+                    return icon, metadata, "Not found error"
             else:
                 metadata += _("Cannot get media duration.\nVLC not installed.")
-                return icon, metadata
+                return icon, metadata, "Other error"
         bytes_ = 0
         try:
             bytes_ = os.path.getsize(abs_path)
@@ -1227,7 +1298,7 @@ class DialogManageFiles(QtWidgets.QDialog):
         txt = self.get_cases_by_filename(res[0])
         if txt != "":
             metadata += f'\n{_("Case linked:")}\n{txt}'
-        return icon, metadata
+        return icon, metadata, ""
 
     def get_cases_by_filename(self, name):
         """ Called by get_icon_and_metadata, get_file_data
@@ -1509,7 +1580,7 @@ class DialogManageFiles(QtWidgets.QDialog):
         ui = DialogEditTextFile(self.app, id_)
         ui.ui.textEdit.setAcceptRichText(False)
         ui.exec()
-        icon, metadata = self.get_icon_and_metadata(id_)
+        icon, metadata, err_ = self.get_icon_and_metadata(id_)
         item['icon'] = icon
         item['metadata'] = metadata
         item['attributes'] = []
@@ -1542,12 +1613,12 @@ class DialogManageFiles(QtWidgets.QDialog):
     def import_files(self, link=False):
         """ Import files and store into relevant directories (documents, images, audio, video).
         Convert documents to plain text and store this in data.qda
-        Can import from plain text files, also import from html, odt, docx and md.
+        Can import from plain text files, also import from html, odt, docx, rtf, and md.
         md is text Markdown format.
-        Note importing from html, odt, docx all formatting is lost.
+        Note importing from html, odt, docx, rtf all formatting is lost.
         Imports images as jpg, jpeg, png which are stored in an images directory.
         Imports audio as mp3, wav, m4a which are stored in an audio directory.
-        Imports video as mp4, mov, ogg, wmv which are stored in a video directory.
+        Imports video as mp4, mov, ogg, wmv, webm which are stored in a video directory.
 
         param:
             link:   False - files are imported into project folder,
@@ -1581,7 +1652,7 @@ class DialogManageFiles(QtWidgets.QDialog):
             QtWidgets.QApplication.processEvents()
             filename = import_path.split("/")[-1]
             destination = self.app.project_path
-            if import_path.split('.')[-1].lower() in ('docx', 'odt', 'txt', 'htm', 'html', 'epub', 'md'):
+            if import_path.split('.')[-1].lower() in ('docx', 'odt', 'rtf', 'txt', 'htm', 'html', 'epub', 'md'):
                 destination += f"/documents/{filename}"
                 if link_path == "":
                     try:
@@ -1637,7 +1708,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                 else:
                     self.load_media_reference(f"audio:{link_path}")
                 known_file_type = True
-            if import_path.split('.')[-1].lower() in ('mkv', 'mov', 'mp4', 'ogg', 'wmv'):
+            if import_path.split('.')[-1].lower() in ('mkv', 'mov', 'mp4', 'ogg', 'wmv', 'webm'):
                 if link_path == "":
                     destination += f"/video/{filename}"
                     try:
@@ -1759,7 +1830,7 @@ class DialogManageFiles(QtWidgets.QDialog):
             
             # add doc to vectorstore
             if self.app.settings['ai_enable'] == 'True':
-                self.app.ai.sources_vectorstore.import_document(entry['id'], entry['name'], entry['fulltext'], update=True)
+                self.app.ai.sources_vectorstore.import_document(entry['id'], entry['name'], entry['fulltext'])
 
             # Add file attribute placeholders
             att_sql = 'select name from attribute_type where caseOrFile ="file"'
@@ -1775,11 +1846,27 @@ class DialogManageFiles(QtWidgets.QDialog):
             self.parent_text_edit.append(entry['name'] + _(" created."))
             self.source.append(entry)
 
+    def load_pseudonyms(self):
+        """ Pseudonyms stored in pseudonyms.json in qda data folder.
+        Loads into list of dictionaries of 'original', ;pseudonym' keys.
+        """
+
+        pseudonyms = []
+        pseudonyms_filepath = os.path.join(self.app.project_path, "pseudonyms.json")
+        try:
+            with open(pseudonyms_filepath, "r") as f:
+                pseudonyms = json.load(f)
+        except FileNotFoundError as err:
+            print(err)
+        return pseudonyms
+
     def load_file_text(self, import_file, link_path=""):
-        """ Import from file types of odt, docx pdf, epub, txt, html, htm.
+        """ Import from file types of odt, docx, rtf, pdf, epub, txt, html, htm.
         Implement character detection for txt imports.
         Loading pdf text. I have removed additional line breaks. See commented sections below.
         Removing these allows the pdf to be coded in Code_text and Code_pdf without positional shifting problems.
+
+        If pseudonyms.json is present in the qda folder, apply the pseudonyms to the words / phrases on import.
 
         param:
             import_file: filepath of file to be imported, String
@@ -1799,6 +1886,18 @@ class DialogManageFiles(QtWidgets.QDialog):
             document = opendocx(import_file)
             list_ = getdocumenttext(document)
             text_ = "\n\n".join(list_)  # add line to paragraph spacing for visual format
+        # Import from rtf
+        if import_file[-4:].lower() == ".rtf":
+            # text_ = rtf_to_text(import_file, encoding="latin-1", errors="replace")
+            with open(import_file, "r", encoding="latin-1") as sourcefile:
+                text_ = ""
+                try:
+                    rtf = sourcefile.read()
+                    text_ = rtf_to_text(rtf)
+                except Exception as err:
+                    msg = "Importing rtf. Expecting characters encoded as latin-1. Import failed."
+                    logger.debug(f"rtf_to_text error Not Latin-1: {err}")
+                    Message(self.app, "rtf to text error", msg).exec()
         # Import from epub
         if import_file[-5:].lower() == ".epub":
             book = epub.read_epub(import_file)
@@ -1808,7 +1907,20 @@ class DialogManageFiles(QtWidgets.QDialog):
                     string = bytes_.decode('utf-8')
                     text_ += html_to_text(string) + "\n\n"  # Add line to paragraph spacing for visual format
                 except TypeError as err:
-                    logger.debug("ebooklib get_body_content error " + str(err))
+                    logger.debug(f"ebooklib get_body_content error: {err}")
+        # Import from html
+        if import_file[-5:].lower() == ".html" or import_file[-4:].lower() == ".htm":
+            import_errors = 0
+            with open(import_file, "r", encoding="utf-8", errors="surrogateescape") as sourcefile:
+                html_text = ""
+                while 1:
+                    line = sourcefile.readline()
+                    if not line:
+                        break
+                    html_text += line
+                text_ = html_to_text(html_text)
+                if import_errors > 0:
+                    Message(self.app, _("Warning"), str(import_errors) + _(" lines not imported"), "warning").exec()
         # Import PDF
         if import_file[-4:].lower() == '.pdf':
             pdf_file = open(import_file, 'rb')
@@ -1825,20 +1937,6 @@ class DialogManageFiles(QtWidgets.QDialog):
                 for lobj in layout:
                     self.get_item_and_hierarchy(page, lobj)
                 text_ += self.pdf_page_text
-
-        # Import from html
-        if import_file[-5:].lower() == ".html" or import_file[-4:].lower() == ".htm":
-            import_errors = 0
-            with open(import_file, "r", encoding="utf-8", errors="surrogateescape") as sourcefile:
-                html_text = ""
-                while 1:
-                    line = sourcefile.readline()
-                    if not line:
-                        break
-                    html_text += line
-                text_ = html_to_text(html_text)
-                if import_errors > 0:
-                    Message(self.app, _("Warning"), str(import_errors) + _(" lines not imported"), "warning").exec()
         # Try importing as a plain text file.
         # TODO https://stackoverflow.com/questions/436220/how-to-determine-the-encoding-of-text
         # ==> suggestion: use the new lib "charset_normalizer"  
@@ -1881,6 +1979,13 @@ class DialogManageFiles(QtWidgets.QDialog):
                                           _("Duplicate filename.\nFile not imported"))
             return
 
+        # Apply pseudonym text replacement
+        pseudonyms = self.load_pseudonyms()
+        if import_file[-4:].lower() != '.pdf':
+            for pseudonym in pseudonyms:
+                pseudonymised = re.sub(rf"\b{pseudonym['original']}\b", pseudonym['pseudonym'], text_)
+                text_ = pseudonymised
+
         # Internal storage
         mediapath = "/docs/" + filename
         if link_path != "":
@@ -1910,7 +2015,7 @@ class DialogManageFiles(QtWidgets.QDialog):
             
         # add doc to vectorstore
         if self.app.settings['ai_enable'] == 'True':
-            self.app.ai.sources_vectorstore.import_document(entry['id'], entry['name'], entry['fulltext'], update=True)
+            self.app.ai.sources_vectorstore.import_document(entry['id'], entry['name'], entry['fulltext'])
             
         msg = entry['name']
         if link_path == "":
@@ -2119,7 +2224,8 @@ class DialogManageFiles(QtWidgets.QDialog):
                 cur.execute("delete from attribute where attr_type ='file' and id=?", [s['id']])
                 self.app.conn.commit()
                 # Delete from vectorstore
-                self.app.ai.sources_vectorstore.delete_document(s['id'])    
+                if self.app.settings['ai_enable'] == 'True':
+                    self.app.ai.sources_vectorstore.delete_document(s['id'])    
             
             # Delete image, audio or video source
             if s['mediapath'] is not None and s['mediapath'][0:5] != 'docs:' and s['mediapath'][0:6] != '/docs/':
@@ -2160,7 +2266,8 @@ class DialogManageFiles(QtWidgets.QDialog):
                     cur.execute("delete from attribute where attr_type ='file' and id=?", [res[0]])
                     self.app.conn.commit()
                     # Delete from vectorstore
-                    self.app.ai.sources_vectorstore.delete_document(res[0])    
+                    if self.app.settings['ai_enable'] == 'True':
+                        self.app.ai.sources_vectorstore.delete_document(res[0])    
 
         self.update_files_in_dialogs()
         self.check_attribute_placeholders()
@@ -2213,7 +2320,8 @@ class DialogManageFiles(QtWidgets.QDialog):
             cur.execute("delete from attribute where attr_type ='file' and id=?", [file_id])
             self.app.conn.commit()
             # Delete from vectorstore
-            self.app.ai.sources_vectorstore.delete_document(file_id)    
+            if self.app.settings['ai_enable'] == 'True':
+                self.app.ai.sources_vectorstore.delete_document(file_id)    
 
         # Delete image, audio or video source
         # (why not simply use 'else' instead of this complicated second if-clause?)
@@ -2245,7 +2353,8 @@ class DialogManageFiles(QtWidgets.QDialog):
             cur.execute("delete from attribute where attr_type='file' and id=?", [file_id])
             self.app.conn.commit()
             # Delete from vectorstore (this should not be necessary since it's not a text file, but just to be sure...)
-            self.app.ai.sources_vectorstore.delete_document(file_id)    
+            if self.app.settings['ai_enable'] == 'True':        
+                self.app.ai.sources_vectorstore.delete_document(file_id)    
 
             # Delete transcription text file
             if av_text_id is not None:
@@ -2256,7 +2365,8 @@ class DialogManageFiles(QtWidgets.QDialog):
                 cur.execute("delete from attribute where attr_type ='file' and id=?", [res[0]])
                 self.app.conn.commit()
                 # Delete from vectorstore
-                self.app.ai.sources_vectorstore.delete_document(res[0])
+                if self.app.settings['ai_enable'] == 'True':        
+                    self.app.ai.sources_vectorstore.delete_document(res[0])
 
         self.files_renamed = [x for x in self.files_renamed if not (file_id == x.get('fid'))]
         self.update_files_in_dialogs()

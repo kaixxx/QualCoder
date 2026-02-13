@@ -17,6 +17,7 @@ If not, see <https://www.gnu.org/licenses/>.
 Author: Colin Curtain (ccbogel)
 https://github.com/ccbogel/QualCoder
 https://qualcoder.wordpress.com/
+https://qualcoder-org.github.io/
 """
 
 import datetime
@@ -338,7 +339,7 @@ class ReplaceTextFile:
         self.app.conn.commit()
         # Update vectorstore
         if self.app.settings['ai_enable'] == 'True':
-            self.app.ai.sources_vectorstore.import_document(self.old_file['id'], self.new_file['name'], self.new_file['fulltext'], update=True)  
+            self.app.ai.sources_vectorstore.import_document(self.old_file['id'], self.new_file['name'], self.new_file['fulltext'])  
 
     @staticmethod
     def convert_odt_to_text(import_file):
