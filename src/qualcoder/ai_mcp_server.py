@@ -664,38 +664,12 @@ class AiMcpServer:
             return None
         return row[0]
 
-    def _table_exists(self, table_name: str) -> bool:
-        row = self._fetchone(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,),
-        )
-        return row is not None
-
     def _view_exists(self, view_name: str) -> bool:
         row = self._fetchone(
             "SELECT name FROM sqlite_master WHERE type='view' AND name=?",
             (view_name,),
         )
         return row is not None
-
-    def _fetch_coder_names_schema(self) -> Tuple[Optional[str], Optional[str]]:
-        if not self._table_exists("coder_names"):
-            return None, None
-        rows = self._fetchall("PRAGMA table_info(coder_names)")
-        cols = [str(r[1]) for r in rows]
-
-        name_col = None
-        for candidate in ("name", "codername", "owner", "coder_name"):
-            if candidate in cols:
-                name_col = candidate
-                break
-
-        visible_col = None
-        for candidate in ("visible", "isvisible", "is_visible"):
-            if candidate in cols:
-                visible_col = candidate
-                break
-        return name_col, visible_col
 
     def _to_bool(self, value: Any, default: bool) -> bool:
         if value is None:
@@ -712,15 +686,11 @@ class AiMcpServer:
         return default
 
     def _fetch_coder_visibility_map(self) -> Dict[str, bool]:
-        name_col, visible_col = self._fetch_coder_names_schema()
-        if name_col is None:
+        try:
+            rows = self._fetchall("SELECT name, visibility FROM coder_names")
+        except sqlite3.Error:
             return {}
 
-        if visible_col is None:
-            rows = self._fetchall(f"SELECT {name_col} FROM coder_names")
-            return {str(r[0]): True for r in rows if r[0] is not None and str(r[0]).strip() != ""}
-
-        rows = self._fetchall(f"SELECT {name_col}, {visible_col} FROM coder_names")
         result: Dict[str, bool] = {}
         for row in rows:
             if row[0] is None:

@@ -38,7 +38,8 @@ class TestAiMcpServer(TestCase):
             "pos1 integer, owner text, date text, memo text, avid integer, important integer)"
         )
         cur.execute(
-            "CREATE TABLE coder_names (name text primary key, visible integer)"
+            "CREATE TABLE coder_names (name text unique not null, visibility integer not null default 1 "
+            "check (visibility in (0, 1)))"
         )
         cur.execute(
             "CREATE TABLE journal (jid integer primary key, name text, jentry text, date text, owner text, unique(name))"
@@ -80,7 +81,7 @@ class TestAiMcpServer(TestCase):
             (1, "journal one", "journal body", "2026-02-13", "default"),
         )
         cur.executemany(
-            "INSERT INTO coder_names (name, visible) VALUES (?,?)",
+            "INSERT INTO coder_names (name, visibility) VALUES (?,?)",
             [
                 ("default", 1),
                 ("hidden_user", 0),
@@ -102,7 +103,7 @@ class TestAiMcpServer(TestCase):
             "CREATE VIEW code_text_visible AS "
             "SELECT code_text.* FROM code_text "
             "JOIN coder_names ON code_text.owner = coder_names.name "
-            "WHERE coder_names.visible = 1"
+            "WHERE coder_names.visibility = 1"
         )
         self.conn.commit()
 
