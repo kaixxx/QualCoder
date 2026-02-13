@@ -38,6 +38,7 @@ class AiMcpServer:
     STATUS_REVIEW_CODE_TREE = 'Reviewing the current code structure...'
     STATUS_REVIEW_JOURNAL_LIST = 'Reviewing the list of journals...'
     STATUS_REVIEW_PROJECT_MEMO = 'Reviewing the project memo...'
+    STATUS_REVIEW_CODERS = 'Reviewing coder visibility settings...'
     STATUS_REVIEW_DOCUMENT = 'Reviewing text document "{name}"...'
     STATUS_REVIEW_JOURNAL = 'Reviewing journal entry "{name}"...'
     STATUS_REVIEW_RESOURCE = 'Reviewing project material...'
@@ -65,6 +66,8 @@ class AiMcpServer:
             #"a localized label. This convention may or may not be present in a given project. "
             "This internal MCP server currently exposes read-only access to empirical documents (text only, "
             "no images or videos), codes/categories (code tree), project memo, and journals for analytic assistance. "
+            "Coder visibility applies in the project. For coded segments, default retrieval uses visible coders; "
+            "you can optionally request one specific coder via the owner query parameter. "
             "Use resources/list and resources/read to inspect available material. "
             "Do not assume write operations are available in this phase."
         )
@@ -209,6 +212,13 @@ class AiMcpServer:
                 "entity_type": "project_memo",
                 "message_id": self.STATUS_REVIEW_PROJECT_MEMO,
             }
+        if uri_base == "qualcoder://project/coders":
+            return {
+                **base_event,
+                "status_code": "project_coders",
+                "entity_type": "project_coders",
+                "message_id": self.STATUS_REVIEW_CODERS,
+            }
 
         doc_match = re.fullmatch(r"qualcoder://documents/text/(\d+)", uri_base)
         if doc_match is not None:
@@ -287,6 +297,8 @@ class AiMcpServer:
                 translated = translator('Reviewing the list of journals...')
             elif message_id == self.STATUS_REVIEW_PROJECT_MEMO:
                 translated = translator('Reviewing the project memo...')
+            elif message_id == self.STATUS_REVIEW_CODERS:
+                translated = translator('Reviewing coder visibility settings...')
             elif message_id == self.STATUS_REVIEW_DOCUMENT:
                 translated = translator('Reviewing text document "{name}"...')
             elif message_id == self.STATUS_REVIEW_JOURNAL:
@@ -386,7 +398,7 @@ class AiMcpServer:
                     name="Coded text segments by code id",
                     description=(
                         "Read coded text segments for a code id. Optional query params: strategy "
-                        "(diverse_by_document|recent_first|sequential), max_segments, max_chars, cursor, file_ids."
+                        "(diverse_by_document|recent_first|sequential), max_segments, max_chars, cursor, file_ids, owner."
                     ),
                     mimeType="application/json",
                 ),
@@ -424,6 +436,8 @@ class AiMcpServer:
             return self._project_summary()
         if uri_no_query == "qualcoder://project/memo":
             return self._project_memo()
+        if uri_no_query == "qualcoder://project/coders":
+            return self._project_coders()
         if uri_no_query == "qualcoder://codes/tree":
             return self._codes_tree()
         if uri_no_query == "qualcoder://documents":
@@ -473,6 +487,12 @@ class AiMcpServer:
                 mimeType="application/json",
             ),
             types.Resource(
+                uri="qualcoder://project/coders",
+                name="Coders",
+                description="Project coders and their visibility.",
+                mimeType="application/json",
+            ),
+            types.Resource(
                 uri="qualcoder://codes/tree",
                 name="Codes and categories",
                 description="Code tree with categories and code metadata.",
@@ -506,6 +526,30 @@ class AiMcpServer:
         row = self._fetchone("SELECT ifnull(memo,'') FROM project")
         memo = "" if row is None else row[0]
         return {"memo": memo}
+
+    def _project_coders(self) -> Dict[str, Any]:
+        current_coder = ""
+        if hasattr(self.app, "settings") and isinstance(self.app.settings, dict):
+            current_coder = str(self.app.settings.get("codername", ""))
+
+        all_coders = self._fetch_all_coder_names()
+        visibility_map = self._fetch_coder_visibility_map()
+        coders: List[Dict[str, Any]] = []
+        for name in all_coders:
+            coders.append(
+                {
+                    "name": name,
+                    "visible": bool(visibility_map.get(name, True)),
+                    "current": name == current_coder,
+                }
+            )
+        coders.sort(key=lambda item: str(item.get("name", "")).casefold())
+        return {
+            "current_coder": current_coder,
+            "coders": coders,
+            "visible_coders": [c["name"] for c in coders if c["visible"]],
+            "hidden_coders": [c["name"] for c in coders if not c["visible"]],
+        }
 
     def _codes_tree(self) -> Dict[str, Any]:
         categories = []
@@ -620,6 +664,121 @@ class AiMcpServer:
             return None
         return row[0]
 
+    def _table_exists(self, table_name: str) -> bool:
+        row = self._fetchone(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        )
+        return row is not None
+
+    def _view_exists(self, view_name: str) -> bool:
+        row = self._fetchone(
+            "SELECT name FROM sqlite_master WHERE type='view' AND name=?",
+            (view_name,),
+        )
+        return row is not None
+
+    def _fetch_coder_names_schema(self) -> Tuple[Optional[str], Optional[str]]:
+        if not self._table_exists("coder_names"):
+            return None, None
+        rows = self._fetchall("PRAGMA table_info(coder_names)")
+        cols = [str(r[1]) for r in rows]
+
+        name_col = None
+        for candidate in ("name", "codername", "owner", "coder_name"):
+            if candidate in cols:
+                name_col = candidate
+                break
+
+        visible_col = None
+        for candidate in ("visible", "isvisible", "is_visible"):
+            if candidate in cols:
+                visible_col = candidate
+                break
+        return name_col, visible_col
+
+    def _to_bool(self, value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(int(value))
+        val = str(value).strip().lower()
+        if val in ("1", "true", "yes", "y", "on"):
+            return True
+        if val in ("0", "false", "no", "n", "off"):
+            return False
+        return default
+
+    def _fetch_coder_visibility_map(self) -> Dict[str, bool]:
+        name_col, visible_col = self._fetch_coder_names_schema()
+        if name_col is None:
+            return {}
+
+        if visible_col is None:
+            rows = self._fetchall(f"SELECT {name_col} FROM coder_names")
+            return {str(r[0]): True for r in rows if r[0] is not None and str(r[0]).strip() != ""}
+
+        rows = self._fetchall(f"SELECT {name_col}, {visible_col} FROM coder_names")
+        result: Dict[str, bool] = {}
+        for row in rows:
+            if row[0] is None:
+                continue
+            coder_name = str(row[0]).strip()
+            if coder_name == "":
+                continue
+            result[coder_name] = self._to_bool(row[1], True)
+        return result
+
+    def _fetch_all_coder_names(self) -> List[str]:
+        coder_set = set()
+        if hasattr(self.app, "settings") and isinstance(self.app.settings, dict):
+            current = str(self.app.settings.get("codername", "")).strip()
+            if current != "":
+                coder_set.add(current)
+        if hasattr(self.app, "get_coder_names_in_project"):
+            try:
+                for name in self.app.get_coder_names_in_project():
+                    if name is None:
+                        continue
+                    text = str(name).strip()
+                    if text != "":
+                        coder_set.add(text)
+            except Exception:
+                pass
+        for name in self._fetch_coder_visibility_map().keys():
+            text = str(name).strip()
+            if text != "":
+                coder_set.add(text)
+        return sorted(coder_set, key=str.casefold)
+
+    def _resolve_coding_source(self, owner_override: Optional[str]) -> Dict[str, Any]:
+        owner = None if owner_override is None else str(owner_override).strip()
+        if owner is None or owner == "":
+            if not self._view_exists("code_text_visible"):
+                raise RuntimeError("Required view 'code_text_visible' not found.")
+            return {
+                "table_name": "code_text_visible",
+                "owner_filter_sql": "",
+                "owner_filter_params": [],
+                "owner_scope": "visible",
+                "owner": None,
+                "visible_filter_applied": True,
+            }
+
+        known_coders = self._fetch_all_coder_names()
+        if owner not in known_coders:
+            raise ValueError(f"Unknown coder name: {owner}")
+        return {
+            "table_name": "code_text",
+            "owner_filter_sql": " AND ct.owner=?",
+            "owner_filter_params": [owner],
+            "owner_scope": "owner_override",
+            "owner": owner,
+            "visible_filter_applied": False,
+        }
+
     def _parse_code_segments_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
         strategy = str(query.get("strategy", ["diverse_by_document"])[0]).strip()
         allowed = {"diverse_by_document", "recent_first", "sequential"}
@@ -651,6 +810,10 @@ class AiMcpServer:
                     continue
                 file_ids.append(max(0, self._to_int(part, -1)))
         file_ids = [fid for fid in file_ids if fid > 0]
+        owner = None
+        owner_raw = str(query.get("owner", [""])[0]).strip()
+        if owner_raw != "":
+            owner = owner_raw
 
         return {
             "strategy": strategy,
@@ -658,6 +821,7 @@ class AiMcpServer:
             "max_chars": max_chars,
             "cursor": cursor,
             "file_ids": file_ids,
+            "owner": owner,
         }
 
     def _read_code_segments(self, cid: int, options: Dict[str, Any]) -> Dict[str, Any]:
@@ -670,40 +834,48 @@ class AiMcpServer:
         max_chars = int(options.get("max_chars", self.default_segments_max_chars))
         cursor = int(options.get("cursor", 0))
         file_ids = options.get("file_ids", [])
+        owner_override = options.get("owner")
         if not isinstance(file_ids, list):
             file_ids = []
 
-        where_parts = ["code_text.cid=?"]
+        source_cfg = self._resolve_coding_source(owner_override)
+        table_name = str(source_cfg["table_name"])
+        owner_filter_sql = str(source_cfg["owner_filter_sql"])
+        owner_filter_params = source_cfg["owner_filter_params"]
+
+        where_parts = ["ct.cid=?"]
         where_params: List[Any] = [cid]
         if len(file_ids) > 0:
             placeholders = ",".join(["?"] * len(file_ids))
-            where_parts.append(f"code_text.fid IN ({placeholders})")
+            where_parts.append(f"ct.fid IN ({placeholders})")
             where_params.extend(file_ids)
+        where_params.extend(owner_filter_params)
         where_sql = " WHERE " + " AND ".join(where_parts)
+        where_sql += owner_filter_sql
 
-        count_sql = "SELECT count(*) FROM code_text" + where_sql
+        count_sql = f"SELECT count(*) FROM {table_name} AS ct" + where_sql
         count_row = self._fetchone(count_sql, tuple(where_params))
         total_segments = 0 if count_row is None else int(count_row[0])
 
-        order_sql = "ORDER BY code_text.ctid"
+        order_sql = "ORDER BY ct.ctid"
         select_sql = (
-            "SELECT code_text.ctid, code_text.cid, code_text.fid, ifnull(code_text.seltext,''), code_text.pos0, "
-            "code_text.pos1, code_text.owner, code_text.date, source.name, code_name.name "
-            "FROM code_text "
-            "JOIN source ON source.id = code_text.fid "
-            "JOIN code_name ON code_name.cid = code_text.cid "
+            "SELECT ct.ctid, ct.cid, ct.fid, ifnull(ct.seltext,''), ct.pos0, "
+            "ct.pos1, ct.owner, ct.date, source.name, code_name.name "
+            f"FROM {table_name} AS ct "
+            "JOIN source ON source.id = ct.fid "
+            "JOIN code_name ON code_name.cid = ct.cid "
             + where_sql
             + " "
         )
 
         if strategy == "recent_first":
-            order_sql = "ORDER BY code_text.date DESC, code_text.ctid DESC"
+            order_sql = "ORDER BY ct.date DESC, ct.ctid DESC"
             segment_rows = self._fetchall(
                 select_sql + order_sql + " LIMIT ? OFFSET ?",
                 tuple(where_params + [max_segments, cursor]),
             )
         elif strategy == "sequential":
-            order_sql = "ORDER BY code_text.ctid"
+            order_sql = "ORDER BY ct.ctid"
             segment_rows = self._fetchall(
                 select_sql + order_sql + " LIMIT ? OFFSET ?",
                 tuple(where_params + [max_segments, cursor]),
@@ -713,9 +885,9 @@ class AiMcpServer:
                 "SELECT ordered.ctid, ordered.cid, ordered.fid, ifnull(ordered.seltext,''), ordered.pos0, "
                 "ordered.pos1, ordered.owner, ordered.date, source.name, code_name.name "
                 "FROM ("
-                "SELECT code_text.ctid, code_text.cid, code_text.fid, code_text.seltext, code_text.pos0, code_text.pos1, "
-                "code_text.owner, code_text.date, ROW_NUMBER() OVER (PARTITION BY code_text.fid ORDER BY code_text.ctid) AS rn "
-                "FROM code_text "
+                "SELECT ct.ctid, ct.cid, ct.fid, ct.seltext, ct.pos0, ct.pos1, "
+                "ct.owner, ct.date, ROW_NUMBER() OVER (PARTITION BY ct.fid ORDER BY ct.ctid) AS rn "
+                f"FROM {table_name} AS ct "
                 + where_sql
                 + ") AS ordered "
                 "JOIN source ON source.id = ordered.fid "
@@ -774,6 +946,9 @@ class AiMcpServer:
                 "max_chars": max_chars,
                 "cursor": cursor,
                 "file_ids": file_ids,
+                "owner_scope": source_cfg["owner_scope"],
+                "owner": source_cfg["owner"],
+                "visible_filter_applied": source_cfg["visible_filter_applied"],
                 "total_segments": total_segments,
                 "returned_segments": len(segments),
                 "returned_chars": used_chars,

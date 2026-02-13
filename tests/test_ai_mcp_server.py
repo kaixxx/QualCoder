@@ -38,6 +38,9 @@ class TestAiMcpServer(TestCase):
             "pos1 integer, owner text, date text, memo text, avid integer, important integer)"
         )
         cur.execute(
+            "CREATE TABLE coder_names (name text primary key, visible integer)"
+        )
+        cur.execute(
             "CREATE TABLE journal (jid integer primary key, name text, jentry text, date text, owner text, unique(name))"
         )
 
@@ -77,6 +80,13 @@ class TestAiMcpServer(TestCase):
             (1, "journal one", "journal body", "2026-02-13", "default"),
         )
         cur.executemany(
+            "INSERT INTO coder_names (name, visible) VALUES (?,?)",
+            [
+                ("default", 1),
+                ("hidden_user", 0),
+            ],
+        )
+        cur.executemany(
             "INSERT INTO code_text (ctid, cid, fid, seltext, pos0, pos1, owner, date, memo, avid, important) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [
@@ -85,7 +95,14 @@ class TestAiMcpServer(TestCase):
                 (3, 1, 3, "gamma", 0, 5, "default", "2026-02-11", "", None, 0),
                 (4, 1, 1, "delta", 6, 11, "default", "2026-02-13", "", None, 0),
                 (5, 1, 2, "epsilon", 11, 18, "default", "2026-02-09", "", None, 0),
+                (6, 1, 2, "hidden quote", 20, 31, "hidden_user", "2026-02-14", "", None, 0),
             ],
+        )
+        cur.execute(
+            "CREATE VIEW code_text_visible AS "
+            "SELECT code_text.* FROM code_text "
+            "JOIN coder_names ON code_text.owner = coder_names.name "
+            "WHERE coder_names.visible = 1"
         )
         self.conn.commit()
 
@@ -128,6 +145,15 @@ class TestAiMcpServer(TestCase):
         templates = [r["uriTemplate"] for r in res["result"]["resourceTemplates"]]
         self.assertIn("qualcoder://codes/segments/{cid}", templates)
 
+    def test_project_coders_resource_contains_visibility(self):
+        req = {"jsonrpc": "2.0", "id": 20, "method": "resources/read", "params": {"uri": "qualcoder://project/coders"}}
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        self.assertEqual("default", payload["current_coder"])
+        self.assertIn("default", payload["visible_coders"])
+        self.assertIn("hidden_user", payload["hidden_coders"])
+
     def test_code_segments_diverse_by_document_strategy(self):
         req = {
             "jsonrpc": "2.0",
@@ -140,6 +166,9 @@ class TestAiMcpServer(TestCase):
         payload = json.loads(res["result"]["contents"][0]["text"])
         ctid_order = [seg["ctid"] for seg in payload["segments"]]
         self.assertEqual([1, 2, 3, 4], ctid_order)
+        self.assertEqual("visible", payload["selection"]["owner_scope"])
+        self.assertTrue(payload["selection"]["visible_filter_applied"])
+        self.assertIsNone(payload["selection"]["owner"])
 
     def test_code_segments_recent_first_strategy(self):
         req = {
@@ -181,6 +210,33 @@ class TestAiMcpServer(TestCase):
         self.assertTrue(payload["selection"]["truncated"])
         self.assertEqual(2, payload["selection"]["next_cursor"])
 
+    def test_code_segments_owner_override_returns_hidden_coder(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 26,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://codes/segments/1?owner=hidden_user&strategy=sequential&max_segments=10&max_chars=1000"},
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        self.assertEqual(1, len(payload["segments"]))
+        self.assertEqual("hidden_user", payload["segments"][0]["owner"])
+        self.assertEqual("owner_override", payload["selection"]["owner_scope"])
+        self.assertFalse(payload["selection"]["visible_filter_applied"])
+        self.assertEqual("hidden_user", payload["selection"]["owner"])
+
+    def test_code_segments_owner_override_unknown_coder_returns_error(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 27,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://codes/segments/1?owner=does_not_exist"},
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("error", res)
+        self.assertEqual(-32602, res["error"]["code"])
+
     def test_status_event_for_code_segments_contains_code_name(self):
         event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://codes/segments/1"})
         self.assertIsNotNone(event)
@@ -193,6 +249,7 @@ class TestAiMcpServer(TestCase):
         self.assertIn("result", res)
         uris = [r["uri"] for r in res["result"]["resources"]]
         self.assertIn("qualcoder://project/memo", uris)
+        self.assertIn("qualcoder://project/coders", uris)
         self.assertIn("qualcoder://codes/tree", uris)
         self.assertIn("qualcoder://documents", uris)
         self.assertIn("qualcoder://journals", uris)
@@ -236,6 +293,13 @@ class TestAiMcpServer(TestCase):
         self.assertIsNotNone(event)
         self.assertEqual("documents_list", event["status_code"])
         self.assertEqual("documents", event["entity_type"])
+
+    def test_status_event_for_project_coders(self):
+        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://project/coders"})
+        self.assertIsNotNone(event)
+        self.assertEqual("project_coders", event["status_code"])
+        txt = self.server.status_event_to_text(event)
+        self.assertTrue(len(txt) > 0)
 
     def test_host_status_event_for_final_response(self):
         event = self.server.describe_host_status_event("final_response")
