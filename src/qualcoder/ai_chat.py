@@ -918,12 +918,12 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.ui.plainTextEdit_question.setEnabled(False)
             self.ui.pushButton_question.setEnabled(False)
             
-    def replace_references(self, text, streaming=False):
+    def _replace_text_references(self, text, streaming=False):
         if self.ai_text_doc_id is None: 
             # we are not in text analysis chat
             return text
                 
-        pattern = r'\[REF: ([\"\'“”„‘’«»])(.+?)([\"\'“”„‘’«»])\]'  
+        pattern = r'\[REF: ([\"\'“”„‘’«»])(.+?)([\"\'“”„‘’«»])\]'
         fulltext = self.app.get_text_fulltext(self.ai_text_doc_id)    
         
         # Replacement function
@@ -959,7 +959,34 @@ data collected. This information will accompany every prompt sent to the AI, res
                 res = res[:incomplete.start()].rstrip()
         
         return res
-            
+
+    def replace_references(self, text, streaming=False, chat_idx=None):
+        """Replace text-analysis and MCP/general-chat references with clickable links."""
+
+        res = str(text)
+
+        # Text-analysis chat keeps its existing deterministic REF->quote flow.
+        if self.ai_text_doc_id is not None:
+            return self._replace_text_references(res, streaming=streaming)
+
+        # General/MCP chat: convert [REF: "..."] by matching quotes against retrieved evidence.
+        if streaming:
+            res = re.sub(r'\[REF:[^\]]*\]', _('(source reference)'), res)
+            incomplete_ref = re.search(r'\[REF:[^\]]*$', res)
+            if incomplete_ref:
+                res = res[:incomplete_ref.start()].rstrip()
+            return res
+
+        candidates = self._collect_ref_candidates(chat_idx)
+        ref_pattern = r'\[REF:\s*(.+?)\s*\]'
+
+        def replace_ref(match):
+            raw = str(match.group(1)).strip()
+            quote = raw.strip(' "\'')
+            return self._resolve_ref_quote_to_anchor(quote, candidates)
+
+        return re.sub(ref_pattern, replace_ref, res)
+
     def chat_list_selection_changed(self, force_update=False):
         self.ui.pushButton_delete.setEnabled(self.current_chat_idx > -1)
         if (not force_update) and (self.current_chat_idx == self.ui.listWidget_chat_list.currentRow()):
@@ -1158,7 +1185,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         if chat_idx > -1:
             curr_chat_id = self.chat_list[chat_idx][0]
             if msg_type == 'ai':
-                msg_content = self.replace_references(msg_content)
+                msg_content = self.replace_references(msg_content, chat_idx=chat_idx)
             if db_conn is None:
                 db_conn = self.chat_history_conn
             cursor = db_conn.cursor()
@@ -1313,24 +1340,43 @@ data collected. This information will accompany every prompt sent to the AI, res
                 db_conn.close()
         return True    
 
-    def _mcp_agent_system_prompt(self) -> str:
+    def _mcp_planner_system_prompt(self) -> str:
         return (
-            "You are a QualCoder assistant that can use an internal MCP server. "
-            "QualCoder supports qualitative analysis of empirical data with documents, codes/categories, project memo, and journals. "
-            "Treat data from resources as project evidence and reason carefully from it. "
-            "At each step, respond with ONLY a JSON object. Use one of the following formats:\n"
-            "1) {\"action\": \"mcp_call\", \"method\": \"resources/read\", \"params\": {\"uri\": \"qualcoder://...\"}}\n"
-            "2) {\"action\": \"done\"}\n"
+            "You are a QualCoder MCP planning agent. "
+            "Plan which MCP requests are needed to answer the user question with project evidence. "
+            "Return ONLY one JSON object with this shape:\n"
+            "{"
+            "\"needs_mcp\": true|false, "
+            "\"plan_summary\": \"one short user-facing progress note\", "
+            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize\", \"params\": {}}], "
+            "\"answer_brief\": \"optional draft answer idea\""
+            "}\n"
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
-            "- Never invent MCP methods.\n"
-            "- First check whether the current conversation and previous MCP responses already contain enough information.\n"
-            "- Call MCP when genuinely new project information is needed.\n"
-            #"- If answering the users question needs project-specific evidence and no relevant MCP data is available yet, call MCP before done.\n"            
-            #"- Reuse previously retrieved MCP results whenever possible; avoid repeating identical MCP calls.\n"
-            "- Keep resource reads focused. Do not read large amounts of irrelevant text.\n"
-            "- When enough context is available, return done.\n"
-            "- Do not return normal prose here."
+            "- Use as few calls as possible and keep them focused.\n"
+            "- Prefer specific reads over broad reads.\n"
+            "- plan_summary should briefly explain what evidence you will gather next.\n"
+            "- If enough evidence is already in the conversation, set needs_mcp=false and calls=[].\n"
+            "- Do not output prose outside JSON."
+        )
+
+    def _mcp_reflection_system_prompt(self) -> str:
+        return (
+            "You are a QualCoder MCP reflection agent. "
+            "Review the collected MCP evidence and decide whether more MCP calls are needed. "
+            "Return ONLY one JSON object with this shape:\n"
+            "{"
+            "\"enough_information\": true|false, "
+            "\"reflection_summary\": \"one short user-facing progress note\", "
+            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize\", \"params\": {}}], "
+            "\"answer_brief\": \"short answer plan for final response\""
+            "}\n"
+            "Rules:\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
+            "- If evidence is sufficient, set enough_information=true and revised_calls=[].\n"
+            "- If evidence is insufficient, propose only necessary revised_calls.\n"
+            "- reflection_summary should briefly explain whether evidence is sufficient and why.\n"
+            "- Do not output prose outside JSON."
         )
 
     def _mcp_final_answer_system_prompt(self) -> str:
@@ -1338,7 +1384,11 @@ data collected. This information will accompany every prompt sent to the AI, res
             "You are a QualCoder assistant. "
             "Provide a final answer for the user in normal prose based on the conversation and retrieved project context. "
             "Do not output JSON. Do not call MCP. "
-            "If information is missing, state that briefly and avoid making up details."
+            "If information is missing, state that briefly and avoid making up details. "
+            "When you refer to empirical text evidence, add citations in this exact form: "
+            "[REF: \"exact quote from the retrieved evidence\"]. "
+            "The quote inside REF must be copied exactly from retrieved evidence (no paraphrasing, no corrections, no translation). "
+            "Do not generate HTML links yourself."
         )
 
     def _run_mcp_request(self, method: str, params: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -1350,6 +1400,58 @@ data collected. This information will accompany every prompt sent to the AI, res
         }
         response = self.ai_mcp_server.handle_request(request)
         return request, response
+
+    def _invoke_json_llm(self, messages: List[Any]) -> Dict[str, Any]:
+        """Invoke model and parse one JSON object response."""
+
+        try:
+            llm_response = self.app.ai.large_llm.invoke(messages, response_format={"type": "json_object"})
+        except Exception:
+            # Some providers/models do not support response_format.
+            llm_response = self.app.ai.large_llm.invoke(messages)
+        raw = str(llm_response.content).strip()
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def _normalize_mcp_calls(self, raw_calls: Any, allowed_methods: set[str], max_calls: int) -> List[Dict[str, Any]]:
+        """Validate and clamp model-proposed MCP calls."""
+
+        normalized: List[Dict[str, Any]] = []
+        if not isinstance(raw_calls, list):
+            return normalized
+        for item in raw_calls:
+            if len(normalized) >= max_calls:
+                break
+            if not isinstance(item, dict):
+                continue
+            method = str(item.get("method", "")).strip()
+            if method not in allowed_methods:
+                continue
+            params = item.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            normalized.append({"method": method, "params": params})
+        return normalized
+
+    def _json_bool(self, value: Any, default: bool) -> bool:
+        """Parse relaxed JSON boolean-like values."""
+
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in ("true", "1", "yes"):
+                return True
+            if text in ("false", "0", "no", ""):
+                return False
+        return default
 
     def _parse_mcp_agent_action(self, raw_text: str) -> Dict[str, Any]:
         """Interpret one structured control message from the model."""
@@ -1428,18 +1530,239 @@ data collected. This information will accompany every prompt sent to the AI, res
         payload = {"chat_idx": chat_idx, "status": status_msg, "status_event": status_event}
         signals.progress.emit(json.dumps(payload, ensure_ascii=False))
 
+    def _normalize_progress_note(self, text: Any, max_length: int = 220) -> str:
+        """Normalize model progress notes for compact UI display."""
+
+        note = str(text if text is not None else "").replace("\r", " ").replace("\n", " ")
+        note = " ".join(note.split()).strip()
+        if note == "":
+            return ""
+        if len(note) > max_length:
+            note = note[: max_length - 3].rstrip() + "..."
+        return note
+
+    def _emit_mcp_status_text(self, signals, chat_idx: int, status_text: str):
+        """Emit one free-text MCP progress line."""
+
+        status = self._normalize_progress_note(status_text)
+        if status == "":
+            return
+        if signals is None or signals.progress is None:
+            return
+        payload = {"chat_idx": chat_idx, "status": status, "status_event": None}
+        signals.progress.emit(json.dumps(payload, ensure_ascii=False))
+
+    def _safe_int(self, value: Any, default: int = -1) -> int:
+        try:
+            if value is None or isinstance(value, bool):
+                return default
+            return int(value)
+        except Exception:
+            return default
+
+    def _tool_result_messages_for_chat(self, chat_idx: Optional[int]) -> List[str]:
+        """Return raw tool_result message contents for one chat."""
+
+        if chat_idx is None:
+            chat_idx = self.current_chat_idx
+        if chat_idx is None or chat_idx < 0 or chat_idx >= len(self.chat_list):
+            return []
+        curr_chat_id = self.chat_list[chat_idx][0]
+        cursor = self.chat_history_conn.cursor()
+        cursor.execute(
+            "SELECT msg_content FROM chat_messages WHERE chat_id=? AND msg_type='tool_result' ORDER BY id",
+            (curr_chat_id,),
+        )
+        rows = cursor.fetchall()
+        return [str(row[0]) for row in rows if isinstance(row, tuple) and len(row) > 0 and row[0] is not None]
+
+    def _extract_ref_candidates_from_tool_result(self, tool_result_raw: str) -> List[Dict[str, Any]]:
+        """Extract evidence spans from one persisted MCP tool_result message."""
+
+        prefix = "MCP response:\n"
+        if not isinstance(tool_result_raw, str) or not tool_result_raw.startswith(prefix):
+            return []
+        try:
+            rpc_response = json.loads(tool_result_raw[len(prefix):])
+        except Exception:
+            return []
+        if not isinstance(rpc_response, dict):
+            return []
+
+        result = rpc_response.get("result", {})
+        if not isinstance(result, dict):
+            return []
+        contents = result.get("contents", [])
+        if not isinstance(contents, list):
+            return []
+
+        candidates: List[Dict[str, Any]] = []
+        for content in contents:
+            if not isinstance(content, dict):
+                continue
+            uri = str(content.get("uri", "")).split("?", 1)[0]
+            text_blob = content.get("text", None)
+            if not isinstance(text_blob, str) or text_blob.strip() == "":
+                continue
+            try:
+                payload = json.loads(text_blob)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+
+            if re.fullmatch(r"qualcoder://codes/segments/\d+", uri):
+                segments = payload.get("segments", [])
+                if not isinstance(segments, list):
+                    continue
+                for seg in segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    source_id = self._safe_int(seg.get("fid", None), -1)
+                    start = self._safe_int(seg.get("pos0", None), -1)
+                    quote = str(seg.get("quote", ""))
+                    if source_id <= 0 or start < 0 or quote.strip() == "":
+                        continue
+                    source_name = str(seg.get("source_name", "")).strip()
+                    if source_name == "":
+                        source_name = self.get_filename(source_id)
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "source_name": source_name,
+                            "start": start,
+                            "length": len(quote),
+                            "text": quote,
+                        }
+                    )
+                continue
+
+            if re.fullmatch(r"qualcoder://documents/text/\d+", uri):
+                source_id = self._safe_int(payload.get("id", None), -1)
+                start = self._safe_int(payload.get("start", None), -1)
+                excerpt = str(payload.get("text", ""))
+                if source_id <= 0 or start < 0 or excerpt.strip() == "":
+                    continue
+                source_name = str(payload.get("name", "")).strip()
+                if source_name == "":
+                    source_name = self.get_filename(source_id)
+                candidates.append(
+                    {
+                        "source_id": source_id,
+                        "source_name": source_name,
+                        "start": start,
+                        "length": len(excerpt),
+                        "text": excerpt,
+                    }
+                )
+        return candidates
+
+    def _collect_ref_candidates(self, chat_idx: Optional[int]) -> List[Dict[str, Any]]:
+        """Collect deduplicated empirical evidence spans from MCP tool results."""
+
+        tool_results = self._tool_result_messages_for_chat(chat_idx)
+        candidates: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in tool_results:
+            for item in self._extract_ref_candidates_from_tool_result(raw):
+                source_id = self._safe_int(item.get("source_id", None), -1)
+                start = self._safe_int(item.get("start", None), -1)
+                text = str(item.get("text", ""))
+                key = f"{source_id}|{start}|{len(text)}|{text[:120]}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(item)
+        return candidates
+
+    def _resolve_ref_quote_to_anchor(self, quote: str, candidates: List[Dict[str, Any]]) -> str:
+        """Resolve one exact/fuzzy quote to a quote: anchor."""
+
+        quote_text = str(quote if quote is not None else "").strip()
+        if quote_text == "":
+            return _('(unknown reference)')
+
+        best_candidate: Optional[Dict[str, Any]] = None
+        best_local_start = -1
+        best_local_end = -1
+
+        for item in candidates:
+            segment_text = str(item.get("text", ""))
+            local_start = segment_text.find(quote_text)
+            if local_start > -1:
+                best_candidate = item
+                best_local_start = local_start
+                best_local_end = local_start + len(quote_text)
+                break
+
+        if best_candidate is None:
+            for item in candidates:
+                segment_text = str(item.get("text", ""))
+                local_start, local_end = ai_quote_search(quote_text, segment_text)
+                if local_start > -1 < local_end:
+                    best_candidate = item
+                    best_local_start = local_start
+                    best_local_end = local_end
+                    break
+
+        if best_candidate is None:
+            return _('(unknown reference)')
+
+        source_id = self._safe_int(best_candidate.get("source_id", None), -1)
+        span_start = self._safe_int(best_candidate.get("start", None), -1)
+        source_name = str(best_candidate.get("source_name", "")).strip()
+        if source_name == "":
+            source_name = self.get_filename(source_id)
+        if source_id <= 0 or span_start < 0:
+            return _('(unknown reference)')
+
+        abs_start = span_start + best_local_start
+        fulltext = self.app.get_text_fulltext(source_id)
+        if fulltext is None:
+            return _('(unknown reference)')
+        full_len = len(fulltext)
+        if full_len <= 0:
+            return _('(unknown reference)')
+        if abs_start < 0:
+            abs_start = 0
+        if abs_start >= full_len:
+            return _('(unknown reference)')
+
+        abs_end = abs_start + max(1, best_local_end - best_local_start)
+        if abs_end > full_len:
+            abs_end = full_len
+        if abs_end <= abs_start:
+            abs_end = min(full_len, abs_start + 1)
+            if abs_end <= abs_start:
+                return _('(unknown reference)')
+        abs_len = abs_end - abs_start
+
+        line_start, line_end = self.app.get_line_numbers(fulltext, abs_start, abs_end)
+        if line_start > 0 and line_end > 0:
+            if line_start == line_end:
+                label = f"{source_name}: {line_start}"
+            else:
+                label = f"{source_name}: {line_start} - {line_end}"
+        else:
+            label = source_name if source_name != "" else str(source_id)
+        return f'(<a href="quote:{source_id}_{abs_start}_{abs_len}">{label}</a>)'
+
     def _mcp_general_chat_worker(self, messages: List[Any], chat_idx: int, signals=None) -> Dict[str, Any]:
-        """Background worker: general chat with MCP resource access."""
+        """Background worker: staged agent flow with MCP resource access."""
 
         result: Dict[str, Any] = {"chat_idx": chat_idx, "stream_messages": [], "tool_messages": [], "canceled": False}
         allowed_methods = {"initialize", "resources/list", "resources/templates/list", "resources/read"}
 
         try:
-            agent_messages: List[Any] = [SystemMessage(content=self._mcp_agent_system_prompt())]
-            agent_messages.extend(messages)
+            agent_messages: List[Any] = list(messages)
             final_hint = ''
             tool_messages: List[Dict[str, str]] = []
             mcp_cache = self._extract_mcp_response_cache(agent_messages)
+            max_calls_per_round = 4
+            max_reflection_rounds = 4
+            max_total_tool_calls = 12
+            total_tool_calls = 0
+            stop_reason = ""
 
             def append_tool_exchange(method_name: str, method_params: Dict[str, Any], rpc_response: Dict[str, Any]):
                 call_content = json.dumps(
@@ -1452,60 +1775,121 @@ data collected. This information will accompany every prompt sent to the AI, res
                 tool_messages.append({"msg_type": "tool_call", "msg_author": "mcp_agent", "msg_content": call_content})
                 tool_messages.append({"msg_type": "tool_result", "msg_author": "mcp_server", "msg_content": result_content})
 
-            max_steps = 6
-            for _step in range(max_steps):
+            planner_messages: List[Any] = [SystemMessage(content=self._mcp_planner_system_prompt())]
+            planner_messages.extend(agent_messages)
+            planner_messages.append(HumanMessage(content="Create the initial MCP plan now."))
+            plan_data = self._invoke_json_llm(planner_messages)
+            planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
+            needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
+            plan_summary = str(plan_data.get("plan_summary", "")).strip()
+            if plan_summary != "":
+                self._emit_mcp_status_text(signals, chat_idx, _("Plan: ") + plan_summary)
+            initial_brief = str(plan_data.get("answer_brief", "")).strip()
+            if initial_brief != "":
+                final_hint = initial_brief
+            if not needs_mcp:
+                planned_calls = []
+
+            for reflection_round in range(max_reflection_rounds):
                 if self.app.ai.ai_async_is_canceled:
                     result["canceled"] = True
                     return result
 
-                try:
-                    llm_response = self.app.ai.large_llm.invoke(agent_messages, response_format={"type": "json_object"})
-                except Exception:
-                    # Some providers/models do not support response_format.
-                    llm_response = self.app.ai.large_llm.invoke(agent_messages)
-                raw = str(llm_response.content).strip()
-                action = self._parse_mcp_agent_action(raw)
+                executed_any_call = False
+                for call in planned_calls:
+                    if self.app.ai.ai_async_is_canceled:
+                        result["canceled"] = True
+                        return result
+                    if total_tool_calls >= max_total_tool_calls:
+                        stop_reason = "max_total_tool_calls_reached"
+                        break
+                    method = str(call.get("method", "")).strip()
+                    params = call.get("params", {})
+                    if not isinstance(params, dict):
+                        params = {}
+                    if method not in allowed_methods:
+                        response = {
+                            "jsonrpc": "2.0",
+                            "id": self.ai_mcp_server.new_request_id(),
+                            "error": {"code": -32601, "message": "Method not found", "data": method},
+                        }
+                    else:
+                        call_key = self._mcp_call_key(method, params)
+                        if call_key in mcp_cache:
+                            response = mcp_cache[call_key]
+                        else:
+                            status_event = self.ai_mcp_server.describe_status_event(method, params)
+                            self._emit_mcp_status(signals, chat_idx, status_event)
+                            _request, response = self._run_mcp_request(method, params)
+                            mcp_cache[call_key] = response
+                            total_tool_calls += 1
+                        executed_any_call = True
+                    append_tool_exchange(method, params, response)
 
-                if action["action"] == "done":
-                    try:
-                        raw_json = json.loads(raw)
-                        if isinstance(raw_json, dict):
-                            final_hint = str(raw_json.get("answer", "")).strip()
-                    except Exception:
-                        pass
+                reflection_messages: List[Any] = [SystemMessage(content=self._mcp_reflection_system_prompt())]
+                reflection_messages.extend(agent_messages)
+                reflection_prompt = "Reflect on sufficiency of the collected evidence and return JSON now."
+                if plan_summary != "":
+                    reflection_prompt += "\nInitial plan summary:\n" + plan_summary
+                reflection_messages.append(HumanMessage(content=reflection_prompt))
+                reflection_data = self._invoke_json_llm(reflection_messages)
+                reflection_summary = str(reflection_data.get("reflection_summary", "")).strip()
+                if reflection_summary != "":
+                    self._emit_mcp_status_text(signals, chat_idx, _("Reflection: ") + reflection_summary)
+                reflection_brief = str(reflection_data.get("answer_brief", "")).strip()
+                if reflection_brief != "":
+                    final_hint = reflection_brief
+                enough_information = self._json_bool(reflection_data.get("enough_information", False), False)
+                if enough_information:
+                    stop_reason = "enough_information"
                     break
 
-                method = action.get("method", "")
-                params = action.get("params", {})
-                if method not in allowed_methods:
-                    response = {
-                        "jsonrpc": "2.0",
-                        "id": self.ai_mcp_server.new_request_id(),
-                        "error": {"code": -32601, "message": "Method not found", "data": method},
-                    }
-                else:
-                    call_key = self._mcp_call_key(method, params)
-                    if call_key in mcp_cache:
-                        response = mcp_cache[call_key]
-                    else:
-                        status_event = self.ai_mcp_server.describe_status_event(method, params)
-                        self._emit_mcp_status(signals, chat_idx, status_event)
-                        _request, response = self._run_mcp_request(method, params)
-                        mcp_cache[call_key] = response
-
-                append_tool_exchange(method, params, response)
+                revised_calls = self._normalize_mcp_calls(
+                    reflection_data.get("revised_calls", []), allowed_methods, max_calls_per_round
+                )
+                if len(revised_calls) == 0:
+                    if executed_any_call:
+                        replanner_messages: List[Any] = [SystemMessage(content=self._mcp_planner_system_prompt())]
+                        replanner_messages.extend(agent_messages)
+                        replanner_messages.append(
+                            HumanMessage(
+                                content=(
+                                    "The previous reflection said more evidence may be needed. "
+                                    "Propose a revised MCP plan now."
+                                )
+                            )
+                        )
+                        replan_data = self._invoke_json_llm(replanner_messages)
+                        replan_summary = str(replan_data.get("plan_summary", "")).strip()
+                        if replan_summary != "":
+                            self._emit_mcp_status_text(signals, chat_idx, _("Plan: ") + replan_summary)
+                        revised_calls = self._normalize_mcp_calls(
+                            replan_data.get("calls", []), allowed_methods, max_calls_per_round
+                        )
+                    if len(revised_calls) == 0:
+                        stop_reason = "no_more_valid_calls"
+                        break
+                planned_calls = revised_calls
+            else:
+                if stop_reason == "":
+                    stop_reason = "max_reflection_rounds_reached"
 
             self._emit_mcp_status(signals, chat_idx, self.ai_mcp_server.describe_host_status_event("final_response"))
             final_prompt = (
                 "Now provide the final answer to the user in normal prose. "
                 "Do not call MCP anymore. "
-                "The final answer must follow the current conversation language."
+                "The final answer must follow the current conversation language. "
+                "When referring to empirical text evidence, cite it as [REF: \"exact quote\"]."
             )
             if final_hint != '':
                 final_prompt += '\nHere is a draft idea from your internal planning:\n' + final_hint
+            if stop_reason not in ("", "enough_information"):
+                final_prompt += (
+                    "\nIf the available project evidence is incomplete, clearly state uncertainty and "
+                    "mention what additional project material would help."
+                )
             final_stream_messages: List[Any] = [SystemMessage(content=self._mcp_final_answer_system_prompt())]
-            # Reuse accumulated MCP context but replace orchestration system prompt.
-            final_stream_messages.extend(agent_messages[1:])
+            final_stream_messages.extend(agent_messages)
             final_stream_messages.append(HumanMessage(content=final_prompt))
             result["stream_messages"] = final_stream_messages
             result["tool_messages"] = tool_messages

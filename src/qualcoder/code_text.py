@@ -5370,29 +5370,50 @@ class DialogCodeText(QtWidgets.QWidget):
                     self.ui.listWidget.setCurrentRow(i)
                     self.load_file(f)
                     # Set text cursor position
-                    text_cursor = self.ui.plainTextEdit.textCursor()
-                    text_cursor.setPosition(sel_start)
-                    endpos = sel_end
-                    if endpos < 0:
+                    doc_len = len(self.ui.plainTextEdit.toPlainText())
+                    start = max(0, int(sel_start))
+                    endpos = int(sel_end)
+                    if endpos <= start:
+                        endpos = start + 1
+                    if doc_len > 0:
+                        if start >= doc_len:
+                            start = doc_len - 1
+                        endpos = min(max(start + 1, endpos), doc_len)
+                    else:
+                        start = 0
                         endpos = 0
+                    text_cursor = self.ui.plainTextEdit.textCursor()
+                    text_cursor.setPosition(start)
                     text_cursor.setPosition(endpos, QtGui.QTextCursor.MoveMode.KeepAnchor)
                     self.ui.plainTextEdit.setTextCursor(text_cursor)
                     self.ui.plainTextEdit.setFocus()
-                    QtCore.QTimer.singleShot(20, self.scroll_text_into_view)  # scroll into view after window is updated
+                    QtCore.QTimer.singleShot(0, self.scroll_text_into_view)  # scroll into view after window is updated
                 except Exception as e:
                     logger.debug(str(e))
                 break
 
     def scroll_text_into_view(self):
-        """ Scroll so the selection is in the middle of the screen. """
-        cursor = self.ui.plainTextEdit.textCursor()
-        if cursor.hasSelection():
-            cursor_rect = self.ui.plainTextEdit.cursorRect(cursor)
-            vertical_center = cursor_rect.center().y()
-            vertical_scrollbar = self.ui.plainTextEdit.verticalScrollBar()
-            current_scroll_pos = vertical_scrollbar.value()
-            desired_scroll_pos = current_scroll_pos + (vertical_center - self.ui.plainTextEdit.viewport().height() // 2)
-            vertical_scrollbar.setValue(desired_scroll_pos)
+        """Scroll so the current selection is centered in the viewport."""
+
+        editor = self.ui.plainTextEdit
+        original_cursor = editor.textCursor()
+        if not original_cursor.hasSelection():
+            editor.centerCursor()
+            return
+
+        # Center on the middle of the selected span to avoid edge-biased scrolling.
+        sel_start = original_cursor.selectionStart()
+        sel_end = original_cursor.selectionEnd()
+        mid_pos = sel_start + ((sel_end - sel_start) // 2)
+
+        target_cursor = QtGui.QTextCursor(editor.document())
+        target_cursor.setPosition(mid_pos)
+
+        # QPlainTextEdit centers based on the active cursor position.
+        editor.setTextCursor(target_cursor)
+        editor.centerCursor()
+        # Restore original selection highlight.
+        editor.setTextCursor(original_cursor)
 
     def ai_search_update_spinner(self):
         """ Updating the ai_progressBar and the text spinner in the list view to indicate to the user that 

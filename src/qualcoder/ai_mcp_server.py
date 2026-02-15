@@ -43,6 +43,9 @@ class AiMcpServer:
     STATUS_REVIEW_JOURNAL = "status.review.journal"
     STATUS_REVIEW_RESOURCE = "status.review.resource"
     STATUS_REVIEW_CODE_SEGMENTS = "status.review.code_segments"
+    STATUS_PLAN_MCP_STEPS = "status.plan.mcp_steps"
+    STATUS_EXECUTE_MCP_STEPS = "status.execute.mcp_steps"
+    STATUS_REFLECT_MCP_RESULTS = "status.reflect.mcp_results"
     STATUS_FORMULATE_RESPONSE = "status.final.formulate_response"
 
     def __init__(self, app):
@@ -262,6 +265,27 @@ class AiMcpServer:
     def describe_host_status_event(self, phase: str) -> Optional[Dict[str, Any]]:
         """Describe non-MCP but related host-side status events."""
 
+        if phase == "planning":
+            return {
+                "status_code": "planning",
+                "phase": "start",
+                "message_id": self.STATUS_PLAN_MCP_STEPS,
+                "message_args": {},
+            }
+        if phase == "execution":
+            return {
+                "status_code": "execution",
+                "phase": "start",
+                "message_id": self.STATUS_EXECUTE_MCP_STEPS,
+                "message_args": {},
+            }
+        if phase == "reflection":
+            return {
+                "status_code": "reflection",
+                "phase": "start",
+                "message_id": self.STATUS_REFLECT_MCP_RESULTS,
+                "message_args": {},
+            }
         if phase == "final_response":
             return {
                 "status_code": "final_response",
@@ -294,6 +318,9 @@ class AiMcpServer:
             self.STATUS_REVIEW_JOURNAL: _('Reviewing journal entry "{name}"...'),
             self.STATUS_REVIEW_RESOURCE: _('Reviewing project material...'),
             self.STATUS_REVIEW_CODE_SEGMENTS: _('Reviewing coded text segments for "{name}"...'),
+            self.STATUS_PLAN_MCP_STEPS: _('Planning how to gather project evidence...'),
+            self.STATUS_EXECUTE_MCP_STEPS: _('Executing MCP retrieval steps...'),
+            self.STATUS_REFLECT_MCP_RESULTS: _('Reflecting on retrieved evidence and revising the plan...'),
             self.STATUS_FORMULATE_RESPONSE: _('Formulating a response based on the selected materials...'),
         }
         translated = templates.get(message_id)
