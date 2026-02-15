@@ -33,17 +33,17 @@ class AiMcpServer:
     max_segments_limit = 200
     default_segments_max_chars = 8000
     max_segments_chars_limit = 50000
-    STATUS_REVIEW_AVAILABLE_MATERIALS = 'Reviewing available project materials...'
-    STATUS_REVIEW_DOCUMENT_LIST = 'Reviewing the list of text documents...'
-    STATUS_REVIEW_CODE_TREE = 'Reviewing the current code structure...'
-    STATUS_REVIEW_JOURNAL_LIST = 'Reviewing the list of journals...'
-    STATUS_REVIEW_PROJECT_MEMO = 'Reviewing the project memo...'
-    STATUS_REVIEW_CODERS = 'Reviewing coder visibility settings...'
-    STATUS_REVIEW_DOCUMENT = 'Reviewing text document "{name}"...'
-    STATUS_REVIEW_JOURNAL = 'Reviewing journal entry "{name}"...'
-    STATUS_REVIEW_RESOURCE = 'Reviewing project material...'
-    STATUS_REVIEW_CODE_SEGMENTS = 'Reviewing coded text segments for "{name}"...'
-    STATUS_FORMULATE_RESPONSE = 'Formulating a response based on the selected materials...'
+    STATUS_REVIEW_AVAILABLE_MATERIALS = "status.review.available_materials"
+    STATUS_REVIEW_DOCUMENT_LIST = "status.review.document_list"
+    STATUS_REVIEW_CODE_TREE = "status.review.code_tree"
+    STATUS_REVIEW_JOURNAL_LIST = "status.review.journal_list"
+    STATUS_REVIEW_PROJECT_MEMO = "status.review.project_memo"
+    STATUS_REVIEW_CODERS = "status.review.coders"
+    STATUS_REVIEW_DOCUMENT = "status.review.document"
+    STATUS_REVIEW_JOURNAL = "status.review.journal"
+    STATUS_REVIEW_RESOURCE = "status.review.resource"
+    STATUS_REVIEW_CODE_SEGMENTS = "status.review.code_segments"
+    STATUS_FORMULATE_RESPONSE = "status.final.formulate_response"
 
     def __init__(self, app):
         self.app = app
@@ -282,35 +282,24 @@ class AiMcpServer:
         message_args = status_event.get("message_args", {})
         if not isinstance(message_args, dict):
             message_args = {}
-        translator = globals().get("_", None)
-        if translator is None:
-            translated = message_id
-        else:
+        templates = {
             # Keep literal msgids in _() calls so gettext extraction can discover them.
-            if message_id == self.STATUS_REVIEW_AVAILABLE_MATERIALS:
-                translated = translator('Reviewing available project materials...')
-            elif message_id == self.STATUS_REVIEW_DOCUMENT_LIST:
-                translated = translator('Reviewing the list of text documents...')
-            elif message_id == self.STATUS_REVIEW_CODE_TREE:
-                translated = translator('Reviewing the current code structure...')
-            elif message_id == self.STATUS_REVIEW_JOURNAL_LIST:
-                translated = translator('Reviewing the list of journals...')
-            elif message_id == self.STATUS_REVIEW_PROJECT_MEMO:
-                translated = translator('Reviewing the project memo...')
-            elif message_id == self.STATUS_REVIEW_CODERS:
-                translated = translator('Reviewing coder visibility settings...')
-            elif message_id == self.STATUS_REVIEW_DOCUMENT:
-                translated = translator('Reviewing text document "{name}"...')
-            elif message_id == self.STATUS_REVIEW_JOURNAL:
-                translated = translator('Reviewing journal entry "{name}"...')
-            elif message_id == self.STATUS_REVIEW_RESOURCE:
-                translated = translator('Reviewing project material...')
-            elif message_id == self.STATUS_REVIEW_CODE_SEGMENTS:
-                translated = translator('Reviewing coded text segments for "{name}"...')
-            elif message_id == self.STATUS_FORMULATE_RESPONSE:
-                translated = translator('Formulating a response based on the selected materials...')
-            else:
-                translated = translator(message_id)
+            self.STATUS_REVIEW_AVAILABLE_MATERIALS: _('Reviewing available project materials...'),
+            self.STATUS_REVIEW_DOCUMENT_LIST: _('Reviewing the list of text documents...'),
+            self.STATUS_REVIEW_CODE_TREE: _('Reviewing the current code structure...'),
+            self.STATUS_REVIEW_JOURNAL_LIST: _('Reviewing the list of journals...'),
+            self.STATUS_REVIEW_PROJECT_MEMO: _('Reviewing the project memo...'),
+            self.STATUS_REVIEW_CODERS: _('Reviewing coder visibility settings...'),
+            self.STATUS_REVIEW_DOCUMENT: _('Reviewing text document "{name}"...'),
+            self.STATUS_REVIEW_JOURNAL: _('Reviewing journal entry "{name}"...'),
+            self.STATUS_REVIEW_RESOURCE: _('Reviewing project material...'),
+            self.STATUS_REVIEW_CODE_SEGMENTS: _('Reviewing coded text segments for "{name}"...'),
+            self.STATUS_FORMULATE_RESPONSE: _('Formulating a response based on the selected materials...'),
+        }
+        translated = templates.get(message_id)
+        if translated is None:
+            # Backward compatibility if older serialized events contain literal text IDs.
+            translated = _(message_id)
         try:
             return translated.format(**message_args)
         except Exception:
