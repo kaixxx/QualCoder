@@ -32,7 +32,7 @@ from langchain_core.messages.system import SystemMessage
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.documents.base import Document
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 import json
 import html as html_lib
@@ -1360,6 +1360,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "}\n"
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
+            "- The turn is already bootstrapped with initialize + resources/list context; avoid repeating them with identical params.\n"
             "- Use as few calls as possible and keep them focused.\n"
             "- Prefer specific reads over broad reads.\n"
             "- plan_summary should briefly explain what evidence you will gather next.\n"
@@ -1380,6 +1381,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "}\n"
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
+            "- Initialize and resources/list are already available in context unless explicitly changed.\n"
             "- If evidence is sufficient, set enough_information=true and revised_calls=[].\n"
             "- If evidence is insufficient, propose only necessary revised_calls.\n"
             "- reflection_summary should briefly explain whether evidence is sufficient and why.\n"
@@ -1765,9 +1767,13 @@ data collected. This information will accompany every prompt sent to the AI, res
             final_hint = ''
             tool_messages: List[Dict[str, str]] = []
             mcp_cache = self._extract_mcp_response_cache(agent_messages)
+            bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
+                ("initialize", {}),
+                ("resources/list", {}),
+            ]
             max_calls_per_round = 4
             max_reflection_rounds = 4
-            max_total_tool_calls = 12
+            max_total_tool_calls = 12 + len(bootstrap_calls)
             total_tool_calls = 0
             stop_reason = ""
 
@@ -1788,6 +1794,21 @@ data collected. This information will accompany every prompt sent to the AI, res
                     ensure_ascii=False,
                 )
                 tool_messages.append({"msg_type": "single_instruct", "msg_author": "ai_agent", "msg_content": payload})
+
+            # Ensure baseline environment context exists before planning.
+            for method, params in bootstrap_calls:
+                if self.app.ai.ai_async_is_canceled:
+                    result["canceled"] = True
+                    return result
+                call_key = self._mcp_call_key(method, params)
+                if call_key in mcp_cache:
+                    continue
+                status_event = self.ai_mcp_server.describe_status_event(method, params)
+                self._emit_mcp_status(signals, chat_idx, status_event)
+                _request, response = self._run_mcp_request(method, params)
+                mcp_cache[call_key] = response
+                total_tool_calls += 1
+                append_tool_exchange(method, params, response)
 
             planner_system_prompt = self._mcp_planner_system_prompt()
             planner_user_prompt = "Create the initial MCP plan now."
