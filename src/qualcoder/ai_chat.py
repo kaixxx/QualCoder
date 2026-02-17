@@ -1421,7 +1421,8 @@ data collected. This information will accompany every prompt sent to the AI, res
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"enough_information\": true|false, "
-            "\"reflection_summary\": \"one short user-facing progress note\", "
+            "\"reflection_summary\": \"one short user-facing note\", "
+            "\"next_step_note\": \"optional short alias if reflection_summary is empty\", "
             "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
             "}\n"
@@ -1430,7 +1431,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Initialize and resources/list are already available in context unless explicitly changed.\n"
             "- If evidence is sufficient, set enough_information=true and revised_calls=[].\n"
             "- If evidence is insufficient, propose only necessary revised_calls.\n"
-            "- reflection_summary should briefly explain whether evidence is sufficient and why.\n"
+            "- reflection_summary must be one sentence, user-facing, <=160 characters, focused on immediate next step plus brief reason.\n"
+            "- Avoid boilerplate like 'I will' or 'Next step is' unless strictly needed.\n"
+            "- next_step_note is optional and only used when reflection_summary is empty.\n"
             "- Do not output prose outside JSON."
         )
 
@@ -1606,6 +1609,28 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
         payload = {"chat_idx": chat_idx, "status": status, "status_event": None}
         signals.progress.emit(json.dumps(payload, ensure_ascii=False))
+
+    def _short_reflection_next_step_note(self, reflection_summary: str,
+                                         model_next_step_note: str) -> str:
+        """Keep reflection content, only shorten/format it for UI display."""
+
+        candidate = self._normalize_progress_note(reflection_summary, max_length=1000)
+        if candidate == "":
+            candidate = self._normalize_progress_note(model_next_step_note, max_length=1000)
+        if candidate == "":
+            return ""
+
+        max_length = 160
+        if len(candidate) <= max_length:
+            return candidate
+
+        # Prefer a full sentence boundary before hard truncation.
+        sentence_end = max(candidate.rfind("." , 0, max_length),
+                           candidate.rfind("!", 0, max_length),
+                           candidate.rfind("?", 0, max_length))
+        if sentence_end >= 40:
+            return candidate[: sentence_end + 1].strip()
+        return self._normalize_progress_note(candidate, max_length=max_length)
 
     def _safe_int(self, value: Any, default: int = -1) -> int:
         try:
@@ -1891,6 +1916,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             planner_user_prompt = "Create the initial MCP plan now."
             append_single_instruct_log("planning", "system", planner_system_prompt)
             append_single_instruct_log("planning", "user", planner_user_prompt)
+            self._emit_mcp_status_text(signals, chat_idx, _("Planning..."))
             planner_messages: List[Any] = [SystemMessage(content=planner_system_prompt)]
             planner_messages.extend(agent_messages)
             planner_messages.append(HumanMessage(content=planner_user_prompt))
@@ -1901,7 +1927,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             latest_plan_summary = plan_summary
             latest_reflection_summary = ""
             if plan_summary != "":
-                self._emit_mcp_status_text(signals, chat_idx, _("Plan: ") + plan_summary)
+                self._emit_mcp_status_text(signals, chat_idx, plan_summary)
             initial_brief = str(plan_data.get("answer_brief", "")).strip()
             if initial_brief != "":
                 final_hint = initial_brief
@@ -1957,19 +1983,24 @@ data collected. This information will accompany every prompt sent to the AI, res
                 reflection_summary = str(reflection_data.get("reflection_summary", "")).strip()
                 if reflection_summary != "":
                     latest_reflection_summary = reflection_summary
-                if reflection_summary != "":
-                    self._emit_mcp_status_text(signals, chat_idx, _("Reflection: ") + reflection_summary)
                 reflection_brief = str(reflection_data.get("answer_brief", "")).strip()
                 if reflection_brief != "":
                     final_hint = reflection_brief
                 enough_information = self._json_bool(reflection_data.get("enough_information", False), False)
+                reflection_next_step_note = str(reflection_data.get("next_step_note", "")).strip()
+                revised_calls = self._normalize_mcp_calls(
+                    reflection_data.get("revised_calls", []), allowed_methods, max_calls_per_round
+                )
+                short_reflection_note = self._short_reflection_next_step_note(
+                    reflection_summary,
+                    reflection_next_step_note,
+                )
+                if short_reflection_note != "":
+                    self._emit_mcp_status_text(signals, chat_idx, short_reflection_note)
                 if enough_information:
                     stop_reason = "enough_information"
                     break
 
-                revised_calls = self._normalize_mcp_calls(
-                    reflection_data.get("revised_calls", []), allowed_methods, max_calls_per_round
-                )
                 if len(revised_calls) == 0:
                     if executed_any_call:
                         replanner_system_prompt = self._mcp_planner_system_prompt()
@@ -1991,7 +2022,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         if replan_summary != "":
                             latest_plan_summary = replan_summary
                         if replan_summary != "":
-                            self._emit_mcp_status_text(signals, chat_idx, _("Plan: ") + replan_summary)
+                            self._emit_mcp_status_text(signals, chat_idx, replan_summary)
                         revised_calls = self._normalize_mcp_calls(
                             replan_data.get("calls", []), allowed_methods, max_calls_per_round
                         )
