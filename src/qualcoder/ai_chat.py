@@ -1165,6 +1165,16 @@ data collected. This information will accompany every prompt sent to the AI, res
     
     def history_get_ai_messages(self):
         messages = []
+        latest_agent_state_id = -1
+        for msg in self.chat_msg_list:
+            if msg[2] == 'agent_state':
+                try:
+                    msg_id = int(msg[0])
+                except Exception:
+                    msg_id = -1
+                if msg_id > latest_agent_state_id:
+                    latest_agent_state_id = msg_id
+
         for msg in self.chat_msg_list:
             if msg[2] == 'system':
                 messages.append(SystemMessage(content=msg[4]))
@@ -1176,6 +1186,17 @@ data collected. This information will accompany every prompt sent to the AI, res
                 messages.append(AIMessage(content=msg[4]))
             elif msg[2] == 'tool_result':
                 messages.append(HumanMessage(content=msg[4]))
+            elif msg[2] == 'agent_state':
+                # keep only the newest compact agent-state snapshot across turns
+                try:
+                    msg_id = int(msg[0])
+                except Exception:
+                    msg_id = -1
+                if msg_id != latest_agent_state_id:
+                    continue
+                state_payload = str(msg[4]).strip()
+                if state_payload != '':
+                    messages.append(HumanMessage(content='Agent state snapshot:\n' + state_payload))
             elif msg[2] == 'single_instruct':
                 # one-shot instruction logs must not be replayed in later turns
                 continue
@@ -1294,6 +1315,9 @@ data collected. This information will accompany every prompt sent to the AI, res
         elif msg_type == 'single_instruct':
             # single_instruct messages are persisted for audit/logging, but not rendered
             # and not sent again in future turns.
+            self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+        elif msg_type == 'agent_state':
+            # compact state memory for future turns (persisted, not rendered)
             self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'instruct':
             # instruct messages are only send to the AI, but not shown on screen
@@ -1821,6 +1845,8 @@ data collected. This information will accompany every prompt sent to the AI, res
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
             needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
             plan_summary = str(plan_data.get("plan_summary", "")).strip()
+            latest_plan_summary = plan_summary
+            latest_reflection_summary = ""
             if plan_summary != "":
                 self._emit_mcp_status_text(signals, chat_idx, _("Plan: ") + plan_summary)
             initial_brief = str(plan_data.get("answer_brief", "")).strip()
@@ -1877,6 +1903,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                 reflection_data = self._invoke_json_llm(reflection_messages)
                 reflection_summary = str(reflection_data.get("reflection_summary", "")).strip()
                 if reflection_summary != "":
+                    latest_reflection_summary = reflection_summary
+                if reflection_summary != "":
                     self._emit_mcp_status_text(signals, chat_idx, _("Reflection: ") + reflection_summary)
                 reflection_brief = str(reflection_data.get("answer_brief", "")).strip()
                 if reflection_brief != "":
@@ -1908,6 +1936,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                         replan_data = self._invoke_json_llm(replanner_messages)
                         replan_summary = str(replan_data.get("plan_summary", "")).strip()
                         if replan_summary != "":
+                            latest_plan_summary = replan_summary
+                        if replan_summary != "":
                             self._emit_mcp_status_text(signals, chat_idx, _("Plan: ") + replan_summary)
                         revised_calls = self._normalize_mcp_calls(
                             replan_data.get("calls", []), allowed_methods, max_calls_per_round
@@ -1934,6 +1964,23 @@ data collected. This information will accompany every prompt sent to the AI, res
                     "\nIf the available project evidence is incomplete, clearly state uncertainty and "
                     "mention what additional project material would help."
                 )
+
+            agent_state_snapshot = {
+                "type": "mcp_agent_state",
+                "latest_plan_summary": self._normalize_progress_note(latest_plan_summary, max_length=600),
+                "latest_reflection_summary": self._normalize_progress_note(latest_reflection_summary, max_length=600),
+                "final_hint": self._normalize_progress_note(final_hint, max_length=600),
+                "stop_reason": stop_reason,
+                "pending_calls": planned_calls if isinstance(planned_calls, list) else [],
+            }
+            tool_messages.append(
+                {
+                    "msg_type": "agent_state",
+                    "msg_author": "ai_agent",
+                    "msg_content": json.dumps(agent_state_snapshot, ensure_ascii=False),
+                }
+            )
+
             final_stream_messages: List[Any] = [SystemMessage(content=self._mcp_final_answer_system_prompt())]
             final_stream_messages.extend(agent_messages)
             final_stream_messages.append(HumanMessage(content=final_prompt))
@@ -1978,7 +2025,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         continue
                     msg_type = str(item.get("msg_type", "")).strip()
                     msg_content = str(item.get("msg_content", ""))
-                    if msg_type in ("tool_call", "tool_result", "single_instruct"):
+                    if msg_type in ("tool_call", "tool_result", "single_instruct", "agent_state"):
                         self.process_message(
                             msg_type,
                             msg_content,
