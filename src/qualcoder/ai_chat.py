@@ -1176,6 +1176,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                 messages.append(AIMessage(content=msg[4]))
             elif msg[2] == 'tool_result':
                 messages.append(HumanMessage(content=msg[4]))
+            elif msg[2] == 'single_instruct':
+                # one-shot instruction logs must not be replayed in later turns
+                continue
         return messages
     
     def history_add_message(self, msg_type, msg_author, msg_content, chat_idx=None, db_conn=None, refresh=True, commit=True):
@@ -1197,7 +1200,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             if refresh:
                 self.history_update_message_list(db_conn)
 
-    def history_add_or_append_agent_status(self, status_text: str, chat_idx=None, msg_author='Codex CLI'):
+    def history_add_or_append_agent_status(self, status_text: str, chat_idx=None, msg_author='ai_agent'):
         """Add a single status block and append subsequent status lines to it."""
         if chat_idx is None:
             chat_idx = self.current_chat_idx
@@ -1284,10 +1287,14 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.history_add_message(msg_type, '', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'tool_call':
             # tool messages are persisted for multi-turn MCP context, but not rendered in the chat window
-            self.history_add_message(msg_type, 'mcp_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+            self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'tool_result':
             # tool messages are persisted for multi-turn MCP context, but not rendered in the chat window
             self.history_add_message(msg_type, 'mcp_server', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+        elif msg_type == 'single_instruct':
+            # single_instruct messages are persisted for audit/logging, but not rendered
+            # and not sent again in future turns.
+            self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'instruct':
             # instruct messages are only send to the AI, but not shown on screen
             # Other than system messages, instruct messages are send immediatly and will produce an answer that is shown on screen
@@ -1772,12 +1779,23 @@ data collected. This information will accompany every prompt sent to the AI, res
                 result_content = "MCP response:\n" + json.dumps(rpc_response, ensure_ascii=False)
                 agent_messages.append(AIMessage(content=call_content))
                 agent_messages.append(HumanMessage(content=result_content))
-                tool_messages.append({"msg_type": "tool_call", "msg_author": "mcp_agent", "msg_content": call_content})
+                tool_messages.append({"msg_type": "tool_call", "msg_author": "ai_agent", "msg_content": call_content})
                 tool_messages.append({"msg_type": "tool_result", "msg_author": "mcp_server", "msg_content": result_content})
 
-            planner_messages: List[Any] = [SystemMessage(content=self._mcp_planner_system_prompt())]
+            def append_single_instruct_log(phase: str, role: str, content: str):
+                payload = json.dumps(
+                    {"phase": phase, "role": role, "content": content},
+                    ensure_ascii=False,
+                )
+                tool_messages.append({"msg_type": "single_instruct", "msg_author": "ai_agent", "msg_content": payload})
+
+            planner_system_prompt = self._mcp_planner_system_prompt()
+            planner_user_prompt = "Create the initial MCP plan now."
+            append_single_instruct_log("planning", "system", planner_system_prompt)
+            append_single_instruct_log("planning", "user", planner_user_prompt)
+            planner_messages: List[Any] = [SystemMessage(content=planner_system_prompt)]
             planner_messages.extend(agent_messages)
-            planner_messages.append(HumanMessage(content="Create the initial MCP plan now."))
+            planner_messages.append(HumanMessage(content=planner_user_prompt))
             plan_data = self._invoke_json_llm(planner_messages)
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
             needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
@@ -1826,11 +1844,14 @@ data collected. This information will accompany every prompt sent to the AI, res
                         executed_any_call = True
                     append_tool_exchange(method, params, response)
 
-                reflection_messages: List[Any] = [SystemMessage(content=self._mcp_reflection_system_prompt())]
+                reflection_system_prompt = self._mcp_reflection_system_prompt()
+                append_single_instruct_log("reflection", "system", reflection_system_prompt)
+                reflection_messages: List[Any] = [SystemMessage(content=reflection_system_prompt)]
                 reflection_messages.extend(agent_messages)
                 reflection_prompt = "Reflect on sufficiency of the collected evidence and return JSON now."
                 if plan_summary != "":
                     reflection_prompt += "\nInitial plan summary:\n" + plan_summary
+                append_single_instruct_log("reflection", "user", reflection_prompt)
                 reflection_messages.append(HumanMessage(content=reflection_prompt))
                 reflection_data = self._invoke_json_llm(reflection_messages)
                 reflection_summary = str(reflection_data.get("reflection_summary", "")).strip()
@@ -1849,14 +1870,18 @@ data collected. This information will accompany every prompt sent to the AI, res
                 )
                 if len(revised_calls) == 0:
                     if executed_any_call:
-                        replanner_messages: List[Any] = [SystemMessage(content=self._mcp_planner_system_prompt())]
+                        replanner_system_prompt = self._mcp_planner_system_prompt()
+                        replanner_user_prompt = (
+                            "The previous reflection said more evidence may be needed. "
+                            "Propose a revised MCP plan now."
+                        )
+                        append_single_instruct_log("replanning", "system", replanner_system_prompt)
+                        append_single_instruct_log("replanning", "user", replanner_user_prompt)
+                        replanner_messages: List[Any] = [SystemMessage(content=replanner_system_prompt)]
                         replanner_messages.extend(agent_messages)
                         replanner_messages.append(
                             HumanMessage(
-                                content=(
-                                    "The previous reflection said more evidence may be needed. "
-                                    "Propose a revised MCP plan now."
-                                )
+                                content=replanner_user_prompt
                             )
                         )
                         replan_data = self._invoke_json_llm(replanner_messages)
@@ -1932,7 +1957,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         continue
                     msg_type = str(item.get("msg_type", "")).strip()
                     msg_content = str(item.get("msg_content", ""))
-                    if msg_type in ("tool_call", "tool_result"):
+                    if msg_type in ("tool_call", "tool_result", "single_instruct"):
                         self.process_message(
                             msg_type,
                             msg_content,
