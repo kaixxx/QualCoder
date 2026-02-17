@@ -125,7 +125,6 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_text_doc_name = ''
         self.ai_text_text = ''
         self.ai_text_start_pos = -1
-        self.agent_status_msg_ids = {}
         self.ai_output_autoscroll = True
         self.ui.scrollArea_ai_output.verticalScrollBar().valueChanged.connect(self.on_ai_output_scroll)
 
@@ -853,15 +852,48 @@ data collected. This information will accompany every prompt sent to the AI, res
                 else:
                     html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {analysis_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /></p>")
                 # Show chat messages:
+                agent_status_lines = []
+                agent_status_author = ''
+
+                def flush_agent_status_block():
+                    nonlocal html, agent_status_lines, agent_status_author
+                    if len(agent_status_lines) == 0:
+                        return
+                    author = agent_status_author if agent_status_author != '' else 'unknown'
+                    body = '<br />'.join(agent_status_lines)
+                    block = f'<b>{_("AI")} ({author}) {_("Agent")}:</b><br />{body}'
+                    html += f'<p style={self.ai_status_style}>{block}</p>'
+                    agent_status_lines = []
+                    agent_status_author = ''
+
                 for msg in self.chat_msg_list:
-                    if msg[2] == 'user':
+                    msg_type = str(msg[2])
+                    if msg_type == 'agent_status':
+                        status_line = html_lib.escape(str(msg[4] if msg[4] is not None else '')).replace('\n', '<br />')
+                        if status_line.strip() == '':
+                            continue
+                        status_author = str(msg[3] if msg[3] is not None else '').strip()
+                        if status_author == '':
+                            status_author = 'unknown'
+                        if len(agent_status_lines) > 0 and status_author != agent_status_author:
+                            flush_agent_status_block()
+                        if agent_status_author == '':
+                            agent_status_author = status_author
+                        agent_status_lines.append(status_line)
+                        continue
+
+                    # Only visible non-status message types flush the buffered status block.
+                    if msg_type in ('user', 'ai', 'info'):
+                        flush_agent_status_block()
+
+                    if msg_type == 'user':
                         txt = msg[4].replace('\n', '<br />')
                         author = msg[3]
                         if author is None or author == '':
                             author = 'unkown'
                         txt = f'<b>{_("User")} ({author}):</b><br />{txt}'
                         html += f'<p style={self.ai_user_style}>{txt}</p>'
-                    elif msg[2] == 'ai':
+                    elif msg_type == 'ai':
                         txt = msg[4]
                         txt = txt.replace('\n', '<br />')
                         author = msg[3]
@@ -869,17 +901,11 @@ data collected. This information will accompany every prompt sent to the AI, res
                             author = 'unkown'
                         txt = f'<b>{_("AI")} ({author}):</b><br />{txt}'                        
                         html += f'<p style={self.ai_response_style}>{txt}</p>'
-                    elif msg[2] == 'info':
+                    elif msg_type == 'info':
                         txt = msg[4].replace('\n', '<br />')
                         txt = '<b>' + _('Info:') + '</b><br />' + txt
                         html += f'<p style={self.ai_info_style}>{txt}</p>'
-                    elif msg[2] == 'agent_status':
-                        txt = html_lib.escape(msg[4]).replace('\n', '<br />')
-                        author = msg[3]
-                        if author is None or author == '':
-                            author = 'unknown'
-                        txt = f'<b>{_("AI")} ({author}) {_("Agent")}:</b><br />{txt}'
-                        html += f'<p style={self.ai_status_style}>{txt}</p>'
+                flush_agent_status_block()
                 # add partially streamed ai response if needed
                 if len(self.app.ai.ai_streaming_output) > 0:
                     txt = self.app.ai.ai_streaming_output
@@ -1222,7 +1248,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.history_update_message_list(db_conn)
 
     def history_add_or_append_agent_status(self, status_text: str, chat_idx=None, msg_author='ai_agent'):
-        """Add a single status block and append subsequent status lines to it."""
+        """Persist one agent status line as its own DB row (not merged)."""
         if chat_idx is None:
             chat_idx = self.current_chat_idx
         if chat_idx <= -1:
@@ -1231,26 +1257,24 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
         curr_chat_id = self.chat_list[chat_idx][0]
         cursor = self.chat_history_conn.cursor()
-        msg_id = self.agent_status_msg_ids.get(curr_chat_id, None)
-        if msg_id is None:
-            cursor.execute('INSERT INTO chat_messages (chat_id, msg_type, msg_author, msg_content)'
-                           ' VALUES (?, ?, ?, ?)', (curr_chat_id, 'agent_status', msg_author, status_text.strip()))
-            self.chat_history_conn.commit()
-            self.agent_status_msg_ids[curr_chat_id] = cursor.lastrowid
-        else:
-            cursor.execute('SELECT msg_content FROM chat_messages WHERE id = ? AND chat_id = ?', (msg_id, curr_chat_id))
-            row = cursor.fetchone()
-            if row is None:
-                self.agent_status_msg_ids.pop(curr_chat_id, None)
-                self.history_add_or_append_agent_status(status_text, chat_idx, msg_author)
+        status_line = status_text.strip()
+
+        # Guard against immediate duplicate callback events.
+        cursor.execute(
+            "SELECT msg_author, msg_content FROM chat_messages "
+            "WHERE chat_id=? AND msg_type='agent_status' ORDER BY id DESC LIMIT 1",
+            (curr_chat_id,),
+        )
+        row = cursor.fetchone()
+        if row is not None:
+            prev_author = '' if row[0] is None else str(row[0])
+            prev_content = '' if row[1] is None else str(row[1])
+            if prev_author == str(msg_author) and prev_content == status_line:
                 return
-            prev = row[0] if row[0] is not None else ''
-            status_line = status_text.strip()
-            if prev.endswith(status_line):
-                return
-            updated = prev + '\n' + status_line if prev != '' else status_line
-            cursor.execute('UPDATE chat_messages SET msg_content=? WHERE id=?', (updated, msg_id))
-            self.chat_history_conn.commit()
+
+        cursor.execute('INSERT INTO chat_messages (chat_id, msg_type, msg_author, msg_content)'
+                       ' VALUES (?, ?, ?, ?)', (curr_chat_id, 'agent_status', msg_author, status_line))
+        self.chat_history_conn.commit()
         self.history_update_message_list()
     
     def button_question_clicked(self):
@@ -1342,8 +1366,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if 0 <= chat_idx < len(self.chat_list):
                     analysis_type = self.chat_list[chat_idx][2]
                 if analysis_type == 'general chat':
-                    curr_chat_id = self.chat_list[chat_idx][0]
-                    self.agent_status_msg_ids.pop(curr_chat_id, None)
                     self.app.ai.ai_async_query(self._mcp_general_chat_worker,
                                                self.ai_mcp_message_callback,
                                                messages,
@@ -1783,13 +1805,19 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _mcp_general_chat_worker(self, messages: List[Any], chat_idx: int, signals=None) -> Dict[str, Any]:
         """Background worker: staged agent flow with MCP resource access."""
 
-        result: Dict[str, Any] = {"chat_idx": chat_idx, "stream_messages": [], "tool_messages": [], "canceled": False}
+        result: Dict[str, Any] = {
+            "chat_idx": chat_idx,
+            "stream_messages": [],
+            "tool_messages": [],
+            "canceled": False,
+        }
         allowed_methods = {"initialize", "resources/list", "resources/templates/list", "resources/read"}
 
         try:
             agent_messages: List[Any] = list(messages)
             final_hint = ''
             tool_messages: List[Dict[str, str]] = []
+            tool_messages_streamed = signals is not None and getattr(signals, "progress", None) is not None
             mcp_cache = self._extract_mcp_response_cache(agent_messages)
             bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
                 ("initialize", {}),
@@ -1809,15 +1837,40 @@ data collected. This information will accompany every prompt sent to the AI, res
                 result_content = "MCP response:\n" + json.dumps(rpc_response, ensure_ascii=False)
                 agent_messages.append(AIMessage(content=call_content))
                 agent_messages.append(HumanMessage(content=result_content))
-                tool_messages.append({"msg_type": "tool_call", "msg_author": "ai_agent", "msg_content": call_content})
-                tool_messages.append({"msg_type": "tool_result", "msg_author": "mcp_server", "msg_content": result_content})
+                if tool_messages_streamed:
+                    payload_call = {
+                        "chat_idx": chat_idx,
+                        "msg_type": "tool_call",
+                        "msg_author": "ai_agent",
+                        "msg_content": call_content,
+                    }
+                    signals.progress.emit(json.dumps(payload_call, ensure_ascii=False))
+                    payload_result = {
+                        "chat_idx": chat_idx,
+                        "msg_type": "tool_result",
+                        "msg_author": "mcp_server",
+                        "msg_content": result_content,
+                    }
+                    signals.progress.emit(json.dumps(payload_result, ensure_ascii=False))
+                else:
+                    tool_messages.append({"msg_type": "tool_call", "msg_author": "ai_agent", "msg_content": call_content})
+                    tool_messages.append({"msg_type": "tool_result", "msg_author": "mcp_server", "msg_content": result_content})
 
             def append_single_instruct_log(phase: str, role: str, content: str):
                 payload = json.dumps(
                     {"phase": phase, "role": role, "content": content},
                     ensure_ascii=False,
                 )
-                tool_messages.append({"msg_type": "single_instruct", "msg_author": "ai_agent", "msg_content": payload})
+                if tool_messages_streamed:
+                    progress_payload = {
+                        "chat_idx": chat_idx,
+                        "msg_type": "single_instruct",
+                        "msg_author": "ai_agent",
+                        "msg_content": payload,
+                    }
+                    signals.progress.emit(json.dumps(progress_payload, ensure_ascii=False))
+                else:
+                    tool_messages.append({"msg_type": "single_instruct", "msg_author": "ai_agent", "msg_content": payload})
 
             # Ensure baseline environment context exists before planning.
             for method, params in bootstrap_calls:
@@ -1973,13 +2026,23 @@ data collected. This information will accompany every prompt sent to the AI, res
                 "stop_reason": stop_reason,
                 "pending_calls": planned_calls if isinstance(planned_calls, list) else [],
             }
-            tool_messages.append(
-                {
+            agent_state_content = json.dumps(agent_state_snapshot, ensure_ascii=False)
+            if tool_messages_streamed:
+                progress_payload = {
+                    "chat_idx": chat_idx,
                     "msg_type": "agent_state",
                     "msg_author": "ai_agent",
-                    "msg_content": json.dumps(agent_state_snapshot, ensure_ascii=False),
+                    "msg_content": agent_state_content,
                 }
-            )
+                signals.progress.emit(json.dumps(progress_payload, ensure_ascii=False))
+            else:
+                tool_messages.append(
+                    {
+                        "msg_type": "agent_state",
+                        "msg_author": "ai_agent",
+                        "msg_content": agent_state_content,
+                    }
+                )
 
             final_stream_messages: List[Any] = [SystemMessage(content=self._mcp_final_answer_system_prompt())]
             final_stream_messages.extend(agent_messages)
@@ -2052,11 +2115,26 @@ data collected. This information will accompany every prompt sent to the AI, res
         """Receive live MCP status updates from the worker thread."""
         try:
             payload = json.loads(str(progress_msg))
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict):
+            chat_idx = int(payload.get("chat_idx", self.current_chat_idx))
+            msg_type = str(payload.get("msg_type", "")).strip()
+            if msg_type in ("tool_call", "tool_result", "single_instruct", "agent_state"):
+                msg_content = str(payload.get("msg_content", ""))
+                if msg_content != "":
+                    self.process_message(
+                        msg_type,
+                        msg_content,
+                        chat_idx,
+                        refresh_history=False,
+                        commit_history=True,
+                    )
             status = str(payload.get("status", "")).strip()
             if status == '':
                 status = self.ai_mcp_server.status_event_to_text(payload.get("status_event", None)).strip()
-            chat_idx = int(payload.get("chat_idx", self.current_chat_idx))
-        except Exception:
+        else:
             status = str(progress_msg).strip()
             chat_idx = self.current_chat_idx
         if status == '':
