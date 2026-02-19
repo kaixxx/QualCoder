@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 
 """
 Internal MCP server for QualCoder (read-only phase).
@@ -36,11 +36,7 @@ class AiMcpServer:
     STATUS_REVIEW_AVAILABLE_MATERIALS = "status.review.available_materials"
     STATUS_REVIEW_DOCUMENT_LIST = "status.review.document_list"
     STATUS_REVIEW_CODE_TREE = "status.review.code_tree"
-    STATUS_REVIEW_JOURNAL_LIST = "status.review.journal_list"
-    STATUS_REVIEW_PROJECT_MEMO = "status.review.project_memo"
-    STATUS_REVIEW_CODERS = "status.review.coders"
     STATUS_REVIEW_DOCUMENT = "status.review.document"
-    STATUS_REVIEW_JOURNAL = "status.review.journal"
     STATUS_REVIEW_RESOURCE = "status.review.resource"
     STATUS_REVIEW_CODE_SEGMENTS = "status.review.code_segments"
     STATUS_PLAN_MCP_STEPS = "status.plan.mcp_steps"
@@ -60,19 +56,12 @@ class AiMcpServer:
 
     def _server_instructions(self) -> str:
         return (
-            "QualCoder is a qualitative data analysis application used to analyze empirical material such as "
-            "interviews, field notes, images, and video. It supports coding, memo writing, text annotations, "
-            "researcher journaling, and reports. "
-            #"Code tree invariant: codes are leaf nodes and cannot contain subcodes; only categories can contain "
-            #"codes (and subcategories). "
-            #"Global optional convention: speaker categories are marked by a category name prefix '📌 ' followed by "
-            #"a localized label. This convention may or may not be present in a given project. "
-            "This internal MCP server currently exposes read-only access to empirical documents (text only, "
-            "no images or videos), codes/categories (code tree), project memo, and journals for analytic assistance. "
-            "Coder visibility applies in the project. For coded segments, default retrieval uses visible coders; "
-            "you can optionally request one specific coder via the owner query parameter. "
-            "Use resources/list and resources/read to inspect available material. "
-            "Do not assume write operations are available in this phase."
+            "QualCoder internal MCP server (read-only). "
+            "Use resources/list and resources/read. "
+            "Available resources: text documents list (qualcoder://documents), document text by id "
+            "(qualcoder://documents/text/{id}), code tree (qualcoder://codes/tree), and coded text segments by code id "
+            "(qualcoder://codes/segments/{cid}). "
+            "Coded segments are restricted to the current visible app context."
         )
 
     def new_request_id(self) -> int:
@@ -201,28 +190,6 @@ class AiMcpServer:
                 "message_id": self.STATUS_REVIEW_CODE_SEGMENTS,
                 "message_args": {"id": cid, "name": code_name},
             }
-        if uri_base == "qualcoder://journals":
-            return {
-                **base_event,
-                "status_code": "journals_list",
-                "entity_type": "journals",
-                "message_id": self.STATUS_REVIEW_JOURNAL_LIST,
-            }
-        if uri_base == "qualcoder://project/memo":
-            return {
-                **base_event,
-                "status_code": "project_memo",
-                "entity_type": "project_memo",
-                "message_id": self.STATUS_REVIEW_PROJECT_MEMO,
-            }
-        if uri_base == "qualcoder://project/coders":
-            return {
-                **base_event,
-                "status_code": "project_coders",
-                "entity_type": "project_coders",
-                "message_id": self.STATUS_REVIEW_CODERS,
-            }
-
         doc_match = re.fullmatch(r"qualcoder://documents/text/(\d+)", uri_base)
         if doc_match is not None:
             doc_id = int(doc_match.group(1))
@@ -237,22 +204,6 @@ class AiMcpServer:
                 "entity_name": doc_name,
                 "message_id": self.STATUS_REVIEW_DOCUMENT,
                 "message_args": {"id": doc_id, "name": doc_name},
-            }
-
-        journal_match = re.fullmatch(r"qualcoder://journals/(\d+)", uri_base)
-        if journal_match is not None:
-            jid = int(journal_match.group(1))
-            journal_name = self._fetch_journal_name(jid)
-            if journal_name is None or journal_name == "":
-                journal_name = f"Journal {jid}"
-            return {
-                **base_event,
-                "status_code": "journal_read",
-                "entity_type": "journal",
-                "entity_id": jid,
-                "entity_name": journal_name,
-                "message_id": self.STATUS_REVIEW_JOURNAL,
-                "message_args": {"id": jid, "name": journal_name},
             }
 
         return {
@@ -311,11 +262,7 @@ class AiMcpServer:
             self.STATUS_REVIEW_AVAILABLE_MATERIALS: _('Reviewing available project materials...'),
             self.STATUS_REVIEW_DOCUMENT_LIST: _('Reviewing the list of text documents...'),
             self.STATUS_REVIEW_CODE_TREE: _('Reviewing the current code structure...'),
-            self.STATUS_REVIEW_JOURNAL_LIST: _('Reviewing the list of journals...'),
-            self.STATUS_REVIEW_PROJECT_MEMO: _('Reviewing the project memo...'),
-            self.STATUS_REVIEW_CODERS: _('Reviewing coder visibility settings...'),
             self.STATUS_REVIEW_DOCUMENT: _('Reviewing text document "{name}"...'),
-            self.STATUS_REVIEW_JOURNAL: _('Reviewing journal entry "{name}"...'),
             self.STATUS_REVIEW_RESOURCE: _('Reviewing project material...'),
             self.STATUS_REVIEW_CODE_SEGMENTS: _('Reviewing coded text segments for "{name}"...'),
             self.STATUS_PLAN_MCP_STEPS: _('Planning how to gather project evidence...'),
@@ -404,17 +351,11 @@ class AiMcpServer:
                     mimeType="application/json",
                 ),
                 types.ResourceTemplate(
-                    uriTemplate="qualcoder://journals/{jid}",
-                    name="Journal by id",
-                    description="Read a journal entry by journal id.",
-                    mimeType="application/json",
-                ),
-                types.ResourceTemplate(
                     uriTemplate="qualcoder://codes/segments/{cid}",
                     name="Coded text segments by code id",
                     description=(
                         "Read coded text segments for a code id. Optional query params: strategy "
-                        "(diverse_by_document|recent_first|sequential), max_segments, max_chars, cursor, file_ids, owner."
+                        "(diverse_by_document|recent_first|sequential), max_segments, max_chars, cursor, file_ids."
                     ),
                     mimeType="application/json",
                 ),
@@ -448,18 +389,10 @@ class AiMcpServer:
         uri_no_query = urlunsplit((parts.scheme, parts.netloc, parts.path, "", parts.fragment))
         query = parse_qs(parts.query, keep_blank_values=True)
 
-        if uri_no_query == "qualcoder://project/summary":
-            return self._project_summary()
-        if uri_no_query == "qualcoder://project/memo":
-            return self._project_memo()
-        if uri_no_query == "qualcoder://project/coders":
-            return self._project_coders()
         if uri_no_query == "qualcoder://codes/tree":
             return self._codes_tree()
         if uri_no_query == "qualcoder://documents":
             return {"documents": self._fetch_text_documents()}
-        if uri_no_query == "qualcoder://journals":
-            return {"journals": self._fetch_journal_entries()}
 
         code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_no_query)
         if code_segments_match is not None:
@@ -471,11 +404,6 @@ class AiMcpServer:
         if doc_match is not None:
             doc_id = int(doc_match.group(1))
             return self._read_document(doc_id, start, req_length)
-
-        journal_match = re.fullmatch(r"qualcoder://journals/(\d+)", uri_no_query)
-        if journal_match is not None:
-            jid = int(journal_match.group(1))
-            return self._read_journal(jid, start, req_length)
 
         raise ValueError(f"Unknown resource uri: {uri}")
 
@@ -491,24 +419,6 @@ class AiMcpServer:
     def _base_resources(self) -> List[types.Resource]:
         return [
             types.Resource(
-                uri="qualcoder://project/summary",
-                name="Project summary",
-                description="Current project name and coder context.",
-                mimeType="application/json",
-            ),
-            types.Resource(
-                uri="qualcoder://project/memo",
-                name="Project memo",
-                description="Full project memo text.",
-                mimeType="application/json",
-            ),
-            types.Resource(
-                uri="qualcoder://project/coders",
-                name="Coders",
-                description="Project coders and their visibility.",
-                mimeType="application/json",
-            ),
-            types.Resource(
                 uri="qualcoder://codes/tree",
                 name="Codes and categories",
                 description="Code tree with categories and code metadata.",
@@ -520,52 +430,7 @@ class AiMcpServer:
                 description="List text documents in the project.",
                 mimeType="application/json",
             ),
-            types.Resource(
-                uri="qualcoder://journals",
-                name="Journals",
-                description="List journal entries in the project.",
-                mimeType="application/json",
-            ),
         ]
-
-    def _project_summary(self) -> Dict[str, Any]:
-        coder_name = ""
-        if hasattr(self.app, "settings") and isinstance(self.app.settings, dict):
-            coder_name = str(self.app.settings.get("codername", ""))
-        return {
-            "project_name": getattr(self.app, "project_name", ""),
-            "project_path": getattr(self.app, "project_path", ""),
-            "codername": coder_name,
-        }
-
-    def _project_memo(self) -> Dict[str, Any]:
-        row = self._fetchone("SELECT ifnull(memo,'') FROM project")
-        memo = "" if row is None else row[0]
-        return {"memo": memo}
-
-    def _project_coders(self) -> Dict[str, Any]:
-        current_coder = ""
-        if hasattr(self.app, "settings") and isinstance(self.app.settings, dict):
-            current_coder = str(self.app.settings.get("codername", ""))
-
-        all_coders = self._fetch_all_coder_names()
-        visibility_map = self._fetch_coder_visibility_map()
-        coders: List[Dict[str, Any]] = []
-        for name in all_coders:
-            coders.append(
-                {
-                    "name": name,
-                    "visible": bool(visibility_map.get(name, True)),
-                    "current": name == current_coder,
-                }
-            )
-        coders.sort(key=lambda item: str(item.get("name", "")).casefold())
-        return {
-            "current_coder": current_coder,
-            "coders": coders,
-            "visible_coders": [c["name"] for c in coders if c["visible"]],
-            "hidden_coders": [c["name"] for c in coders if not c["visible"]],
-        }
 
     def _codes_tree(self) -> Dict[str, Any]:
         categories = []
@@ -600,7 +465,7 @@ class AiMcpServer:
                     "date": row[6],
                 }
             )
-        speaker_prefix = "📌 "
+        speaker_prefix = "ðŸ“Œ "
         speaker_categories = []
         for cat in categories:
             cat_name = str(cat.get("name", ""))
@@ -646,30 +511,8 @@ class AiMcpServer:
             )
         return docs
 
-    def _fetch_journal_entries(self) -> List[Dict[str, Any]]:
-        journals = []
-        for row in self._fetchall(
-            "SELECT jid, name, owner, date, ifnull(length(jentry),0) FROM journal ORDER BY date desc"
-        ):
-            journals.append(
-                {
-                    "jid": row[0],
-                    "name": row[1],
-                    "owner": row[2],
-                    "date": row[3],
-                    "length": row[4],
-                }
-            )
-        return journals
-
     def _fetch_source_name(self, doc_id: int) -> Optional[str]:
         row = self._fetchone("SELECT name FROM source WHERE id=?", (doc_id,))
-        if row is None:
-            return None
-        return row[0]
-
-    def _fetch_journal_name(self, jid: int) -> Optional[str]:
-        row = self._fetchone("SELECT name FROM journal WHERE jid=?", (jid,))
         if row is None:
             return None
         return row[0]
@@ -686,84 +529,6 @@ class AiMcpServer:
             (view_name,),
         )
         return row is not None
-
-    def _to_bool(self, value: Any, default: bool) -> bool:
-        if value is None:
-            return default
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return bool(int(value))
-        val = str(value).strip().lower()
-        if val in ("1", "true", "yes", "y", "on"):
-            return True
-        if val in ("0", "false", "no", "n", "off"):
-            return False
-        return default
-
-    def _fetch_coder_visibility_map(self) -> Dict[str, bool]:
-        try:
-            rows = self._fetchall("SELECT name, visibility FROM coder_names")
-        except sqlite3.Error:
-            return {}
-
-        result: Dict[str, bool] = {}
-        for row in rows:
-            if row[0] is None:
-                continue
-            coder_name = str(row[0]).strip()
-            if coder_name == "":
-                continue
-            result[coder_name] = self._to_bool(row[1], True)
-        return result
-
-    def _fetch_all_coder_names(self) -> List[str]:
-        coder_set = set()
-        if hasattr(self.app, "settings") and isinstance(self.app.settings, dict):
-            current = str(self.app.settings.get("codername", "")).strip()
-            if current != "":
-                coder_set.add(current)
-        if hasattr(self.app, "get_coder_names_in_project"):
-            try:
-                for name in self.app.get_coder_names_in_project():
-                    if name is None:
-                        continue
-                    text = str(name).strip()
-                    if text != "":
-                        coder_set.add(text)
-            except Exception:
-                pass
-        for name in self._fetch_coder_visibility_map().keys():
-            text = str(name).strip()
-            if text != "":
-                coder_set.add(text)
-        return sorted(coder_set, key=str.casefold)
-
-    def _resolve_coding_source(self, owner_override: Optional[str]) -> Dict[str, Any]:
-        owner = None if owner_override is None else str(owner_override).strip()
-        if owner is None or owner == "":
-            if not self._view_exists("code_text_visible"):
-                raise RuntimeError("Required view 'code_text_visible' not found.")
-            return {
-                "table_name": "code_text_visible",
-                "owner_filter_sql": "",
-                "owner_filter_params": [],
-                "owner_scope": "visible",
-                "owner": None,
-                "visible_filter_applied": True,
-            }
-
-        known_coders = self._fetch_all_coder_names()
-        if owner not in known_coders:
-            raise ValueError(f"Unknown coder name: {owner}")
-        return {
-            "table_name": "code_text",
-            "owner_filter_sql": " AND ct.owner=?",
-            "owner_filter_params": [owner],
-            "owner_scope": "owner_override",
-            "owner": owner,
-            "visible_filter_applied": False,
-        }
 
     def _parse_code_segments_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
         strategy = str(query.get("strategy", ["diverse_by_document"])[0]).strip()
@@ -796,10 +561,6 @@ class AiMcpServer:
                     continue
                 file_ids.append(max(0, self._to_int(part, -1)))
         file_ids = [fid for fid in file_ids if fid > 0]
-        owner = None
-        owner_raw = str(query.get("owner", [""])[0]).strip()
-        if owner_raw != "":
-            owner = owner_raw
 
         return {
             "strategy": strategy,
@@ -807,7 +568,6 @@ class AiMcpServer:
             "max_chars": max_chars,
             "cursor": cursor,
             "file_ids": file_ids,
-            "owner": owner,
         }
 
     def _read_code_segments(self, cid: int, options: Dict[str, Any]) -> Dict[str, Any]:
@@ -820,14 +580,12 @@ class AiMcpServer:
         max_chars = int(options.get("max_chars", self.default_segments_max_chars))
         cursor = int(options.get("cursor", 0))
         file_ids = options.get("file_ids", [])
-        owner_override = options.get("owner")
         if not isinstance(file_ids, list):
             file_ids = []
 
-        source_cfg = self._resolve_coding_source(owner_override)
-        table_name = str(source_cfg["table_name"])
-        owner_filter_sql = str(source_cfg["owner_filter_sql"])
-        owner_filter_params = source_cfg["owner_filter_params"]
+        if not self._view_exists("code_text_visible"):
+            raise RuntimeError("Required view 'code_text_visible' not found.")
+        table_name = "code_text_visible"
 
         where_parts = ["ct.cid=?"]
         where_params: List[Any] = [cid]
@@ -835,9 +593,7 @@ class AiMcpServer:
             placeholders = ",".join(["?"] * len(file_ids))
             where_parts.append(f"ct.fid IN ({placeholders})")
             where_params.extend(file_ids)
-        where_params.extend(owner_filter_params)
         where_sql = " WHERE " + " AND ".join(where_parts)
-        where_sql += owner_filter_sql
 
         count_sql = f"SELECT count(*) FROM {table_name} AS ct" + where_sql
         count_row = self._fetchone(count_sql, tuple(where_params))
@@ -932,9 +688,7 @@ class AiMcpServer:
                 "max_chars": max_chars,
                 "cursor": cursor,
                 "file_ids": file_ids,
-                "owner_scope": source_cfg["owner_scope"],
-                "owner": source_cfg["owner"],
-                "visible_filter_applied": source_cfg["visible_filter_applied"],
+                "visible_filter_applied": True,
                 "total_segments": total_segments,
                 "returned_segments": len(segments),
                 "returned_chars": used_chars,
@@ -962,27 +716,6 @@ class AiMcpServer:
             "owner": row[3],
             "date": row[4],
             "total_length": len(fulltext),
-            "start": start,
-            "length": len(excerpt),
-            "text": excerpt,
-        }
-
-    def _read_journal(self, jid: int, start: int, length: int) -> Dict[str, Any]:
-        row = self._fetchone(
-            "SELECT jid, name, owner, date, ifnull(jentry,'') FROM journal WHERE jid=?",
-            (jid,),
-        )
-        if row is None:
-            raise ValueError(f"Journal id {jid} not found.")
-        jentry = row[4]
-        end_pos = min(start + length, len(jentry))
-        excerpt = jentry[start:end_pos]
-        return {
-            "jid": row[0],
-            "name": row[1],
-            "owner": row[2],
-            "date": row[3],
-            "total_length": len(jentry),
             "start": start,
             "length": len(excerpt),
             "text": excerpt,
@@ -1027,3 +760,4 @@ class AiMcpServer:
             return cur.fetchone()
         finally:
             conn.close()
+
