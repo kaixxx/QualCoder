@@ -1396,20 +1396,28 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _mcp_planner_system_prompt(self) -> str:
         return (
             "You are a QualCoder MCP planning agent. "
-            "Plan which MCP requests are needed to answer the user question with project evidence. "
+            "Plan which MCP requests are needed to answer the user question with project evidence and relevant methodological guidance. "
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"needs_mcp\": true|false, "
+            "\"skill_decision\": \"use_skill|no_skill\", "
+            "\"skill_name\": \"skill id from prompts/list if skill_decision=use_skill, else empty\", "
+            "\"skill_reason\": \"short reason for the decision\", "
             "\"plan_summary\": \"one short user-facing progress note\", "
-            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize\", \"params\": {}}], "
+            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"optional draft answer idea\""
             "}\n"
             "Rules:\n"
-            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
-            "- The turn is already bootstrapped with initialize + resources/list context; avoid repeating them with identical params.\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get.\n"
+            "- The turn is already bootstrapped with initialize + resources/list + prompts/list context; avoid repeating them with identical params.\n"
             "- Use as few calls as possible and keep them focused.\n"
-            "- Prefer specific reads over broad reads.\n"
-            "- plan_summary should briefly explain what evidence you will gather next.\n"
+            "- Prefer specific reads over broad reads. Reading full empirical documents can be costly. Do this only when it is really needed.\n"
+            "- Always evaluate whether a predefined skill from prompts/list is relevant.\n"
+            "- Set skill_decision explicitly: use_skill when a skill can improve method quality/structure, otherwise no_skill.\n"
+            "- If skill_decision=use_skill and the skill is not already loaded in the conversation, include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
+            "- skill_name must match a name from prompts/list when use_skill is selected.\n"
+            "- plan_summary should briefly explain your next steps.\n"
+            "- Simple plans can be executed directly. For more complex plans, ask the user first.\n"
             "- If enough evidence is already in the conversation, set needs_mcp=false and calls=[].\n"
             "- Do not output prose outside JSON."
         )
@@ -1417,20 +1425,26 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _mcp_reflection_system_prompt(self) -> str:
         return (
             "You are a QualCoder MCP reflection agent. "
-            "Review the collected MCP evidence and decide whether more MCP calls are needed. "
+            "Review the collected MCP evidence and decide whether more MCP calls are needed, including methodological skill support. "
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"enough_information\": true|false, "
+            "\"skill_decision\": \"use_skill|no_skill|already_applied\", "
+            "\"skill_name\": \"skill id from prompts/list if needed, else empty\", "
+            "\"skill_reason\": \"short reason for the decision\", "
             "\"reflection_summary\": \"one short user-facing note\", "
             "\"next_step_note\": \"optional short alias if reflection_summary is empty\", "
-            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize\", \"params\": {}}], "
+            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
             "}\n"
             "Rules:\n"
-            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read.\n"
-            "- Initialize and resources/list are already available in context unless explicitly changed.\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get.\n"
+            "- Initialize, resources/list, and prompts/list are already available in context unless explicitly changed.\n"
             "- If evidence is sufficient, set enough_information=true and revised_calls=[].\n"
             "- If evidence is insufficient, propose only necessary revised_calls.\n"
+            "- Re-evaluate skill needs explicitly using skill_decision and skill_reason.\n"
+            "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
+            "- If method guidance is missing, set skill_decision=use_skill and include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
             "- reflection_summary must be one sentence, user-facing, <=160 characters, focused on immediate next step plus brief reason.\n"
             "- Avoid boilerplate like 'I will' or 'Next step is' unless strictly needed.\n"
             "- next_step_note is optional and only used when reflection_summary is empty.\n"
@@ -1495,6 +1509,52 @@ data collected. This information will accompany every prompt sent to the AI, res
                 params = {}
             normalized.append({"method": method, "params": params})
         return normalized
+
+    def _ensure_skill_prompt_call(self, skill_decision: Any, skill_name: Any,
+                                  calls: List[Dict[str, Any]], mcp_cache: Dict[str, Dict[str, Any]],
+                                  max_calls: int) -> List[Dict[str, Any]]:
+        """Ensure prompts/get is planned when the model decided to use a skill."""
+
+        decision = str(skill_decision if skill_decision is not None else "").strip().lower()
+        if decision not in ("use_skill", "needs_skill", "skill"):
+            return calls
+
+        resolved_name = str(skill_name if skill_name is not None else "").strip()
+        if resolved_name == "":
+            return calls
+
+        wanted_params = {"name": resolved_name}
+        wanted_key = self._mcp_call_key("prompts/get", wanted_params)
+        if wanted_key in mcp_cache:
+            return calls
+
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            method = str(call.get("method", "")).strip()
+            params = call.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            if method == "prompts/get" and str(params.get("name", "")).strip() == resolved_name:
+                return calls
+
+        merged: List[Dict[str, Any]] = [{"method": "prompts/get", "params": wanted_params}]
+        seen: set[str] = {wanted_key}
+        for call in calls:
+            if not isinstance(call, dict):
+                continue
+            method = str(call.get("method", "")).strip()
+            params = call.get("params", {})
+            if not isinstance(params, dict):
+                params = {}
+            key = self._mcp_call_key(method, params)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"method": method, "params": params})
+            if len(merged) >= max_calls:
+                break
+        return merged
 
     def _json_bool(self, value: Any, default: bool) -> bool:
         """Parse relaxed JSON boolean-like values."""
@@ -1786,6 +1846,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                     break
 
         if best_candidate is None:
+            print(quote_text)
             return _('(unknown reference)')
 
         source_id = self._safe_int(best_candidate.get("source_id", None), -1)
@@ -1836,7 +1897,14 @@ data collected. This information will accompany every prompt sent to the AI, res
             "tool_messages": [],
             "canceled": False,
         }
-        allowed_methods = {"initialize", "resources/list", "resources/templates/list", "resources/read"}
+        allowed_methods = {
+            "initialize",
+            "resources/list",
+            "resources/templates/list",
+            "resources/read",
+            "prompts/list",
+            "prompts/get",
+        }
 
         try:
             agent_messages: List[Any] = list(messages)
@@ -1847,6 +1915,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
                 ("initialize", {}),
                 ("resources/list", {}),
+                ("prompts/list", {}),
             ]
             max_calls_per_round = 4
             max_reflection_rounds = 4
@@ -1922,6 +1991,13 @@ data collected. This information will accompany every prompt sent to the AI, res
             planner_messages.append(HumanMessage(content=planner_user_prompt))
             plan_data = self._invoke_json_llm(planner_messages)
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
+            planned_calls = self._ensure_skill_prompt_call(
+                plan_data.get("skill_decision", ""),
+                plan_data.get("skill_name", ""),
+                planned_calls,
+                mcp_cache,
+                max_calls_per_round,
+            )
             needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
             plan_summary = str(plan_data.get("plan_summary", "")).strip()
             latest_plan_summary = plan_summary
@@ -1991,6 +2067,13 @@ data collected. This information will accompany every prompt sent to the AI, res
                 revised_calls = self._normalize_mcp_calls(
                     reflection_data.get("revised_calls", []), allowed_methods, max_calls_per_round
                 )
+                revised_calls = self._ensure_skill_prompt_call(
+                    reflection_data.get("skill_decision", ""),
+                    reflection_data.get("skill_name", ""),
+                    revised_calls,
+                    mcp_cache,
+                    max_calls_per_round,
+                )
                 short_reflection_note = self._short_reflection_next_step_note(
                     reflection_summary,
                     reflection_next_step_note,
@@ -2025,6 +2108,13 @@ data collected. This information will accompany every prompt sent to the AI, res
                             self._emit_mcp_status_text(signals, chat_idx, replan_summary)
                         revised_calls = self._normalize_mcp_calls(
                             replan_data.get("calls", []), allowed_methods, max_calls_per_round
+                        )
+                        revised_calls = self._ensure_skill_prompt_call(
+                            replan_data.get("skill_decision", ""),
+                            replan_data.get("skill_name", ""),
+                            revised_calls,
+                            mcp_cache,
+                            max_calls_per_round,
                         )
                     if len(revised_calls) == 0:
                         stop_reason = "no_more_valid_calls"

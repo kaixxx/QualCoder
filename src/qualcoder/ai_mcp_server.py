@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.lowlevel.server import ReadResourceContents
+from .ai_skills import AiSkillsCatalog
 
 
 class AiMcpServer:
@@ -46,6 +47,7 @@ class AiMcpServer:
 
     def __init__(self, app):
         self.app = app
+        self.skills_catalog = AiSkillsCatalog(app)
         self._request_seq = 1
         self._sdk_server = Server(
             self.server_name,
@@ -57,11 +59,11 @@ class AiMcpServer:
     def _server_instructions(self) -> str:
         return (
             "QualCoder internal MCP server (read-only). "
-            "Use resources/list and resources/read. "
+            "Use resources/list, resources/read, prompts/list, and prompts/get. "
             "Available resources: text documents list (qualcoder://documents), document text by id "
             "(qualcoder://documents/text/{id}), code tree (qualcoder://codes/tree), and coded text segments by code id "
             "(qualcoder://codes/segments/{cid}). "
-            "Coded segments are restricted to the current visible app context."
+            "Available prompts represent QualCoder skills from system, user, and project scope."
         )
 
     def new_request_id(self) -> int:
@@ -113,8 +115,7 @@ class AiMcpServer:
                 req = types.CallToolRequest(params=types.CallToolRequestParams(name=name, arguments=args))
                 result = self._dispatch_sdk(types.CallToolRequest, req)
             elif method == "prompts/list":
-                req = types.ListPromptsRequest(params=self._pagination_params(params))
-                result = self._dispatch_sdk(types.ListPromptsRequest, req)
+                result = self._list_prompts_payload()
             elif method == "prompts/get":
                 name = str(params.get("name", "")).strip()
                 if name == "":
@@ -122,8 +123,7 @@ class AiMcpServer:
                 args = params.get("arguments")
                 if args is not None and not isinstance(args, dict):
                     raise ValueError("Prompt arguments must be an object.")
-                req = types.GetPromptRequest(params=types.GetPromptRequestParams(name=name, arguments=args))
-                result = self._dispatch_sdk(types.GetPromptRequest, req)
+                result = self._get_prompt_payload(name, args)
             else:
                 return self._error_response(request_id, -32601, "Method not found", method)
             return self._result_response(request_id, result)
@@ -378,11 +378,11 @@ class AiMcpServer:
 
         @self._sdk_server.list_prompts()
         async def _list_prompts(_: types.ListPromptsRequest) -> types.ListPromptsResult:
-            return types.ListPromptsResult(prompts=[])
+            return types.ListPromptsResult.model_validate(self._list_prompts_payload())
 
         @self._sdk_server.get_prompt()
         async def _get_prompt(_name: str, _arguments: Optional[Dict[str, str]]) -> types.GetPromptResult:
-            raise RuntimeError("No MCP prompts are exposed yet.")
+            return types.GetPromptResult.model_validate(self._get_prompt_payload(_name, _arguments))
 
     def _read_resource_payload(self, uri: str, start: int, req_length: int) -> Dict[str, Any]:
         parts = urlsplit(uri)
@@ -431,6 +431,47 @@ class AiMcpServer:
                 mimeType="application/json",
             ),
         ]
+
+    def _list_prompts_payload(self) -> Dict[str, Any]:
+        prompts: List[Dict[str, Any]] = []
+        for skill in self.skills_catalog.list_skills():
+            description = str(skill.description).strip()
+            if description == "":
+                description = _("No description provided.")
+            prompts.append(
+                {
+                    "name": skill.skill_id,
+                    "description": f"[{skill.scope}] {description}",
+                }
+            )
+        return {"prompts": prompts}
+
+    def _get_prompt_payload(self, name: str, arguments: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if arguments is not None and not isinstance(arguments, dict):
+            raise ValueError("Prompt arguments must be an object.")
+        skill = self.skills_catalog.get_skill(name)
+        if skill is None:
+            raise RuntimeError(f"Prompt not found: {name}")
+
+        description = str(skill.description).strip()
+        if description == "":
+            description = _("No description provided.")
+        content = str(skill.content).strip()
+        if content == "":
+            content = _("(empty skill)")
+
+        return {
+            "description": f"[{skill.scope}] {description}",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": content,
+                    },
+                }
+            ],
+        }
 
     def _codes_tree(self) -> Dict[str, Any]:
         categories = []
