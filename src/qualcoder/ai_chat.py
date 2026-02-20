@@ -1403,7 +1403,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"skill_decision\": \"use_skill|no_skill\", "
             "\"skill_name\": \"skill id from prompts/list if skill_decision=use_skill, else empty\", "
             "\"skill_reason\": \"short reason for the decision\", "
-            "\"plan_summary\": \"one short user-facing progress note\", "
+            "\"plan_summary\": \"one short user-facing note: immediate next step + skill decision\", "
             "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"optional draft answer idea\""
             "}\n"
@@ -1416,7 +1416,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Set skill_decision explicitly: use_skill when a skill can improve method quality/structure, otherwise no_skill.\n"
             "- If skill_decision=use_skill and the skill is not already loaded in the conversation, include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
             "- skill_name must match a name from prompts/list when use_skill is selected.\n"
-            "- plan_summary should briefly explain your next steps.\n"
+            "- plan_summary must be one sentence, user-facing, <=160 characters.\n"
+            # "- plan_summary must state the immediate next step and whether a skill is used.\n"
+            # "- If skill_decision=use_skill, include the skill_name in plan_summary.\n"
             "- Simple plans can be executed directly. For more complex plans, ask the user first.\n"
             "- If enough evidence is already in the conversation, set needs_mcp=false and calls=[].\n"
             "- Do not output prose outside JSON."
@@ -1432,7 +1434,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"skill_decision\": \"use_skill|no_skill|already_applied\", "
             "\"skill_name\": \"skill id from prompts/list if needed, else empty\", "
             "\"skill_reason\": \"short reason for the decision\", "
-            "\"reflection_summary\": \"one short user-facing note\", "
+            "\"reflection_summary\": \"one short user-facing note: next step + skill status\", "
             "\"next_step_note\": \"optional short alias if reflection_summary is empty\", "
             "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
@@ -1445,7 +1447,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Re-evaluate skill needs explicitly using skill_decision and skill_reason.\n"
             "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
             "- If method guidance is missing, set skill_decision=use_skill and include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
-            "- reflection_summary must be one sentence, user-facing, <=160 characters, focused on immediate next step plus brief reason.\n"
+            "- reflection_summary must be one sentence, user-facing, <=160 characters.\n"
+            "- reflection_summary must state the immediate next step and the current skill status (use_skill, already_applied, or no_skill).\n"
+            "- If skill_decision=use_skill or already_applied, include the skill_name in reflection_summary.\n"
             "- Avoid boilerplate like 'I will' or 'Next step is' unless strictly needed.\n"
             "- next_step_note is optional and only used when reflection_summary is empty.\n"
             "- Do not output prose outside JSON."
@@ -1476,11 +1480,13 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _invoke_json_llm(self, messages: List[Any]) -> Dict[str, Any]:
         """Invoke model and parse one JSON object response."""
 
-        try:
-            llm_response = self.app.ai.large_llm.invoke(messages, response_format={"type": "json_object"})
-        except Exception:
-            # Some providers/models do not support response_format.
-            llm_response = self.app.ai.large_llm.invoke(messages)
+        llm_response = self.app.ai.invoke_with_logging(
+            self.app.ai.large_llm,
+            messages,
+            response_format={"type": "json_object"},
+            context='mcp_json_control',
+            fallback_without_response_format=True,
+        )
         raw = str(llm_response.content).strip()
         try:
             data = json.loads(raw)
@@ -2271,36 +2277,43 @@ data collected. This information will accompany every prompt sent to the AI, res
         self.ai_stream_buffer = ""
         self.ai_stream_in_ref = False
         self.current_streaming_chat_idx = self.current_chat_idx
-        for chunk in self.app.ai.large_llm.stream(messages):
-            if self.app.ai.ai_async_is_canceled:
-                break  # Cancel the streaming
-            elif self.current_chat_idx != self.current_streaming_chat_idx:
-                # switched to another chat, cancel also
-                break
-            else:
-                # check if we need to process reference:
-                curr_text = self.ai_streaming_output
-                new_data = str(chunk.content)
-                for char in new_data:
-                    if self.ai_stream_in_ref:
-                        if char == "]":
-                            # End of reference reached
-                            ref_replacement = self.ai_stream_process_reference(self.buffer)
-                            curr_text += ref_replacement
-                            self.ai_stream_buffer = ""
-                            self.ai_stream_in_ref = False
+        req_id = self.app.ai.log_llm_request(self.app.ai.large_llm, messages, context='dialog_send_message')
+        try:
+            for chunk in self.app.ai.large_llm.stream(messages):
+                if self.app.ai.ai_async_is_canceled:
+                    break  # Cancel the streaming
+                elif self.current_chat_idx != self.current_streaming_chat_idx:
+                    # switched to another chat, cancel also
+                    break
+                else:
+                    # check if we need to process reference:
+                    curr_text = self.ai_streaming_output
+                    new_data = str(chunk.content)
+                    for char in new_data:
+                        if self.ai_stream_in_ref:
+                            if char == "]":
+                                # End of reference reached
+                                ref_replacement = self.ai_stream_process_reference(self.buffer)
+                                curr_text += ref_replacement
+                                self.ai_stream_buffer = ""
+                                self.ai_stream_in_ref = False
+                            else:
+                                self.ai_stream_buffer += char
                         else:
-                            self.ai_stream_buffer += char
-                    else:
-                        curr_text += char
-                        # Check for the start of a reference
-                        if curr_text.endswith('[REF:'):
-                            self.ai_stream_in_ref = True
-                            self.ai_stream_buffer = '[REF:'
-                            curr_text = curr_text[:-(len(self.buffer))]  
-                self.ai_streaming_output = curr_text
-                if not self.is_updating_chat_window:
-                    self.update_chat_window()
+                            curr_text += char
+                            # Check for the start of a reference
+                            if curr_text.endswith('[REF:'):
+                                self.ai_stream_in_ref = True
+                                self.ai_stream_buffer = '[REF:'
+                                curr_text = curr_text[:-(len(self.buffer))]
+                    self.ai_streaming_output = curr_text
+                    if not self.is_updating_chat_window:
+                        self.update_chat_window()
+        except Exception as err:
+            self.app.ai.log_llm_error(req_id, self.app.ai.large_llm, err, context='dialog_send_message')
+            raise
+        if not self.app.ai.ai_async_is_canceled and self.current_chat_idx == self.current_streaming_chat_idx:
+            self.app.ai.log_llm_response(req_id, self.app.ai.large_llm, self.ai_streaming_output, context='dialog_send_message')
         return self.ai_streaming_output
     
     def ai_stream_process_reference(self, reference):

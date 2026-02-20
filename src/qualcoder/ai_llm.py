@@ -22,6 +22,7 @@ https://qualcoder-org.github.io/
 
 import os
 import logging
+from logging.handlers import RotatingFileHandler
 import traceback
 from PyQt6 import QtWidgets
 from PyQt6 import QtCore
@@ -434,6 +435,10 @@ class AiLLM():
     fast_llm_context_window = 16385
     ai_streaming_output = ''
     sources_collection = 'qualcoder'  # name of the vectorstore collection for source documents
+    ai_log_logger = None
+    ai_log_handler = None
+    ai_log_path = ''
+    ai_log_seq = 0
     
     def __init__(self, app, parent_text_edit):
         self.app = app
@@ -441,6 +446,186 @@ class AiLLM():
         self.threadpool = QtCore.QThreadPool()
         self.threadpool.setMaxThreadCount(1)
         self.sources_vectorstore = AiVectorstore(self.app, self.parent_text_edit, self.sources_collection)
+
+    def _ai_log_target_path(self) -> str:
+        """Return the file path for the dedicated AI communication log."""
+
+        confighome = str(getattr(self.app, 'confighome', '')).strip()
+        if confighome != '':
+            log_dir = confighome
+        else:
+            log_dir = os.path.expanduser('~')
+        return os.path.join(log_dir, 'ai.log')
+
+    def _ensure_ai_log_logger(self):
+        """Set up or refresh the dedicated rotating AI logger."""
+
+        if self.ai_log_logger is None:
+            self.ai_log_logger = logging.getLogger('qualcoder.ai_log')
+            self.ai_log_logger.setLevel(logging.INFO)
+            self.ai_log_logger.propagate = False
+        if self.ai_log_handler is None and len(self.ai_log_logger.handlers) > 0:
+            # Cleanup stale handlers from previous AiLLM instances in the same process.
+            for stale_handler in list(self.ai_log_logger.handlers):
+                try:
+                    self.ai_log_logger.removeHandler(stale_handler)
+                except Exception:
+                    pass
+                try:
+                    stale_handler.close()
+                except Exception:
+                    pass
+
+        desired_path = self._ai_log_target_path()
+        if self.ai_log_handler is not None and self.ai_log_path == desired_path:
+            return
+
+        if self.ai_log_handler is not None:
+            try:
+                self.ai_log_logger.removeHandler(self.ai_log_handler)
+            except Exception:
+                pass
+            try:
+                self.ai_log_handler.close()
+            except Exception:
+                pass
+            self.ai_log_handler = None
+
+        os.makedirs(os.path.dirname(desired_path), exist_ok=True)
+        handler = RotatingFileHandler(
+            desired_path,
+            maxBytes=500000,
+            backupCount=2,
+            encoding='utf-8',
+        )
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(logging.Formatter('%(asctime)s %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        self.ai_log_logger.addHandler(handler)
+        self.ai_log_handler = handler
+        self.ai_log_path = desired_path
+
+    def _next_ai_log_id(self) -> int:
+        self.ai_log_seq += 1
+        return self.ai_log_seq
+
+    def _llm_name_for_log(self, llm) -> str:
+        for attr in ('model_name', 'model', 'deployment_name', 'azure_deployment'):
+            try:
+                value = str(getattr(llm, attr, '')).strip()
+            except Exception:
+                value = ''
+            if value != '':
+                return value
+        model_idx = int(self.app.settings.get('ai_model_index', '-1'))
+        if 0 <= model_idx < len(self.app.ai_models):
+            return str(self.app.ai_models[model_idx].get('name', '')).strip()
+        return 'unknown'
+
+    def _message_role_and_text_for_log(self, msg) -> tuple[str, str]:
+        if isinstance(msg, SystemMessage):
+            return 'system', str(msg.content)
+        if isinstance(msg, HumanMessage):
+            return 'user', str(msg.content)
+        if isinstance(msg, AIMessage):
+            return 'assistant', str(msg.content)
+        if isinstance(msg, dict):
+            role = str(msg.get('role', 'message')).strip() or 'message'
+            content = msg.get('content', '')
+            return role, str(content)
+        if hasattr(msg, 'content'):
+            role = msg.__class__.__name__.replace('Message', '').lower() or 'message'
+            return role, str(getattr(msg, 'content', ''))
+        if isinstance(msg, str):
+            return 'message', msg
+        return 'message', str(msg)
+
+    def _write_ai_log(self, text: str):
+        self._ensure_ai_log_logger()
+        self.ai_log_logger.info(text)
+
+    def log_llm_request(self, llm, messages, context: str = '') -> int:
+        """Log one outgoing LLM request with readable message contents."""
+
+        req_id = self._next_ai_log_id()
+        model_name = self._llm_name_for_log(llm)
+        header = f'[#{req_id}] REQUEST model="{model_name}"'
+        if context.strip() != '':
+            header += f' context="{context.strip()}"'
+        lines = [header]
+
+        if isinstance(messages, (list, tuple)):
+            msg_list = list(messages)
+        else:
+            msg_list = [messages]
+        for idx, msg in enumerate(msg_list, start=1):
+            role, content = self._message_role_and_text_for_log(msg)
+            lines.append(f'[{idx}] {role}:')
+            content_lines = str(content).splitlines()
+            if len(content_lines) == 0:
+                lines.append('  ')
+            else:
+                for line in content_lines:
+                    lines.append('  ' + line)
+        self._write_ai_log('\n'.join(lines))
+        return req_id
+
+    def log_llm_response(self, req_id: int, llm, response_text, context: str = ''):
+        """Log one final incoming LLM response."""
+
+        model_name = self._llm_name_for_log(llm)
+        header = f'[#{req_id}] RESPONSE model="{model_name}"'
+        if context.strip() != '':
+            header += f' context="{context.strip()}"'
+        lines = [header, 'assistant:']
+        for line in str(response_text if response_text is not None else '').splitlines():
+            lines.append('  ' + line)
+        if len(lines) == 2:
+            lines.append('  ')
+        self._write_ai_log('\n'.join(lines))
+
+    def log_llm_error(self, req_id: int, llm, err: Exception, context: str = ''):
+        """Log one LLM error for traceability."""
+
+        model_name = self._llm_name_for_log(llm)
+        error_text = str(err)
+        line = f'[#{req_id}] ERROR model="{model_name}"'
+        if context.strip() != '':
+            line += f' context="{context.strip()}"'
+        line += f' {err.__class__.__name__}: {error_text}'
+        self._write_ai_log(line)
+
+    def invoke_with_logging(self, llm, messages, response_format=None, config=None, context: str = '',
+                            fallback_without_response_format: bool = False,
+                            fallback_exceptions=(Exception,)):
+        """Invoke an LLM and log request/response in the dedicated AI log."""
+
+        req_id = self.log_llm_request(llm, messages, context=context)
+        try:
+            invoke_kwargs = {}
+            if response_format is not None:
+                invoke_kwargs['response_format'] = response_format
+            if config is not None:
+                invoke_kwargs['config'] = config
+            res = llm.invoke(messages, **invoke_kwargs)
+        except Exception as err:
+            may_fallback = (
+                fallback_without_response_format
+                and response_format is not None
+                and isinstance(err, fallback_exceptions)
+            )
+            if not may_fallback:
+                self.log_llm_error(req_id, llm, err, context=context)
+                raise
+            try:
+                fallback_kwargs = {}
+                if config is not None:
+                    fallback_kwargs['config'] = config
+                res = llm.invoke(messages, **fallback_kwargs)
+            except Exception as err2:
+                self.log_llm_error(req_id, llm, err2, context=context)
+                raise
+        self.log_llm_response(req_id, llm, getattr(res, 'content', ''), context=context)
+        return res
 
     # Icons (https://pictogrammers.com/library/mdi/)
     def code_analysis_icon(self):
@@ -740,19 +925,27 @@ class AiLLM():
     def _ai_async_stream(self, signals, llm, messages):
         self.ai_async_is_canceled = False
         self.ai_streaming_output = ''
-        for chunk in llm.stream(messages):
-            if self.ai_async_is_canceled:
-                break  # cancel the streaming
-            else:
-                self.ai_streaming_output += chunk.content
-                if signals is not None:
-                    if signals.streaming is not None:
-                        signals.streaming.emit(str(chunk.content))
-                    if signals.progress is not None:
-                        self.ai_async_progress_count += len(chunk.content)
-                        signals.progress.emit(str(self.ai_async_progress_count))
+        req_id = self.log_llm_request(llm, messages, context='ai_async_stream')
+        try:
+            for chunk in llm.stream(messages):
+                if self.ai_async_is_canceled:
+                    break  # cancel the streaming
+                else:
+                    chunk_text = str(getattr(chunk, 'content', ''))
+                    self.ai_streaming_output += chunk_text
+                    if signals is not None:
+                        if signals.streaming is not None:
+                            signals.streaming.emit(chunk_text)
+                        if signals.progress is not None:
+                            self.ai_async_progress_count += len(chunk_text)
+                            signals.progress.emit(str(self.ai_async_progress_count))
+        except Exception as err:
+            self.log_llm_error(req_id, llm, err, context='ai_async_stream')
+            raise
         res = self.ai_streaming_output
         self.ai_streaming_output = ''
+        if not self.ai_async_is_canceled:
+            self.log_llm_response(req_id, llm, res, context='ai_async_stream')
         return res
 
     def ai_async_query(self, func, result_callback, *args, progress_callback=None, **kwargs):        
@@ -860,11 +1053,18 @@ class AiLLM():
         self.ai_async_progress_max = round(1000 / 4)  # estimated token count of the result (1000 chars)
 
         try:
-            res = self.large_llm.invoke(code_descriptions_prompt, response_format={"type": "json_object"}, config=config)
+            res = self.invoke_with_logging(
+                self.large_llm,
+                code_descriptions_prompt,
+                response_format={"type": "json_object"},
+                config=config,
+                context='generate_code_descriptions',
+                fallback_without_response_format=True,
+                fallback_exceptions=(ValidationError,),
+            )
         except ValidationError as e:
-            # The returned JSON was malformed. Try it without validation and hope that "json_repair" will fix it below 
             logger.debug(e)
-            res = self.large_llm.invoke(code_descriptions_prompt, config=config)            
+            raise
         logger.debug(str(res.content))
         res.content = strip_think_blocks(res.content)
         code_descriptions = list(json_repair.loads(str(res.content))['descriptions'])
@@ -1007,11 +1207,18 @@ class AiLLM():
         
         # send the query to the llm 
         try:
-            res = self.large_llm.invoke(f'{prompt}', response_format={"type": "json_object"}, config=config)
+            res = self.invoke_with_logging(
+                self.large_llm,
+                f'{prompt}',
+                response_format={"type": "json_object"},
+                config=config,
+                context='search_analyze_chunk',
+                fallback_without_response_format=True,
+                fallback_exceptions=(ValidationError,),
+            )
         except ValidationError as e:
-            # The returned JSON was malformed. Try it without validation and hope that "json_repair" will fix it below 
             logger.debug(e)
-            res = self.large_llm.invoke(f'{prompt}', config=config)                  
+            raise
         res.content = strip_think_blocks(res.content)
         res_json = json_repair.loads(str(res.content))
         
