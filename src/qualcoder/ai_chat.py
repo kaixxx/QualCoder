@@ -301,22 +301,49 @@ class DialogAIChat(QtWidgets.QDialog):
             return
 
         self.new_chat(name, 'general chat', summary, '')
-        # self.process_message('system', self.app.ai.get_default_system_prompt())
-        
-        # Read agent.md
-        agent_md_path = os.path.join(os.path.dirname(__file__), "ai_skills", "agent.md")
-        if os.path.exists(agent_md_path):
-            with open(agent_md_path, "r", encoding="utf-8") as f:
-                agent_md_content = f.read()
-            system_prompt = agent_md_content
-            project_memo = extract_ai_memo(self.app.get_project_memo())
-            if self.app.settings.get('ai_send_project_memo', 'True') == 'True' and len(project_memo) > 0:
-                system_prompt += '\n # Information about the currrent project\n\n'
-                system_prompt += f'Here is some background information about the research project the team is working on:\n{project_memo}'
-        else:
-            system_prompt = self.app.ai.get_default_system_prompt()
+        system_prompt = self._general_chat_base_system_prompt()
         self.process_message('system', system_prompt)    
         self.update_chat_window()  
+
+    def _agent_md_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "ai_skills", "agent.md")
+
+    def _load_agent_md_content(self) -> str:
+        """Load global agent instructions from agent.md if present."""
+
+        agent_md_path = self._agent_md_path()
+        if not os.path.exists(agent_md_path):
+            return ""
+        try:
+            with open(agent_md_path, "r", encoding="utf-8") as handle:
+                return handle.read().strip()
+        except OSError:
+            return ""
+
+    def _general_chat_base_system_prompt(self) -> str:
+        """Build the base system prompt for general chat from agent.md + project memo."""
+
+        base_prompt = self._load_agent_md_content()
+        if base_prompt == "":
+            return self.app.ai.get_default_system_prompt()
+
+        project_memo = extract_ai_memo(self.app.get_project_memo())
+        if self.app.settings.get('ai_send_project_memo', 'True') == 'True' and len(project_memo) > 0:
+            base_prompt += '\n\n# Information about the current project\n\n'
+            base_prompt += 'Here is some background information about the research project the team is working on:\n'
+            base_prompt += project_memo
+        return base_prompt
+
+    def _build_mcp_combined_system_prompt(self, phase_prompt: str) -> str:
+        """Combine global agent instructions with phase-specific technical instructions."""
+
+        base_prompt = self._general_chat_base_system_prompt().strip()
+        phase_text = str(phase_prompt if phase_prompt is not None else "").strip()
+        if base_prompt == "":
+            return phase_text
+        if phase_text == "":
+            return base_prompt
+        return base_prompt + "\n\n# Current task contract\n\n" + phase_text
 
     def new_text_analysis(self):
         """analyze a piece of text from an empirical document"""
@@ -1925,11 +1952,12 @@ data collected. This information will accompany every prompt sent to the AI, res
         }
 
         try:
-            agent_messages: List[Any] = list(messages)
+            history_messages: List[Any] = list(messages)
+            agent_messages: List[Any] = [msg for msg in history_messages if not isinstance(msg, SystemMessage)]
             final_hint = ''
             tool_messages: List[Dict[str, str]] = []
             tool_messages_streamed = signals is not None and getattr(signals, "progress", None) is not None
-            mcp_cache = self._extract_mcp_response_cache(agent_messages)
+            mcp_cache = self._extract_mcp_response_cache(history_messages)
             bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
                 ("initialize", {}),
                 ("resources/list", {}),
@@ -1999,7 +2027,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 total_tool_calls += 1
                 append_tool_exchange(method, params, response)
 
-            planner_system_prompt = self._mcp_planner_system_prompt()
+            planner_system_prompt = self._build_mcp_combined_system_prompt(self._mcp_planner_system_prompt())
             planner_user_prompt = "Create the initial MCP plan now."
             append_single_instruct_log("planning", "system", planner_system_prompt)
             append_single_instruct_log("planning", "user", planner_user_prompt)
@@ -2064,7 +2092,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         executed_any_call = True
                     append_tool_exchange(method, params, response)
 
-                reflection_system_prompt = self._mcp_reflection_system_prompt()
+                reflection_system_prompt = self._build_mcp_combined_system_prompt(self._mcp_reflection_system_prompt())
                 append_single_instruct_log("reflection", "system", reflection_system_prompt)
                 reflection_messages: List[Any] = [SystemMessage(content=reflection_system_prompt)]
                 reflection_messages.extend(agent_messages)
@@ -2104,7 +2132,9 @@ data collected. This information will accompany every prompt sent to the AI, res
 
                 if len(revised_calls) == 0:
                     if executed_any_call:
-                        replanner_system_prompt = self._mcp_planner_system_prompt()
+                        replanner_system_prompt = self._build_mcp_combined_system_prompt(
+                            self._mcp_planner_system_prompt()
+                        )
                         replanner_user_prompt = (
                             "The previous reflection said more evidence may be needed. "
                             "Propose a revised MCP plan now."
@@ -2183,7 +2213,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                     }
                 )
 
-            final_stream_messages: List[Any] = [SystemMessage(content=self._mcp_final_answer_system_prompt())]
+            final_system_prompt = self._build_mcp_combined_system_prompt(self._mcp_final_answer_system_prompt())
+            final_stream_messages: List[Any] = [SystemMessage(content=final_system_prompt)]
             final_stream_messages.extend(agent_messages)
             final_stream_messages.append(HumanMessage(content=final_prompt))
             result["stream_messages"] = final_stream_messages
