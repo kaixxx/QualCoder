@@ -301,7 +301,21 @@ class DialogAIChat(QtWidgets.QDialog):
             return
 
         self.new_chat(name, 'general chat', summary, '')
-        self.process_message('system', self.app.ai.get_default_system_prompt())
+        # self.process_message('system', self.app.ai.get_default_system_prompt())
+        
+        # Read agent.md
+        agent_md_path = os.path.join(os.path.dirname(__file__), "ai_skills", "agent.md")
+        if os.path.exists(agent_md_path):
+            with open(agent_md_path, "r", encoding="utf-8") as f:
+                agent_md_content = f.read()
+            system_prompt = agent_md_content
+            project_memo = extract_ai_memo(self.app.get_project_memo())
+            if self.app.settings.get('ai_send_project_memo', 'True') == 'True' and len(project_memo) > 0:
+                system_prompt += '\n # Information about the currrent project\n\n'
+                system_prompt += f'Here is some background information about the research project the team is working on:\n{project_memo}'
+        else:
+            system_prompt = self.app.ai.get_default_system_prompt()
+        self.process_message('system', system_prompt)    
         self.update_chat_window()  
 
     def new_text_analysis(self):
@@ -1395,8 +1409,7 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def _mcp_planner_system_prompt(self) -> str:
         return (
-            "You are a QualCoder MCP planning agent. "
-            "Plan which MCP requests are needed to answer the user question with project evidence and relevant methodological guidance. "
+            "Your task: Make a plan which steps are needed to fullfill the request of the user."
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"needs_mcp\": true|false, "
@@ -1426,15 +1439,14 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def _mcp_reflection_system_prompt(self) -> str:
         return (
-            "You are a QualCoder MCP reflection agent. "
-            "Review the collected MCP evidence and decide whether more MCP calls are needed, including methodological skill support. "
+            "Your task: Review the collected data and decide whether more MCP calls are needed, including gatering more methodological skill support. "
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"enough_information\": true|false, "
             "\"skill_decision\": \"use_skill|no_skill|already_applied\", "
             "\"skill_name\": \"skill id from prompts/list if needed, else empty\", "
             "\"skill_reason\": \"short reason for the decision\", "
-            "\"reflection_summary\": \"one short user-facing note: next step + skill status\", "
+            "\"reflection_summary\": \"one short user-facing note: next steps\", "
             "\"next_step_note\": \"optional short alias if reflection_summary is empty\", "
             "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
@@ -1442,14 +1454,14 @@ data collected. This information will accompany every prompt sent to the AI, res
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get.\n"
             "- Initialize, resources/list, and prompts/list are already available in context unless explicitly changed.\n"
-            "- If evidence is sufficient, set enough_information=true and revised_calls=[].\n"
-            "- If evidence is insufficient, propose only necessary revised_calls.\n"
+            "- If information is sufficient, set enough_information=true and revised_calls=[].\n"
+            "- If information is insufficient, propose only necessary revised_calls.\n"
             "- Re-evaluate skill needs explicitly using skill_decision and skill_reason.\n"
             "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
             "- If method guidance is missing, set skill_decision=use_skill and include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
             "- reflection_summary must be one sentence, user-facing, <=160 characters.\n"
-            "- reflection_summary must state the immediate next step and the current skill status (use_skill, already_applied, or no_skill).\n"
-            "- If skill_decision=use_skill or already_applied, include the skill_name in reflection_summary.\n"
+            # "- reflection_summary must state the immediate next step and the current skill status (use_skill, already_applied, or no_skill).\n"
+            # "- If skill_decision=use_skill or already_applied, include the skill_name in reflection_summary.\n"
             "- Avoid boilerplate like 'I will' or 'Next step is' unless strictly needed.\n"
             "- next_step_note is optional and only used when reflection_summary is empty.\n"
             "- Do not output prose outside JSON."
@@ -1457,14 +1469,14 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def _mcp_final_answer_system_prompt(self) -> str:
         return (
-            "You are a QualCoder assistant. "
+            "Your task: "
             "Provide a final answer for the user in normal prose based on the conversation and retrieved project context. "
             "Do not output JSON. Do not call MCP. "
             "If information is missing, state that briefly and avoid making up details. "
             "When you refer to empirical text evidence, add citations in this exact form: "
             "[REF: \"exact quote from the retrieved evidence\"]. "
             "The quote inside REF must be copied exactly from retrieved evidence (no paraphrasing, no corrections, no translation). "
-            "Do not generate HTML links yourself."
+            #"Do not generate HTML links yourself."
         )
 
     def _run_mcp_request(self, method: str, params: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
