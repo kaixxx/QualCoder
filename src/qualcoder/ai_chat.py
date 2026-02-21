@@ -1540,7 +1540,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             context='mcp_json_control',
             fallback_without_response_format=True,
         )
-        raw = str(llm_response.content).strip()
+        raw = strip_think_blocks(str(llm_response.content)).strip()
+        raw = self._extract_first_json_object(raw)
+        if raw == "":
+            return {}
         try:
             data = json.loads(raw)
         except Exception:
@@ -1548,6 +1551,46 @@ data collected. This information will accompany every prompt sent to the AI, res
         if not isinstance(data, dict):
             return {}
         return data
+
+    def _extract_first_json_object(self, text: str) -> str:
+        """Extract the first complete JSON object from mixed model output text."""
+
+        raw = str(text if text is not None else "").strip()
+        if raw == "":
+            return ""
+        if raw.startswith("{") and raw.endswith("}"):
+            return raw
+
+        start = -1
+        depth = 0
+        in_string = False
+        escaped = False
+
+        for idx, ch in enumerate(raw):
+            if start < 0:
+                if ch == "{":
+                    start = idx
+                    depth = 1
+                continue
+
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == "\"":
+                    in_string = False
+                continue
+
+            if ch == "\"":
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[start:idx + 1].strip()
+        return ""
 
     def _normalize_mcp_calls(self, raw_calls: Any, allowed_methods: set[str], max_calls: int) -> List[Dict[str, Any]]:
         """Validate and clamp model-proposed MCP calls."""
@@ -2446,8 +2489,10 @@ data collected. This information will accompany every prompt sent to the AI, res
         self.ai_stream_in_ref = False
         self.current_streaming_chat_idx = self.current_chat_idx
         req_id = self.app.ai.log_llm_request(self.app.ai.large_llm, messages, context='dialog_send_message')
+        stream_iter = None
         try:
-            for chunk in self.app.ai.large_llm.stream(messages):
+            stream_iter = self.app.ai.large_llm.stream(messages)
+            for chunk in stream_iter:
                 if self.app.ai.ai_async_is_canceled:
                     break  # Cancel the streaming
                 elif self.current_chat_idx != self.current_streaming_chat_idx:
@@ -2480,6 +2525,16 @@ data collected. This information will accompany every prompt sent to the AI, res
         except Exception as err:
             self.app.ai.log_llm_error(req_id, self.app.ai.large_llm, err, context='dialog_send_message')
             raise
+        finally:
+            if stream_iter is not None:
+                close_fn = getattr(stream_iter, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception as close_err:
+                        self.app.ai.log_llm_error(
+                            req_id, self.app.ai.large_llm, close_err, context='dialog_send_message_close'
+                        )
         if not self.app.ai.ai_async_is_canceled and self.current_chat_idx == self.current_streaming_chat_idx:
             self.app.ai.log_llm_response(req_id, self.app.ai.large_llm, self.ai_streaming_output, context='dialog_send_message')
         return self.ai_streaming_output
@@ -2505,18 +2560,33 @@ data collected. This information will accompany every prompt sent to the AI, res
     def ai_error_callback(self, exception_type, value, tb_obj):
         """Called if the AI returns an error"""
         self.ai_streaming_output = ''
-        ai_model_name = self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']
-        msg = _('Error communicating with ' + ai_model_name + '\n')
-        msg += exception_type.__name__ + ': ' + str(html_to_text(value))
-        if hasattr(value, 'message'):
-            msg += f' {value.message}'
-        tb = '\n'.join(traceback.format_tb(tb_obj))
-        if hasattr(value, 'body'):
-            tb += f'\n{value.body}\n'
-        logger.error(_("Uncaught exception: ") + msg + '\n' + tb)
-        # Error msg in chat and trigger message box show
-        self.process_message('info', msg, self.current_streaming_chat_idx)    
-        qt_exception_hook._exception_caught.emit(msg, tb)        
+
+        def _safe_to_text(obj: object) -> str:
+            try:
+                return str(obj)
+            except Exception:
+                try:
+                    return repr(obj)
+                except Exception:
+                    return '<unprintable>'
+
+        try:
+            ai_model_name = self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']
+            msg = _('Error communicating with ' + ai_model_name + '\n')
+            msg += exception_type.__name__ + ': ' + html_to_text(_safe_to_text(value))
+            if hasattr(value, 'message'):
+                msg += f' {_safe_to_text(getattr(value, "message", ""))}'
+            tb = '\n'.join(traceback.format_tb(tb_obj))
+            if hasattr(value, 'body'):
+                tb += f'\n{_safe_to_text(getattr(value, "body", ""))}\n'
+            logger.error(_("Uncaught exception: ") + msg + '\n' + tb)
+            # Error msg in chat and trigger message box show
+            self.process_message('info', msg, self.current_streaming_chat_idx)
+            qt_exception_hook._exception_caught.emit(msg, tb)
+        except Exception as err:
+            fallback = _('Error while handling AI error callback: ') + _safe_to_text(err)
+            logger.error(fallback)
+            self.process_message('info', fallback, self.current_streaming_chat_idx)
     
     def eventFilter(self, source, event):
         # Check if the event is a KeyPress, source is the lineEdit, and the key is Enter

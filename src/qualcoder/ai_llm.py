@@ -539,6 +539,17 @@ class AiLLM():
             return 'message', msg
         return 'message', str(msg)
 
+    def _safe_to_text(self, value: object) -> str:
+        """Best-effort conversion that never raises during error handling/logging."""
+
+        try:
+            return str(value)
+        except Exception:
+            try:
+                return repr(value)
+            except Exception:
+                return '<unprintable>'
+
     def _write_ai_log(self, text: str):
         self._ensure_ai_log_logger()
         self.ai_log_logger.info(text)
@@ -577,7 +588,7 @@ class AiLLM():
         if context.strip() != '':
             header += f' context="{context.strip()}"'
         lines = [header, 'assistant:']
-        for line in str(response_text if response_text is not None else '').splitlines():
+        for line in self._safe_to_text(response_text if response_text is not None else '').splitlines():
             lines.append('  ' + line)
         if len(lines) == 2:
             lines.append('  ')
@@ -587,7 +598,7 @@ class AiLLM():
         """Log one LLM error for traceability."""
 
         model_name = self._llm_name_for_log(llm)
-        error_text = str(err)
+        error_text = self._safe_to_text(err)
         line = f'[#{req_id}] ERROR model="{model_name}"'
         if context.strip() != '':
             line += f' context="{context.strip()}"'
@@ -878,14 +889,17 @@ class AiLLM():
         self.ai_async_progress_msg = self.ai_async_progress_msg + '\n' + msg
         
     def _ai_async_error(self, exception_type, value, tb_obj):
-        self.ai_async_is_errored = True
-        value = html_to_text(str(value))
-        msg = _('AI Error:\n')
-        msg += exception_type.__name__ + ': ' + str(value)
-        tb = '\n'.join(traceback.format_tb(tb_obj))
-        logger.error(_("Uncaught exception: ") + msg + '\n' + tb)
-        # Trigger message box show
-        qt_exception_hook._exception_caught.emit(msg, tb)        
+        try:
+            self.ai_async_is_errored = True
+            value_text = html_to_text(self._safe_to_text(value))
+            msg = _('AI Error:\n')
+            msg += exception_type.__name__ + ': ' + str(value_text)
+            tb = '\n'.join(traceback.format_tb(tb_obj))
+            logger.error(_("Uncaught exception: ") + msg + '\n' + tb)
+            # Trigger message box show
+            qt_exception_hook._exception_caught.emit(msg, tb)
+        except Exception as err:
+            logger.error(_("Uncaught exception while handling AI error: ") + self._safe_to_text(err))
 
     def _ai_async_finished(self):
         self.ai_async_is_finished = True
@@ -926,8 +940,10 @@ class AiLLM():
         self.ai_async_is_canceled = False
         self.ai_streaming_output = ''
         req_id = self.log_llm_request(llm, messages, context='ai_async_stream')
+        stream_iter = None
         try:
-            for chunk in llm.stream(messages):
+            stream_iter = llm.stream(messages)
+            for chunk in stream_iter:
                 if self.ai_async_is_canceled:
                     break  # cancel the streaming
                 else:
@@ -941,7 +957,23 @@ class AiLLM():
                             signals.progress.emit(str(self.ai_async_progress_count))
         except Exception as err:
             self.log_llm_error(req_id, llm, err, context='ai_async_stream')
+            # Some providers emit malformed trailing streaming events after content is already complete.
+            # Prefer returning the accumulated text instead of failing the whole turn.
+            if self.ai_streaming_output != '':
+                res = self.ai_streaming_output
+                self.ai_streaming_output = ''
+                if not self.ai_async_is_canceled:
+                    self.log_llm_response(req_id, llm, res, context='ai_async_stream_partial')
+                return res
             raise
+        finally:
+            if stream_iter is not None:
+                close_fn = getattr(stream_iter, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception as close_err:
+                        self.log_llm_error(req_id, llm, close_err, context='ai_async_stream_close')
         res = self.ai_streaming_output
         self.ai_streaming_output = ''
         if not self.ai_async_is_canceled:
