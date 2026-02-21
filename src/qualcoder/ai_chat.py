@@ -1444,6 +1444,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"skill_name\": \"skill id from prompts/list if skill_decision=use_skill, else empty\", "
             "\"skill_reason\": \"short reason for the decision\", "
             "\"plan_summary\": \"one short user-facing note: immediate next step + skill decision\", "
+            "\"user_decision_required\": true|false, "
+            "\"decision_question\": \"optional free-text question for the user\", "
+            "\"decision_context\": \"optional short reason for the question\", "
+            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"optional draft answer idea\""
             "}\n"
@@ -1459,6 +1463,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- plan_summary must be one sentence, user-facing, <=160 characters.\n"
             # "- plan_summary must state the immediate next step and whether a skill is used.\n"
             # "- If skill_decision=use_skill, include the skill_name in plan_summary.\n"
+            "- If a costly or methodological choice should be confirmed by the user first, set user_decision_required=true.\n"
+            "- If user_decision_required=true, provide decision_question in natural language and keep it concise.\n"
+            "- If user_decision_required=true, put suggested MCP actions into proposed_next_calls and keep calls empty.\n"
             "- Simple plans can be executed directly. For more complex plans, ask the user first.\n"
             "- If enough evidence is already in the conversation, set needs_mcp=false and calls=[].\n"
             "- Do not output prose outside JSON."
@@ -1475,6 +1482,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"skill_reason\": \"short reason for the decision\", "
             "\"reflection_summary\": \"one short user-facing note: next steps\", "
             "\"next_step_note\": \"optional short alias if reflection_summary is empty\", "
+            "\"user_decision_required\": true|false, "
+            "\"decision_question\": \"optional free-text question for the user\", "
+            "\"decision_context\": \"optional short reason for the question\", "
+            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
             "}\n"
@@ -1486,6 +1497,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Re-evaluate skill needs explicitly using skill_decision and skill_reason.\n"
             "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
             "- If method guidance is missing, set skill_decision=use_skill and include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
+            "- If a costly or methodological choice should be confirmed by the user first, set user_decision_required=true.\n"
+            "- If user_decision_required=true, provide decision_question in natural language and keep it concise.\n"
+            "- If user_decision_required=true, put the suggested follow-up MCP actions into proposed_next_calls and keep revised_calls empty.\n"
             "- reflection_summary must be one sentence, user-facing, <=160 characters.\n"
             # "- reflection_summary must state the immediate next step and the current skill status (use_skill, already_applied, or no_skill).\n"
             # "- If skill_decision=use_skill or already_applied, include the skill_name in reflection_summary.\n"
@@ -1941,6 +1955,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "stream_messages": [],
             "tool_messages": [],
             "canceled": False,
+            "direct_ai_message": "",
         }
         allowed_methods = {
             "initialize",
@@ -2031,12 +2046,15 @@ data collected. This information will accompany every prompt sent to the AI, res
             planner_user_prompt = "Create the initial MCP plan now."
             append_single_instruct_log("planning", "system", planner_system_prompt)
             append_single_instruct_log("planning", "user", planner_user_prompt)
-            self._emit_mcp_status_text(signals, chat_idx, _("Planning..."))
+            self._emit_mcp_status_text(signals, chat_idx, _("Thinking..."))
             planner_messages: List[Any] = [SystemMessage(content=planner_system_prompt)]
             planner_messages.extend(agent_messages)
             planner_messages.append(HumanMessage(content=planner_user_prompt))
             plan_data = self._invoke_json_llm(planner_messages)
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
+            proposed_plan_calls = self._normalize_mcp_calls(
+                plan_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
+            )
             planned_calls = self._ensure_skill_prompt_call(
                 plan_data.get("skill_decision", ""),
                 plan_data.get("skill_name", ""),
@@ -2044,15 +2062,67 @@ data collected. This information will accompany every prompt sent to the AI, res
                 mcp_cache,
                 max_calls_per_round,
             )
+            proposed_plan_calls = self._ensure_skill_prompt_call(
+                plan_data.get("skill_decision", ""),
+                plan_data.get("skill_name", ""),
+                proposed_plan_calls,
+                mcp_cache,
+                max_calls_per_round,
+            )
             needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
             plan_summary = str(plan_data.get("plan_summary", "")).strip()
             latest_plan_summary = plan_summary
             latest_reflection_summary = ""
+            pending_user_decision = None
             if plan_summary != "":
                 self._emit_mcp_status_text(signals, chat_idx, plan_summary)
             initial_brief = str(plan_data.get("answer_brief", "")).strip()
             if initial_brief != "":
                 final_hint = initial_brief
+            planner_user_decision_required = self._json_bool(plan_data.get("user_decision_required", False), False)
+            planner_decision_question = self._normalize_progress_note(plan_data.get("decision_question", ""), max_length=600)
+            planner_decision_context = self._normalize_progress_note(plan_data.get("decision_context", ""), max_length=600)
+            if planner_user_decision_required and planner_decision_question == "":
+                planner_decision_question = self._normalize_progress_note(plan_summary, max_length=600)
+            if planner_user_decision_required and planner_decision_question != "":
+                pending_user_decision = {
+                    "phase": "planning",
+                    "question": planner_decision_question,
+                    "context": planner_decision_context,
+                    "proposed_next_calls": proposed_plan_calls,
+                }
+                result["direct_ai_message"] = planner_decision_question
+                stop_reason = "awaiting_user_decision"
+            if pending_user_decision is not None:
+                agent_state_snapshot = {
+                    "type": "mcp_agent_state",
+                    "latest_plan_summary": self._normalize_progress_note(latest_plan_summary, max_length=600),
+                    "latest_reflection_summary": self._normalize_progress_note(latest_reflection_summary, max_length=600),
+                    "final_hint": self._normalize_progress_note(final_hint, max_length=600),
+                    "stop_reason": stop_reason,
+                    "pending_calls": planned_calls if isinstance(planned_calls, list) else [],
+                    "pending_user_decision": pending_user_decision,
+                }
+                agent_state_content = json.dumps(agent_state_snapshot, ensure_ascii=False)
+                if tool_messages_streamed:
+                    progress_payload = {
+                        "chat_idx": chat_idx,
+                        "msg_type": "agent_state",
+                        "msg_author": "ai_agent",
+                        "msg_content": agent_state_content,
+                    }
+                    signals.progress.emit(json.dumps(progress_payload, ensure_ascii=False))
+                else:
+                    tool_messages.append(
+                        {
+                            "msg_type": "agent_state",
+                            "msg_author": "ai_agent",
+                            "msg_content": agent_state_content,
+                        }
+                    )
+                result["tool_messages"] = tool_messages
+                result["stream_messages"] = []
+                return result
             if not needs_mcp:
                 planned_calls = []
 
@@ -2113,6 +2183,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                 revised_calls = self._normalize_mcp_calls(
                     reflection_data.get("revised_calls", []), allowed_methods, max_calls_per_round
                 )
+                proposed_next_calls = self._normalize_mcp_calls(
+                    reflection_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
+                )
                 revised_calls = self._ensure_skill_prompt_call(
                     reflection_data.get("skill_decision", ""),
                     reflection_data.get("skill_name", ""),
@@ -2126,6 +2199,21 @@ data collected. This information will accompany every prompt sent to the AI, res
                 )
                 if short_reflection_note != "":
                     self._emit_mcp_status_text(signals, chat_idx, short_reflection_note)
+                user_decision_required = self._json_bool(reflection_data.get("user_decision_required", False), False)
+                decision_question = self._normalize_progress_note(reflection_data.get("decision_question", ""), max_length=600)
+                decision_context = self._normalize_progress_note(reflection_data.get("decision_context", ""), max_length=600)
+                if user_decision_required and decision_question == "":
+                    decision_question = short_reflection_note
+                if user_decision_required and decision_question != "":
+                    pending_user_decision = {
+                        "phase": "reflection",
+                        "question": decision_question,
+                        "context": decision_context,
+                        "proposed_next_calls": proposed_next_calls,
+                    }
+                    result["direct_ai_message"] = decision_question
+                    stop_reason = "awaiting_user_decision"
+                    break
                 if enough_information:
                     stop_reason = "enough_information"
                     break
@@ -2172,6 +2260,37 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if stop_reason == "":
                     stop_reason = "max_reflection_rounds_reached"
 
+            if pending_user_decision is not None:
+                agent_state_snapshot = {
+                    "type": "mcp_agent_state",
+                    "latest_plan_summary": self._normalize_progress_note(latest_plan_summary, max_length=600),
+                    "latest_reflection_summary": self._normalize_progress_note(latest_reflection_summary, max_length=600),
+                    "final_hint": self._normalize_progress_note(final_hint, max_length=600),
+                    "stop_reason": stop_reason,
+                    "pending_calls": planned_calls if isinstance(planned_calls, list) else [],
+                    "pending_user_decision": pending_user_decision,
+                }
+                agent_state_content = json.dumps(agent_state_snapshot, ensure_ascii=False)
+                if tool_messages_streamed:
+                    progress_payload = {
+                        "chat_idx": chat_idx,
+                        "msg_type": "agent_state",
+                        "msg_author": "ai_agent",
+                        "msg_content": agent_state_content,
+                    }
+                    signals.progress.emit(json.dumps(progress_payload, ensure_ascii=False))
+                else:
+                    tool_messages.append(
+                        {
+                            "msg_type": "agent_state",
+                            "msg_author": "ai_agent",
+                            "msg_content": agent_state_content,
+                        }
+                    )
+                result["tool_messages"] = tool_messages
+                result["stream_messages"] = []
+                return result
+
             self._emit_mcp_status(signals, chat_idx, self.ai_mcp_server.describe_host_status_event("final_response"))
             final_prompt = (
                 "Now provide the final answer to the user in normal prose. "
@@ -2194,6 +2313,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 "final_hint": self._normalize_progress_note(final_hint, max_length=600),
                 "stop_reason": stop_reason,
                 "pending_calls": planned_calls if isinstance(planned_calls, list) else [],
+                "pending_user_decision": None,
             }
             agent_state_content = json.dumps(agent_state_snapshot, ensure_ascii=False)
             if tool_messages_streamed:
@@ -2244,11 +2364,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.process_message('info', err, chat_idx)
             return
 
-        stream_messages = mcp_result.get("stream_messages", None)
-        if stream_messages is None or not isinstance(stream_messages, list) or len(stream_messages) == 0:
-            self.process_message('info', _('Error: Invalid message stream from MCP general chat worker.'), chat_idx)
-            return
-
         tool_messages = mcp_result.get("tool_messages", None)
         if isinstance(tool_messages, list) and len(tool_messages) > 0:
             db_conn = sqlite3.connect(self.chat_history_path)
@@ -2271,6 +2386,16 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.history_update_message_list(db_conn)
             finally:
                 db_conn.close()
+
+        direct_ai_message = str(mcp_result.get("direct_ai_message", "")).strip()
+        if direct_ai_message != "":
+            self.process_message('ai', direct_ai_message, chat_idx)
+            return
+
+        stream_messages = mcp_result.get("stream_messages", None)
+        if stream_messages is None or not isinstance(stream_messages, list) or len(stream_messages) == 0:
+            self.process_message('info', _('Error: Invalid message stream from MCP general chat worker.'), chat_idx)
+            return
 
         self.current_streaming_chat_idx = chat_idx
         self.app.ai.ai_async_stream(self.app.ai.large_llm,
