@@ -9,10 +9,12 @@ call it without transport setup.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 import sqlite3
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
@@ -34,12 +36,24 @@ class AiMcpServer:
     max_segments_limit = 200
     default_segments_max_chars = 8000
     max_segments_chars_limit = 50000
+    default_vector_page_size = 20
+    max_vector_page_size = 100
+    default_vector_k_per_query = 50
+    max_vector_k_per_query = 200
+    default_vector_score_threshold = 0.5
+    default_regex_page_size = 20
+    max_regex_page_size = 100
+    default_regex_context_chars = 120
+    max_regex_context_chars = 1000
+    max_regex_hits = 20000
     STATUS_REVIEW_AVAILABLE_MATERIALS = "status.review.available_materials"
     STATUS_REVIEW_DOCUMENT_LIST = "status.review.document_list"
     STATUS_REVIEW_CODE_TREE = "status.review.code_tree"
     STATUS_REVIEW_DOCUMENT = "status.review.document"
     STATUS_REVIEW_RESOURCE = "status.review.resource"
     STATUS_REVIEW_CODE_SEGMENTS = "status.review.code_segments"
+    STATUS_REVIEW_VECTOR_SEARCH = "status.review.vector_search"
+    STATUS_REVIEW_REGEX_SEARCH = "status.review.regex_search"
     STATUS_PLAN_MCP_STEPS = "status.plan.mcp_steps"
     STATUS_EXECUTE_MCP_STEPS = "status.execute.mcp_steps"
     STATUS_REFLECT_MCP_RESULTS = "status.reflect.mcp_results"
@@ -62,7 +76,9 @@ class AiMcpServer:
             "Use resources/list, resources/read, prompts/list, and prompts/get. "
             "Available resources: text documents list (qualcoder://documents), document text by id "
             "(qualcoder://documents/text/{id}), code tree (qualcoder://codes/tree), and coded text segments by code id "
-            "(qualcoder://codes/segments/{cid}). "
+            "(qualcoder://codes/segments/{cid}), semantic vector search "
+            "(qualcoder://vector/search?q=...), and regular-expression search "
+            "(qualcoder://search/regex?pattern=...). "
             "Available prompts represent QualCoder skills from system, user, and project scope."
         )
 
@@ -175,6 +191,20 @@ class AiMcpServer:
                 "entity_type": "codes_tree",
                 "message_id": self.STATUS_REVIEW_CODE_TREE,
             }
+        if uri_base == "qualcoder://vector/search":
+            return {
+                **base_event,
+                "status_code": "vector_search",
+                "entity_type": "vector_search",
+                "message_id": self.STATUS_REVIEW_VECTOR_SEARCH,
+            }
+        if uri_base == "qualcoder://search/regex":
+            return {
+                **base_event,
+                "status_code": "regex_search",
+                "entity_type": "regex_search",
+                "message_id": self.STATUS_REVIEW_REGEX_SEARCH,
+            }
         code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_base)
         if code_segments_match is not None:
             cid = int(code_segments_match.group(1))
@@ -265,6 +295,8 @@ class AiMcpServer:
             self.STATUS_REVIEW_DOCUMENT: _('Reviewing text document "{name}"...'),
             self.STATUS_REVIEW_RESOURCE: _('Reviewing project material...'),
             self.STATUS_REVIEW_CODE_SEGMENTS: _('Reviewing coded text segments for "{name}"...'),
+            self.STATUS_REVIEW_VECTOR_SEARCH: _('Running semantic search in the project data...'),
+            self.STATUS_REVIEW_REGEX_SEARCH: _('Running keyword search in the project data...'),
             self.STATUS_PLAN_MCP_STEPS: _('Planning how to gather project evidence...'),
             self.STATUS_EXECUTE_MCP_STEPS: _('Executing MCP retrieval steps...'),
             self.STATUS_REFLECT_MCP_RESULTS: _('Reflecting on retrieved evidence and revising the plan...'),
@@ -359,6 +391,25 @@ class AiMcpServer:
                     ),
                     mimeType="application/json",
                 ),
+                types.ResourceTemplate(
+                    uriTemplate="qualcoder://vector/search{?q,cursor,page_size,file_ids,score_threshold,k_per_query}",
+                    name="Semantic vector search",
+                    description=(
+                        "Search semantically similar text chunks. Pass one or more q parameters "
+                        "(for example ?q=work&q=employment). Optional params: cursor, page_size, "
+                        "file_ids, score_threshold, k_per_query."
+                    ),
+                    mimeType="application/json",
+                ),
+                types.ResourceTemplate(
+                    uriTemplate="qualcoder://search/regex{?pattern,flags,cursor,page_size,file_ids,context_chars}",
+                    name="Regular-expression search",
+                    description=(
+                        "Search text documents using a regular expression pattern. "
+                        "Optional params: flags (imsx), cursor, page_size, file_ids, context_chars."
+                    ),
+                    mimeType="application/json",
+                ),
             ]
 
         @self._sdk_server.read_resource()
@@ -393,6 +444,12 @@ class AiMcpServer:
             return self._codes_tree()
         if uri_no_query == "qualcoder://documents":
             return {"documents": self._fetch_text_documents()}
+        if uri_no_query == "qualcoder://vector/search":
+            options = self._parse_vector_search_options(query)
+            return self._read_vector_search(options)
+        if uri_no_query == "qualcoder://search/regex":
+            options = self._parse_regex_search_options(query)
+            return self._read_regex_search(options)
 
         code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_no_query)
         if code_segments_match is not None:
@@ -428,6 +485,18 @@ class AiMcpServer:
                 uri="qualcoder://documents",
                 name="Text documents",
                 description="List text documents in the project.",
+                mimeType="application/json",
+            ),
+            types.Resource(
+                uri="qualcoder://vector/search",
+                name="Semantic vector search",
+                description="Semantic retrieval over embedded text chunks. Requires query param q.",
+                mimeType="application/json",
+            ),
+            types.Resource(
+                uri="qualcoder://search/regex",
+                name="Regular-expression search",
+                description="Regex keyword search over text documents. Requires query param pattern.",
                 mimeType="application/json",
             ),
         ]
@@ -611,6 +680,836 @@ class AiMcpServer:
             "file_ids": file_ids,
         }
 
+    def _parse_vector_search_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        query_strings: List[str] = []
+        for key in ("q", "query", "queries"):
+            values = query.get(key, [])
+            for raw in values:
+                raw_text = str(raw).strip()
+                if raw_text == "":
+                    continue
+                for line in raw_text.splitlines():
+                    line_clean = " ".join(line.split()).strip()
+                    if line_clean != "":
+                        query_strings.append(line_clean)
+
+        # Keep order, remove duplicates case-insensitively.
+        deduped_queries: List[str] = []
+        seen_queries: set[str] = set()
+        for q in query_strings:
+            q_key = q.lower()
+            if q_key in seen_queries:
+                continue
+            seen_queries.add(q_key)
+            deduped_queries.append(q)
+
+        if len(deduped_queries) == 0:
+            raise ValueError("Missing vector search query. Use at least one ?q=... parameter.")
+
+        cursor = self._to_int(query.get("cursor", [0])[0], 0)
+        cursor = max(0, cursor)
+
+        page_size = self._to_int(query.get("page_size", [self.default_vector_page_size])[0], self.default_vector_page_size)
+        page_size = max(1, min(page_size, self.max_vector_page_size))
+
+        score_threshold = self._to_float(
+            query.get("score_threshold", [self.default_vector_score_threshold])[0],
+            self.default_vector_score_threshold,
+        )
+        score_threshold = max(0.0, min(score_threshold, 1.0))
+
+        k_per_query = self._to_int(
+            query.get("k_per_query", [self.default_vector_k_per_query])[0],
+            self.default_vector_k_per_query,
+        )
+        k_per_query = max(1, min(k_per_query, self.max_vector_k_per_query))
+
+        file_ids: List[int] = []
+        for raw in query.get("file_ids", []):
+            parts = [p.strip() for p in str(raw).split(",")]
+            for part in parts:
+                if part == "":
+                    continue
+                file_ids.append(max(0, self._to_int(part, -1)))
+        file_ids = [fid for fid in file_ids if fid > 0]
+
+        return {
+            "queries": deduped_queries,
+            "cursor": cursor,
+            "page_size": page_size,
+            "file_ids": file_ids,
+            "score_threshold": score_threshold,
+            "k_per_query": k_per_query,
+        }
+
+    def _parse_regex_search_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        pattern = ""
+        for key in ("pattern", "q", "query"):
+            values = query.get(key, [])
+            if len(values) == 0:
+                continue
+            pattern = str(values[0]).strip()
+            if pattern != "":
+                break
+        if pattern == "":
+            raise ValueError("Missing regex pattern. Use ?pattern=...")
+
+        flags = str(query.get("flags", [""])[0]).strip().lower()
+        flags = "".join(ch for ch in flags if ch in ("i", "m", "s", "x"))
+
+        cursor = self._to_int(query.get("cursor", [0])[0], 0)
+        cursor = max(0, cursor)
+
+        page_size = self._to_int(query.get("page_size", [self.default_regex_page_size])[0], self.default_regex_page_size)
+        page_size = max(1, min(page_size, self.max_regex_page_size))
+
+        context_chars = self._to_int(
+            query.get("context_chars", [self.default_regex_context_chars])[0],
+            self.default_regex_context_chars,
+        )
+        context_chars = max(0, min(context_chars, self.max_regex_context_chars))
+
+        file_ids: List[int] = []
+        for raw in query.get("file_ids", []):
+            parts = [p.strip() for p in str(raw).split(",")]
+            for part in parts:
+                if part == "":
+                    continue
+                file_ids.append(max(0, self._to_int(part, -1)))
+        file_ids = [fid for fid in file_ids if fid > 0]
+
+        return {
+            "pattern": pattern,
+            "flags": flags,
+            "cursor": cursor,
+            "page_size": page_size,
+            "context_chars": context_chars,
+            "file_ids": file_ids,
+        }
+
+    def _read_vector_search(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            raise RuntimeError("AI integration is not initialized.")
+        vectorstore = getattr(ai, "sources_vectorstore", None)
+        if vectorstore is None or getattr(vectorstore, "faiss_db", None) is None:
+            raise RuntimeError("Vectorstore is not initialized.")
+        is_ready_fn = getattr(vectorstore, "is_ready", None)
+        if callable(is_ready_fn) and not is_ready_fn():
+            raise RuntimeError("Vectorstore is currently updating. Please try again shortly.")
+
+        queries = options.get("queries", [])
+        if not isinstance(queries, list) or len(queries) == 0:
+            raise ValueError("Missing vector search query.")
+        cursor = max(0, self._to_int(options.get("cursor", 0), 0))
+        page_size = max(1, min(self._to_int(options.get("page_size", self.default_vector_page_size),
+                                            self.default_vector_page_size),
+                               self.max_vector_page_size))
+        file_ids = options.get("file_ids", [])
+        if not isinstance(file_ids, list):
+            file_ids = []
+        score_threshold = max(0.0, min(self._to_float(options.get("score_threshold", self.default_vector_score_threshold),
+                                                      self.default_vector_score_threshold), 1.0))
+        k_per_query = max(1, min(self._to_int(options.get("k_per_query", self.default_vector_k_per_query),
+                                              self.default_vector_k_per_query), self.max_vector_k_per_query))
+
+        cache_key = self._vector_search_cache_key(queries, file_ids, score_threshold, k_per_query)
+
+        conn = self._connect_chat_history()
+        try:
+            self._ensure_vector_search_cache_tables(conn)
+            cache_meta = self._get_vector_search_cache(conn, cache_key)
+            if cache_meta is None:
+                vectorstore_sig = self._vectorstore_signature()
+                cache_id, total_hits = self._build_vector_search_cache(
+                    conn,
+                    cache_key,
+                    vectorstore_sig,
+                    queries,
+                    file_ids,
+                    score_threshold,
+                    k_per_query,
+                )
+            else:
+                cache_id, total_hits = cache_meta
+
+            if cursor > total_hits:
+                cursor = total_hits
+
+            cur = conn.cursor()
+
+            hits: List[Dict[str, Any]] = []
+            next_cursor = cursor
+            fetch_batch_size = max(page_size * 3, 50)
+            while len(hits) < page_size and next_cursor < total_hits:
+                cur.execute(
+                    "SELECT position, docstore_id, source_id, start_index, text_length, score "
+                    "FROM mcp_vector_search_hits "
+                    "WHERE cache_id=? AND position>=? "
+                    "ORDER BY position ASC LIMIT ?",
+                    (cache_id, next_cursor, fetch_batch_size),
+                )
+                rows = cur.fetchall()
+                if len(rows) == 0:
+                    next_cursor = total_hits
+                    break
+
+                docstore_ids = [str(row[1]).strip() for row in rows if row[1] is not None and str(row[1]).strip() != ""]
+                docs_map = self._fetch_cached_documents_by_docstore_id(docstore_ids)
+
+                for row in rows:
+                    position = self._to_int(row[0], 0)
+                    docstore_id = "" if row[1] is None else str(row[1]).strip()
+                    source_id = self._to_int(row[2], -1)
+                    start_index = self._to_int(row[3], -1)
+                    score = self._to_float(row[5], 0.0)
+                    next_cursor = max(next_cursor, position + 1)
+
+                    if docstore_id == "":
+                        continue
+                    doc_obj = docs_map.get(docstore_id)
+                    if doc_obj is None:
+                        # stale cache entry: silently skip
+                        continue
+
+                    text = str(getattr(doc_obj, "page_content", ""))
+                    if text.strip() == "":
+                        continue
+                    metadata = getattr(doc_obj, "metadata", {})
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    meta_source_id = self._to_int(metadata.get("id"), -1)
+                    if meta_source_id > 0:
+                        source_id = meta_source_id
+                    meta_start_index = self._to_int(metadata.get("start_index"), -1)
+                    if meta_start_index >= 0:
+                        start_index = meta_start_index
+                    source_name = str(metadata.get("name", "")).strip()
+                    if source_name == "" and source_id > 0:
+                        fetched_name = self._fetch_source_name(source_id)
+                        source_name = "" if fetched_name is None else str(fetched_name)
+
+                    hits.append(
+                        {
+                            "rank": position + 1,
+                            "position": position,
+                            "docstore_id": docstore_id,
+                            "source_id": (source_id if source_id > 0 else None),
+                            "source_name": source_name,
+                            "start": (start_index if start_index >= 0 else None),
+                            "length": len(text),
+                            "score": score,
+                            "text": text,
+                        }
+                    )
+                    if len(hits) >= page_size:
+                        break
+
+            if next_cursor > total_hits:
+                next_cursor = total_hits
+            truncated = next_cursor < total_hits
+
+            return {
+                "selection": {
+                    "queries": queries,
+                    "cursor": cursor,
+                    "page_size": page_size,
+                    "file_ids": file_ids,
+                    "score_threshold": score_threshold,
+                    "k_per_query": k_per_query,
+                    "total_hits": total_hits,
+                    "returned_hits": len(hits),
+                    "next_cursor": next_cursor,
+                    "truncated": truncated,
+                },
+                "hits": hits,
+            }
+        finally:
+            conn.close()
+
+    def _read_regex_search(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        pattern_text = str(options.get("pattern", "")).strip()
+        if pattern_text == "":
+            raise ValueError("Missing regex pattern.")
+        flags_text = str(options.get("flags", "")).strip().lower()
+        cursor = max(0, self._to_int(options.get("cursor", 0), 0))
+        page_size = max(1, min(self._to_int(options.get("page_size", self.default_regex_page_size),
+                                            self.default_regex_page_size),
+                               self.max_regex_page_size))
+        context_chars = max(0, min(self._to_int(options.get("context_chars", self.default_regex_context_chars),
+                                                self.default_regex_context_chars),
+                                   self.max_regex_context_chars))
+        file_ids = options.get("file_ids", [])
+        if not isinstance(file_ids, list):
+            file_ids = []
+
+        re_flags = self._regex_flags_to_re_flags(flags_text)
+        try:
+            regex = re.compile(pattern_text, re_flags)
+        except re.error as err:
+            raise ValueError(f"Invalid regex pattern: {err}")
+
+        cache_key = self._regex_search_cache_key(pattern_text, flags_text, file_ids, context_chars)
+
+        conn = self._connect_chat_history()
+        try:
+            self._ensure_vector_search_cache_tables(conn)
+            cache_meta = self._get_regex_search_cache(conn, cache_key)
+            if cache_meta is None:
+                cache_id, total_hits = self._build_regex_search_cache(
+                    conn,
+                    cache_key,
+                    pattern_text,
+                    flags_text,
+                    file_ids,
+                    context_chars,
+                )
+            else:
+                cache_id, total_hits = cache_meta
+
+            if cursor > total_hits:
+                cursor = total_hits
+
+            cur = conn.cursor()
+            hits: List[Dict[str, Any]] = []
+            next_cursor = cursor
+            fetch_batch_size = max(page_size * 3, 50)
+
+            while len(hits) < page_size and next_cursor < total_hits:
+                cur.execute(
+                    "SELECT position, source_id, context_start, context_length, match_start, match_length "
+                    "FROM mcp_regex_search_hits "
+                    "WHERE cache_id=? AND position>=? "
+                    "ORDER BY position ASC LIMIT ?",
+                    (cache_id, next_cursor, fetch_batch_size),
+                )
+                rows = cur.fetchall()
+                if len(rows) == 0:
+                    next_cursor = total_hits
+                    break
+
+                source_ids = [self._to_int(row[1], -1) for row in rows]
+                source_texts = self._fetch_sources_texts(source_ids)
+
+                for row in rows:
+                    position = self._to_int(row[0], 0)
+                    source_id = self._to_int(row[1], -1)
+                    context_start = self._to_int(row[2], -1)
+                    context_length = self._to_int(row[3], 0)
+                    match_start = self._to_int(row[4], -1)
+                    match_length = self._to_int(row[5], 0)
+                    next_cursor = max(next_cursor, position + 1)
+                    if source_id <= 0 or context_start < 0 or context_length <= 0:
+                        continue
+
+                    source_row = source_texts.get(source_id)
+                    if source_row is None:
+                        # source vanished or changed unexpectedly; silently skip
+                        continue
+                    source_name, fulltext = source_row
+                    if fulltext == "":
+                        continue
+                    if context_start >= len(fulltext):
+                        continue
+                    context_end = min(len(fulltext), context_start + context_length)
+                    if context_end <= context_start:
+                        continue
+
+                    # Entry may be stale if document text changed since cache build.
+                    if match_start < 0 or match_length <= 0:
+                        continue
+                    if (match_start + match_length) > len(fulltext):
+                        continue
+                    current_match = regex.match(fulltext, match_start)
+                    if current_match is None:
+                        continue
+                    if current_match.start() != match_start or current_match.end() != (match_start + match_length):
+                        continue
+
+                    context_text = fulltext[context_start:context_end]
+                    if context_text.strip() == "":
+                        continue
+
+                    hits.append(
+                        {
+                            "rank": position + 1,
+                            "position": position,
+                            "source_id": source_id,
+                            "source_name": source_name,
+                            "start": context_start,
+                            "length": len(context_text),
+                            "match_start": match_start,
+                            "match_length": match_length,
+                            "text": context_text,
+                        }
+                    )
+                    if len(hits) >= page_size:
+                        break
+
+            if next_cursor > total_hits:
+                next_cursor = total_hits
+            truncated = next_cursor < total_hits
+
+            return {
+                "selection": {
+                    "pattern": pattern_text,
+                    "flags": flags_text,
+                    "cursor": cursor,
+                    "page_size": page_size,
+                    "context_chars": context_chars,
+                    "file_ids": file_ids,
+                    "total_hits": total_hits,
+                    "returned_hits": len(hits),
+                    "next_cursor": next_cursor,
+                    "truncated": truncated,
+                },
+                "hits": hits,
+            }
+        finally:
+            conn.close()
+
+    def _chat_history_db_path(self) -> str:
+        project_path = getattr(self.app, "project_path", "")
+        if project_path is None or project_path == "":
+            raise RuntimeError("No project open.")
+        ai_data_dir = os.path.join(project_path, "ai_data")
+        if not os.path.exists(ai_data_dir):
+            os.makedirs(ai_data_dir, exist_ok=True)
+        return os.path.join(ai_data_dir, "chat_history.sqlite")
+
+    def _connect_chat_history(self) -> sqlite3.Connection:
+        return sqlite3.connect(self._chat_history_db_path(), timeout=30)
+
+    def _ensure_vector_search_cache_tables(self, conn: sqlite3.Connection) -> None:
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS mcp_vector_search_cache ("
+            "id INTEGER PRIMARY KEY, "
+            "cache_key TEXT NOT NULL, "
+            "vectorstore_sig TEXT NOT NULL, "
+            "query_json TEXT NOT NULL, "
+            "file_ids_json TEXT NOT NULL, "
+            "score_threshold REAL NOT NULL, "
+            "k_per_query INTEGER NOT NULL, "
+            "total_hits INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL, "
+            "last_used_at TEXT NOT NULL)"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_vector_search_cache_key "
+            "ON mcp_vector_search_cache(cache_key, vectorstore_sig)"
+        )
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS mcp_vector_search_hits ("
+            "id INTEGER PRIMARY KEY, "
+            "cache_id INTEGER NOT NULL, "
+            "position INTEGER NOT NULL, "
+            "docstore_id TEXT, "
+            "source_id INTEGER, "
+            "start_index INTEGER, "
+            "text_length INTEGER, "
+            "score REAL, "
+            "FOREIGN KEY (cache_id) REFERENCES mcp_vector_search_cache(id))"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_vector_search_hits_cache_pos "
+            "ON mcp_vector_search_hits(cache_id, position)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mcp_vector_search_cache_key_lookup "
+            "ON mcp_vector_search_cache(cache_key)"
+        )
+
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS mcp_regex_search_cache ("
+            "id INTEGER PRIMARY KEY, "
+            "cache_key TEXT NOT NULL, "
+            "pattern TEXT NOT NULL, "
+            "flags TEXT NOT NULL, "
+            "file_ids_json TEXT NOT NULL, "
+            "context_chars INTEGER NOT NULL, "
+            "total_hits INTEGER NOT NULL DEFAULT 0, "
+            "created_at TEXT NOT NULL, "
+            "last_used_at TEXT NOT NULL)"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_regex_search_cache_key "
+            "ON mcp_regex_search_cache(cache_key)"
+        )
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS mcp_regex_search_hits ("
+            "id INTEGER PRIMARY KEY, "
+            "cache_id INTEGER NOT NULL, "
+            "position INTEGER NOT NULL, "
+            "source_id INTEGER NOT NULL, "
+            "context_start INTEGER NOT NULL, "
+            "context_length INTEGER NOT NULL, "
+            "match_start INTEGER NOT NULL, "
+            "match_length INTEGER NOT NULL, "
+            "FOREIGN KEY (cache_id) REFERENCES mcp_regex_search_cache(id))"
+        )
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_regex_search_hits_cache_pos "
+            "ON mcp_regex_search_hits(cache_id, position)"
+        )
+        conn.commit()
+
+    def _get_vector_search_cache(self, conn: sqlite3.Connection, cache_key: str) -> Optional[Tuple[int, int]]:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, total_hits FROM mcp_vector_search_cache "
+            "WHERE cache_key=? ORDER BY id DESC LIMIT 1",
+            (cache_key,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cache_id = self._to_int(row[0], -1)
+        total_hits = max(0, self._to_int(row[1], 0))
+        if cache_id <= 0:
+            return None
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        cur.execute(
+            "UPDATE mcp_vector_search_cache SET last_used_at=? WHERE id=?",
+            (now, cache_id),
+        )
+        conn.commit()
+        return cache_id, total_hits
+
+    def _build_vector_search_cache(self, conn: sqlite3.Connection, cache_key: str,
+                                   vectorstore_sig: str, queries: List[str], file_ids: List[int],
+                                   score_threshold: float, k_per_query: int) -> Tuple[int, int]:
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            raise RuntimeError("AI integration is not initialized.")
+        doc_filter = file_ids if len(file_ids) > 0 else None
+        chunks = ai._retrieve_from_vectorstore(
+            queries,
+            doc_ids=doc_filter,
+            score_threshold=score_threshold,
+            k=k_per_query,
+        )
+        if not isinstance(chunks, list):
+            chunks = []
+        total_hits = len(chunks)
+        now = datetime.utcnow().isoformat(timespec="seconds")
+
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO mcp_vector_search_cache "
+                "(cache_key, vectorstore_sig, query_json, file_ids_json, score_threshold, "
+                "k_per_query, total_hits, created_at, last_used_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cache_key,
+                    vectorstore_sig,
+                    json.dumps(queries, ensure_ascii=False),
+                    json.dumps(file_ids),
+                    float(score_threshold),
+                    int(k_per_query),
+                    int(total_hits),
+                    now,
+                    now,
+                ),
+            )
+            cache_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            # If another writer inserted the same key first, reuse it.
+            conn.rollback()
+            existing = self._get_vector_search_cache(conn, cache_key)
+            if existing is None:
+                raise
+            return existing
+
+        rows_to_insert: List[Tuple[Any, ...]] = []
+        for pos, chunk_doc in enumerate(chunks):
+            docstore_id = getattr(chunk_doc, "id", None)
+            if docstore_id is None:
+                docstore_id = ""
+            else:
+                docstore_id = str(docstore_id)
+
+            metadata = getattr(chunk_doc, "metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            source_id = self._to_int(metadata.get("id"), -1)
+            if source_id <= 0:
+                source_id = None
+            start_index = self._to_int(metadata.get("start_index"), -1)
+            if start_index < 0:
+                start_index = None
+            page_content = str(getattr(chunk_doc, "page_content", ""))
+            text_length = len(page_content)
+            score = self._to_float(metadata.get("score", 0.0), 0.0)
+
+            rows_to_insert.append(
+                (
+                    cache_id,
+                    pos,
+                    docstore_id,
+                    source_id,
+                    start_index,
+                    text_length,
+                    score,
+                )
+            )
+        if len(rows_to_insert) > 0:
+            cur.executemany(
+                "INSERT INTO mcp_vector_search_hits "
+                "(cache_id, position, docstore_id, source_id, start_index, text_length, score) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows_to_insert,
+            )
+        conn.commit()
+        return cache_id, total_hits
+
+    def _get_regex_search_cache(self, conn: sqlite3.Connection, cache_key: str) -> Optional[Tuple[int, int]]:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, total_hits FROM mcp_regex_search_cache WHERE cache_key=? LIMIT 1",
+            (cache_key,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cache_id = self._to_int(row[0], -1)
+        total_hits = max(0, self._to_int(row[1], 0))
+        if cache_id <= 0:
+            return None
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        cur.execute(
+            "UPDATE mcp_regex_search_cache SET last_used_at=? WHERE id=?",
+            (now, cache_id),
+        )
+        conn.commit()
+        return cache_id, total_hits
+
+    def _build_regex_search_cache(self, conn: sqlite3.Connection, cache_key: str, pattern_text: str,
+                                  flags_text: str, file_ids: List[int], context_chars: int) -> Tuple[int, int]:
+        re_flags = self._regex_flags_to_re_flags(flags_text)
+        try:
+            regex = re.compile(pattern_text, re_flags)
+        except re.error as err:
+            raise ValueError(f"Invalid regex pattern: {err}")
+
+        where_sql = " WHERE fulltext is not null"
+        params: List[Any] = []
+        norm_file_ids: List[int] = []
+        for fid in file_ids:
+            try:
+                fid_i = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid_i > 0:
+                norm_file_ids.append(fid_i)
+        norm_file_ids = sorted(set(norm_file_ids))
+        if len(norm_file_ids) > 0:
+            placeholders = ",".join(["?"] * len(norm_file_ids))
+            where_sql += f" AND id IN ({placeholders})"
+            params.extend(norm_file_ids)
+
+        rows = self._fetchall(
+            "SELECT id, ifnull(name,''), ifnull(fulltext,'') FROM source"
+            + where_sql
+            + " ORDER BY lower(name)",
+            tuple(params),
+        )
+
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                "INSERT INTO mcp_regex_search_cache "
+                "(cache_key, pattern, flags, file_ids_json, context_chars, total_hits, created_at, last_used_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cache_key,
+                    pattern_text,
+                    flags_text,
+                    json.dumps(norm_file_ids),
+                    int(context_chars),
+                    0,
+                    now,
+                    now,
+                ),
+            )
+            cache_id = int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            existing = self._get_regex_search_cache(conn, cache_key)
+            if existing is None:
+                raise
+            return existing
+
+        insert_rows: List[Tuple[Any, ...]] = []
+        pos = 0
+        for row in rows:
+            source_id = self._to_int(row[0], -1)
+            fulltext = "" if row[2] is None else str(row[2])
+            if source_id <= 0 or fulltext == "":
+                continue
+            for match in regex.finditer(fulltext):
+                match_start = int(match.start())
+                match_end = int(match.end())
+                if match_end <= match_start:
+                    continue
+                context_start = max(0, match_start - context_chars)
+                context_end = min(len(fulltext), match_end + context_chars)
+                context_length = max(0, context_end - context_start)
+                if context_length <= 0:
+                    continue
+                insert_rows.append(
+                    (
+                        cache_id,
+                        pos,
+                        source_id,
+                        context_start,
+                        context_length,
+                        match_start,
+                        match_end - match_start,
+                    )
+                )
+                pos += 1
+                if pos >= self.max_regex_hits:
+                    break
+            if pos >= self.max_regex_hits:
+                break
+
+        if len(insert_rows) > 0:
+            cur.executemany(
+                "INSERT INTO mcp_regex_search_hits "
+                "(cache_id, position, source_id, context_start, context_length, match_start, match_length) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                insert_rows,
+            )
+        cur.execute(
+            "UPDATE mcp_regex_search_cache SET total_hits=? WHERE id=?",
+            (pos, cache_id),
+        )
+        conn.commit()
+        return cache_id, pos
+
+    def _vector_search_cache_key(self, queries: List[str], file_ids: List[int],
+                                 score_threshold: float, k_per_query: int) -> str:
+        norm_file_ids: List[int] = []
+        for fid in file_ids:
+            try:
+                fid_i = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid_i > 0:
+                norm_file_ids.append(fid_i)
+        payload = {
+            "queries": queries,
+            "file_ids": sorted(set(norm_file_ids)),
+            "score_threshold": round(float(score_threshold), 4),
+            "k_per_query": int(k_per_query),
+        }
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _regex_search_cache_key(self, pattern_text: str, flags_text: str, file_ids: List[int],
+                                context_chars: int) -> str:
+        norm_file_ids: List[int] = []
+        for fid in file_ids:
+            try:
+                fid_i = int(fid)
+            except (TypeError, ValueError):
+                continue
+            if fid_i > 0:
+                norm_file_ids.append(fid_i)
+        payload = {
+            "pattern": pattern_text,
+            "flags": flags_text,
+            "file_ids": sorted(set(norm_file_ids)),
+            "context_chars": int(context_chars),
+        }
+        canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _regex_flags_to_re_flags(self, flags_text: str) -> int:
+        flags = 0
+        text = str(flags_text).lower()
+        if "i" in text:
+            flags |= re.IGNORECASE
+        if "m" in text:
+            flags |= re.MULTILINE
+        if "s" in text:
+            flags |= re.DOTALL
+        if "x" in text:
+            flags |= re.VERBOSE
+        return flags
+
+    def _vectorstore_signature(self) -> str:
+        ai = getattr(self.app, "ai", None)
+        vectorstore = getattr(ai, "sources_vectorstore", None) if ai is not None else None
+        faiss_path = getattr(vectorstore, "faiss_db_path", None) if vectorstore is not None else None
+        if faiss_path is None or str(faiss_path).strip() == "":
+            project_path = getattr(self.app, "project_path", "")
+            if project_path is None or project_path == "":
+                return "missing"
+            faiss_path = os.path.join(project_path, "ai_data", "vectorstore", "faiss_store.bin")
+        if not os.path.exists(faiss_path):
+            return "missing"
+        try:
+            stat = os.stat(faiss_path)
+            return f"{int(stat.st_mtime)}:{int(stat.st_size)}"
+        except OSError:
+            return "unknown"
+
+    def _fetch_cached_documents_by_docstore_id(self, docstore_ids: List[str]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        ai = getattr(self.app, "ai", None)
+        vectorstore = getattr(ai, "sources_vectorstore", None) if ai is not None else None
+        faiss_db = getattr(vectorstore, "faiss_db", None) if vectorstore is not None else None
+        docstore = getattr(faiss_db, "docstore", None) if faiss_db is not None else None
+        if docstore is None:
+            return result
+
+        for docstore_id in docstore_ids:
+            key = str(docstore_id).strip()
+            if key == "" or key in result:
+                continue
+            try:
+                doc = docstore.search(key)
+            except Exception:
+                doc = None
+            if doc is None:
+                continue
+            if not hasattr(doc, "page_content"):
+                continue
+            result[key] = doc
+        return result
+
+    def _fetch_sources_texts(self, source_ids: List[int]) -> Dict[int, Tuple[str, str]]:
+        normalized_ids: List[int] = []
+        for source_id in source_ids:
+            try:
+                source_id_i = int(source_id)
+            except (TypeError, ValueError):
+                continue
+            if source_id_i > 0:
+                normalized_ids.append(source_id_i)
+        normalized_ids = sorted(set(normalized_ids))
+        if len(normalized_ids) == 0:
+            return {}
+        placeholders = ",".join(["?"] * len(normalized_ids))
+        rows = self._fetchall(
+            "SELECT id, ifnull(name,''), ifnull(fulltext,'') FROM source "
+            f"WHERE id IN ({placeholders})",
+            tuple(normalized_ids),
+        )
+        result: Dict[int, Tuple[str, str]] = {}
+        for row in rows:
+            source_id = self._to_int(row[0], -1)
+            if source_id <= 0:
+                continue
+            source_name = "" if row[1] is None else str(row[1])
+            fulltext = "" if row[2] is None else str(row[2])
+            result[source_id] = (source_name, fulltext)
+        return result
+
     def _read_code_segments(self, cid: int, options: Dict[str, Any]) -> Dict[str, Any]:
         code_name = self._fetch_code_name(cid)
         if code_name is None:
@@ -772,6 +1671,16 @@ class AiMcpServer:
         except (TypeError, ValueError):
             return default
 
+    def _to_float(self, value: Any, default: float) -> float:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     def _project_db_path(self) -> str:
         project_path = getattr(self.app, "project_path", "")
         if project_path is None or project_path == "":
@@ -801,4 +1710,3 @@ class AiMcpServer:
             return cur.fetchone()
         finally:
             conn.close()
-

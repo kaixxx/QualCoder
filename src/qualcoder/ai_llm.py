@@ -1127,12 +1127,25 @@ class AiLLM():
             return []
         return self._retrieve_from_vectorstore(descriptions, doc_ids, progress_callback, signals)
     
-    def _retrieve_from_vectorstore(self, descriptions, doc_ids=None, progress_callback=None, signals=None) -> list:  
-        # Use the list of code descriptions to retrieve related data from the vectorstore
-        search_kwargs = {'score_threshold': 0.5, 'k': 50}       
+    def _retrieve_from_vectorstore(self, search_strings, doc_ids=None, progress_callback=None, signals=None,
+                                   score_threshold=0.5, k=50) -> list:
+        # Use the list of search_strings to retrieve related data from the vectorstore
+        try:
+            threshold = float(score_threshold)
+        except (TypeError, ValueError):
+            threshold = 0.5
+        threshold = max(0.0, min(threshold, 1.0))
+
+        try:
+            top_k = int(k)
+        except (TypeError, ValueError):
+            top_k = 50
+        top_k = max(1, min(top_k, 500))
+
+        search_kwargs = {'score_threshold': threshold, 'k': top_k}
         chunks_meta_list = []
-        for desc in descriptions:
-            res = self.sources_vectorstore.faiss_db.similarity_search_with_relevance_scores(desc, **search_kwargs)
+        for _str in search_strings:
+            res = self.sources_vectorstore.faiss_db.similarity_search_with_relevance_scores(_str, **search_kwargs)
             if doc_ids is not None and len(doc_ids) > 0:
                 # filter results by document ids
                 res_filtered = []

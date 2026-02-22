@@ -1897,6 +1897,58 @@ data collected. This information will accompany every prompt sent to the AI, res
                         "text": excerpt,
                     }
                 )
+                continue
+
+            if uri == "qualcoder://vector/search":
+                hits = payload.get("hits", [])
+                if not isinstance(hits, list):
+                    continue
+                for hit in hits:
+                    if not isinstance(hit, dict):
+                        continue
+                    source_id = self._safe_int(hit.get("source_id", None), -1)
+                    start = self._safe_int(hit.get("start", None), -1)
+                    excerpt = str(hit.get("text", ""))
+                    if source_id <= 0 or start < 0 or excerpt.strip() == "":
+                        continue
+                    source_name = str(hit.get("source_name", "")).strip()
+                    if source_name == "":
+                        source_name = self.get_filename(source_id)
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "source_name": source_name,
+                            "start": start,
+                            "length": len(excerpt),
+                            "text": excerpt,
+                        }
+                    )
+                continue
+
+            if uri == "qualcoder://search/regex":
+                hits = payload.get("hits", [])
+                if not isinstance(hits, list):
+                    continue
+                for hit in hits:
+                    if not isinstance(hit, dict):
+                        continue
+                    source_id = self._safe_int(hit.get("source_id", None), -1)
+                    start = self._safe_int(hit.get("start", None), -1)
+                    excerpt = str(hit.get("text", ""))
+                    if source_id <= 0 or start < 0 or excerpt.strip() == "":
+                        continue
+                    source_name = str(hit.get("source_name", "")).strip()
+                    if source_name == "":
+                        source_name = self.get_filename(source_id)
+                    candidates.append(
+                        {
+                            "source_id": source_id,
+                            "source_name": source_name,
+                            "start": start,
+                            "length": len(excerpt),
+                            "text": excerpt,
+                        }
+                    )
         return candidates
 
     def _collect_ref_candidates(self, chat_idx: Optional[int]) -> List[Dict[str, Any]]:
