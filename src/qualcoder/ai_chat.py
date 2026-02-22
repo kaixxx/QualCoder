@@ -756,10 +756,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             f'"{prompt.text}"\n\n'
             f'Always answer in the following language: "{self.app.ai.get_curr_language()}".\n'
             f'Be sure to include references to the original data, using this format '
-            'definition: `[REF: "{The text from the original data that you want to reference. '
+            'definition: `{REF: "The text from the original data that you want to reference. '
             'I have to match this against the original, so it is very important that you don\'t '
             'change the quoted text in any way. Do not translate or correct errors. Create a '
-            'new reference for every single quote.}"]`. \n'
+            'new reference for every single quote."}`. \n'
             'These references are invisible text. If you want a direct quote to be '
             'visible to the user, include it in the normal text and add an additional reference '
             'in the above format.\n'
@@ -990,7 +990,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             # we are not in text analysis chat
             return text
                 
-        pattern = r'\[REF: ([\"\'“”„‘’«»])(.+?)([\"\'“”„‘’«»])\]'
+        pattern = r'\{REF: ([\"\'“”„‘’«»])(.+?)([\"\'“”„‘’«»])\}'
         fulltext = self.app.get_text_fulltext(self.ai_text_doc_id)    
         
         # Replacement function
@@ -1021,7 +1021,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         
         # If streaming, delete incomplete references at the end
         if streaming:
-            incomplete = re.search(r'\[REF:[^\]]*$', res)
+            incomplete = re.search(r'\{REF:[^\}]*$', res)
             if incomplete:
                 res = res[:incomplete.start()].rstrip()
         
@@ -1036,16 +1036,16 @@ data collected. This information will accompany every prompt sent to the AI, res
         if self.ai_text_doc_id is not None:
             return self._replace_text_references(res, streaming=streaming)
 
-        # General/MCP chat: convert [REF: "..."] by matching quotes against retrieved evidence.
+        # General/MCP chat: convert {REF: "..."} by matching quotes against retrieved evidence.
         if streaming:
-            res = re.sub(r'\[REF:[^\]]*\]', _('(source reference)'), res)
-            incomplete_ref = re.search(r'\[REF:[^\]]*$', res)
+            res = re.sub(r'\{REF:[^\}]*\}', _('(source reference)'), res)
+            incomplete_ref = re.search(r'\{REF:[^\}]*$', res)
             if incomplete_ref:
                 res = res[:incomplete_ref.start()].rstrip()
             return res
 
         candidates = self._collect_ref_candidates(chat_idx)
-        ref_pattern = r'\[REF:\s*(.+?)\s*\]'
+        ref_pattern = r'\{REF:\s*(.+?)\s*\}'
 
         def replace_ref(match):
             raw = str(match.group(1)).strip()
@@ -1515,7 +1515,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "Do not output JSON. Do not call MCP. "
             "If information is missing, state that briefly and avoid making up details. "
             "When you refer to empirical text evidence, add citations in this exact form: "
-            "[REF: \"exact quote from the retrieved evidence\"]. "
+            "{REF: \"exact quote from the retrieved evidence\"}. "
             "The quote inside REF must be copied exactly from retrieved evidence (no paraphrasing, no corrections, no translation). "
             #"Do not generate HTML links yourself."
         )
@@ -2339,7 +2339,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 "Now provide the final answer to the user in normal prose. "
                 "Do not call MCP anymore. "
                 "The final answer must follow the current conversation language. "
-                "When referring to empirical text evidence, cite it as [REF: \"exact quote\"]."
+                "When referring to empirical text evidence, cite it as {REF: \"exact quote\"}."
             )
             if final_hint != '':
                 final_prompt += '\nHere is a draft idea from your internal planning:\n' + final_hint
@@ -2515,9 +2515,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                         else:
                             curr_text += char
                             # Check for the start of a reference
-                            if curr_text.endswith('[REF:'):
+                            if curr_text.endswith('{REF:'):
                                 self.ai_stream_in_ref = True
-                                self.ai_stream_buffer = '[REF:'
+                                self.ai_stream_buffer = '{REF:'
                                 curr_text = curr_text[:-(len(self.buffer))]
                     self.ai_streaming_output = curr_text
                     if not self.is_updating_chat_window:
@@ -2541,7 +2541,7 @@ data collected. This information will accompany every prompt sent to the AI, res
     
     def ai_stream_process_reference(self, reference):
         '''Replace a reference to the empirical data woth a clicable link'''
-        return " [REFERENCE] "
+        return " {REFERENCE} "
 
     
     def ai_message_callback(self, ai_result):
