@@ -1119,14 +1119,16 @@ class AiLLM():
         self.ai_async_query(self._retrieve_similar_data, result_callback, code_name, code_memo, doc_ids)
 
     def _retrieve_similar_data(self, code_name, code_memo='', doc_ids=None, progress_callback=None, signals=None) -> list:
-        # 1) Get a list of code descriptions from the llm
+        # Get a list of code descriptions from the llm
         if progress_callback is not None:
             progress_callback.emit(_('Stage 1:\nSearching data related to "') + code_name + '"') 
         descriptions = self.generate_code_descriptions(code_name, code_memo)
         if self.ai_async_is_canceled:
             return []
-        
-        # 2) Use the list of code descriptions to retrieve related data from the vectorstore
+        return self._retrieve_from_vectorstore(descriptions, doc_ids, progress_callback, signals)
+    
+    def _retrieve_from_vectorstore(self, descriptions, doc_ids=None, progress_callback=None, signals=None) -> list:  
+        # Use the list of code descriptions to retrieve related data from the vectorstore
         search_kwargs = {'score_threshold': 0.5, 'k': 50}       
         chunks_meta_list = []
         for desc in descriptions:
@@ -1141,10 +1143,10 @@ class AiLLM():
             else: 
                 chunks_meta_list.append(res)
 
-        # 3) Consolidate and rank results:
+        # Consolidate and rank results:
         # Flatten the lists of chunks in chunks_lists and collect all the chunks in a master list.
         # Duplicate chunks are collected only once. The list is sorted by the frequency 
-        # of a chunk counted over all lists + the similarity score that chromadb returns.
+        # of a chunk counted over all lists + the similarity score that faiss returns.
         # This way, frequent and relevant chunks should be sorted to the top
         # (see: "Reciprocal Rank Fusion" (https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf))
 
