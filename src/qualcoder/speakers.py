@@ -78,6 +78,8 @@ class DialogSpeakers(QtWidgets.QDialog):
         self.collect_names()
         self.fill_table()
         self.ui.tableWidget.itemChanged.connect(self.on_item_changed)
+        self.ui.tableWidget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.tableWidget.customContextMenuRequested.connect(self.table_menu)
         self.ui.buttonBox.accepted.connect(self.ok)
         # self.ui.buttonBox.rejected.connect(self.cancel) 
         self.ui.buttonBox.helpRequested.connect(self.help)
@@ -99,6 +101,8 @@ class DialogSpeakers(QtWidgets.QDialog):
             re.compile(r"^\s*\[([^\]\r\n]{1," + str(max_name_len) + r"})\]\s*", flags=re.UNICODE),
             re.compile(r"^\s*\{([^}\r\n]{1," + str(max_name_len) + r"})\}\s*", flags=re.UNICODE),
         ]
+        # block http/https markers in the "name:" format to avoid false positives (e.g. "https://example.com" should not be treated as a speaker turn)
+        http_scheme_tail_re = re.compile(r"(?:^|\s)https?$", flags=re.IGNORECASE)
 
         # State for the currently open speaker turn
         current_name: Optional[str] = None
@@ -163,13 +167,25 @@ class DialogSpeakers(QtWidgets.QDialog):
 
             # Check whether this non-empty line starts a new speaker turn
             m = None
-            for regex in speaker_res:
+            matched_index = None
+            for index, regex in enumerate(speaker_res):
                 m = regex.match(line_wo_eol)
                 if m:
+                    matched_index = index
                     break
             if m:
                 code_as = m.group(1).strip()
-                if code_as:
+                is_colon_format = (matched_index == 0) # only the "name:" format is subject to blocking http(s)://
+                if (
+                    code_as
+                    and not (
+                        is_colon_format
+                        and (
+                            http_scheme_tail_re.search(code_as) is not None
+                            and line_wo_eol[m.end():].lstrip().startswith("//")
+                        )
+                    )
+                ):
                     # Close the previous turn (if any) before starting a new one
                     finalize_current_turn()
 
@@ -264,6 +280,33 @@ class DialogSpeakers(QtWidgets.QDialog):
             sel_state = self.ui.tableWidget.item(item.row(), 0).checkState() == QtCore.Qt.CheckState.Checked
             self.speaker_summary[item.row()]['selected'] = (sel_state)
         QtCore.QTimer.singleShot(0, lambda: self.fill_table())
+
+    def table_menu(self, position):
+        """ Context menu for quick visibility toggles. """
+
+        menu = QtWidgets.QMenu()
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
+        action_select_all = menu.addAction(_("Select all"))
+        action_deselect_all = menu.addAction(_("Deselect all"))
+        action = menu.exec(self.ui.tableWidget.viewport().mapToGlobal(position))
+        if action == action_select_all:
+            self.select_all()
+        if action == action_deselect_all:
+            self.deselect_all()
+
+    def select_all(self):
+        """ Select all speakers. """
+
+        for speaker in self.speaker_summary:
+            speaker['selected'] = True
+        self.fill_table()
+
+    def deselect_all(self):
+        """ Deselect all speakers. """
+
+        for speaker in self.speaker_summary:
+            speaker['selected'] = False
+        self.fill_table()
 
     def ok(self):
         cur = self.app.conn.cursor()

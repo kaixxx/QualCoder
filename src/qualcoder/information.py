@@ -40,11 +40,7 @@ class DialogInformation(QtWidgets.QDialog):
          view_graph_original.ViewGraphOriginal.circular_graph.TextGraphicsItem
     """
 
-    title = ""
-    text = ""
-    information = ""
-
-    def __init__(self, app_, title, html=""):
+    def __init__(self, app, title, html=""):
         """Display information text in dialog.
         If no html is given, fill with About html. """
 
@@ -52,11 +48,16 @@ class DialogInformation(QtWidgets.QDialog):
         self.ui = Ui_Dialog_information()
         self.ui.setupUi(self)
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
-        font = f'font: {app_.settings["fontsize"]}pt "{app_.settings["font"]}";'
+        font = f'font: {app.settings["fontsize"]}pt "{app.settings["font"]}";'
         self.setStyleSheet(font)
+        self.text = ""
+        self.information = ""
         self.setWindowTitle(title)
         if html == "":
-            self.setHtml(about.replace("QualCoderVersion", app_.version))
+            qualcoder_tag = app.version.split("QualCoder ")[1]
+            about_modifed = about.replace("QualCoderVersion", app.version)
+            about_modifed = about_modifed.replace("QualCoderTag", qualcoder_tag)
+            self.setHtml(about_modifed)
         else:
             self.setHtml(html)
 
@@ -83,24 +84,21 @@ Optional: Install ffmpeg for waveform images.</p>\
 <h2 class="western">Acknowledgements</h2>\
 <p>Ronggui Huang and Zhang Gehao for creating RQDA, which inspired this software.<br /> \
 Mike MacCana for the source code for the docx module.<br /> \
-User: bit4 on stackoverflow who presented the source code to convert html to text.<br /> \
-ebooklib: Aleksandar Erkalović https://github.com/aerkalov.<br /> \
-The VideoLAN team for the bindings to VLC.<br /> \
 Julius Reich for creating the QualCoder logo.<br /> \
-Kai Dröge for developing and testing the code to incorporate artificial intelligence models for AI, and more.<br /> \
-Justin Missaghieh--Poncet for French translations and setting up the new manual <a href="https://qualcoder-org.github.io" target="_blank">https://qualcoder-org.github.io</a><br /> \
-Lorenzo Salomón for Spanish translations.<br /> \
-Jofen Kihlstrom for Swedish translations.<br /> \
-To various members on github for supporting this project.</p>\
+Kai Dröge for developing and testing the code to incorporate artificial intelligence models for AI, and much more.<br /> \
+Justin Missaghieh-Poncet for French translations, some code development and for setting up the new manual.<br />\
+<a href="https://qualcoder-org.github.io" target="_blank">https://qualcoder-org.github.io</a><br /> \
+Lorenzo Salomón for Spanish translations and for some code development.<br /> \
+Jofen Kihlstrom for past Swedish translations.<br /> \
+To the many members on Github for supporting this project.</p>\
+<h2>Citation</h2>\
+<p>Curtain, C. Dröge, K. (2026) QualCoderVersion [Computer software]. \
+Retrieved from https://github.com/ccbogel/QualCoder/releases/tag/QualCoderTag</p>\
 <h2 class="western">Other details</h2> \
 <p>The qda data folder contains folders for imported documents, \
 images, audio and video. It also contains the sqlite database, named data.qda, which stores the coding data.</p>\
 <p>QualCoder is written in python3 using Qt6 for the graphical interface.</p>\
-<p>The REFI-QDA Project import and export seem to work ok, but are not guaranteed to work.</p>\
 <p>Created by Colin Curtain BPharm GradDipComp PhD, programmer, Lecturer University of Tasmania.</p>\
-<h2>Citation</h2>\
-Curtain, C. Dröge, K. (2026) QualCoderVersion [Computer software]. \
-Retrieved from https://github.com/ccbogel/QualCoder/releases/tag/3.8\
 <h2 class="western">Licenses</h2>\
 <h3>LGPL-3.0 License</h3>\
 <p>This file is part of QualCoder.</p>\

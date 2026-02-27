@@ -35,6 +35,7 @@ import shutil
 import sys
 import sqlite3
 import urllib.request
+import urllib.error as urllib_err
 import webbrowser
 from copy import copy
 import time
@@ -79,6 +80,7 @@ from qualcoder.ai_chat import DialogAIChat
 from qualcoder.rqda import RqdaImport
 from qualcoder.settings import DialogSettings
 from qualcoder.special_functions import DialogSpecialFunctions
+from qualcoder.taguette_import import TaguetteImport
 # from qualcoder.text_mining import DialogTextMining
 from qualcoder.view_av import DialogCodeAV
 from qualcoder.view_charts import ViewCharts
@@ -95,17 +97,17 @@ try:
 except Exception as e:
     print(e)
 
-qualcoder_version = "QualCoder 3.9"
+qualcoder_version = "QualCoder 4.0 in development"
 path = os.path.abspath(os.path.dirname(__file__))
 home = os.path.expanduser('~')
 if not os.path.exists(home + '/.qualcoder'):
     try:
         os.mkdir(home + '/.qualcoder')
     except Exception as e:
-        print("Cannot add .qualcoder folder to home directory\n" + str(e))
+        print(f"Cannot add .qualcoder folder to home folder\n{e}")
         raise
 logfile = home + '/.qualcoder/QualCoder.log'
-log_maxBytes = 500000 # 500 KB: max length of the logfile before old entries are discarded
+log_maxBytes = 500000  # 500 KB: max length of the logfile before old entries are discarded
 # Hack for Windows 10 PermissionError that stops the rotating file handler, will produce massive files.
 try:
     log_file = open(logfile, "r")
@@ -114,7 +116,7 @@ try:
     if len(data) > log_maxBytes:
         os.remove(logfile)
         log_file = open(logfile, "w")
-        log_file.write(data[len(data) - (log_maxBytes // 2):]) # frees up half of log_maxBytes
+        log_file.write(data[len(data) - (log_maxBytes // 2):])  # frees up half of log_maxBytes
         log_file.close()
 except Exception as e:
     print(e)
@@ -137,7 +139,7 @@ class ProjectLockHeartbeatWorker(QtCore.QObject):
     to the lock file to signify that the project is still in use and the host process did not crash.    
     """
     finished = QtCore.pyqtSignal()  # Signal for indicating completion
-    io_error = QtCore.pyqtSignal()  # Singal indicating an error acessing the lock file to write the heartbeat  
+    io_error = QtCore.pyqtSignal()  # Signal indicating an error acessing the lock file to write the heartbeat
 
     def __init__(self, app, lock_file_path):
         super().__init__()
@@ -395,13 +397,13 @@ class App(object):
             ids: list of Integer ids for a restricted list of files.
 
         Returns:
-            List of dictionaries of id, name memo, mediapath, date
+            List of dictionaries of id, name memo, mediapath, date, risid
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,''), mediapath, date from source where (mediapath is Null or mediapath " \
-              "like '/docs/%' or mediapath like 'docs:%') "
+        sql = "select id, name, ifnull(memo,''), mediapath, date, risid from source where \
+        (mediapath is Null or mediapath like '/docs/%' or mediapath like 'docs:%') "
         if ids:
             ids_str = ",".join(map(str, ids))
             sql += f" and id in ({ids_str}) "
@@ -410,7 +412,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath', 'date'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date', 'risid'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -473,12 +475,13 @@ class App(object):
         Args:
             ids: list of Integer ids for a restricted list of files, or None.
         Returns:
-            List of dictionaries of id, name memo, mediapath, date
+            List of dictionaries of id, name memo, mediapath, date, risid
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,''), mediapath, date from source where mediapath is not Null and(mediapath " \
+        sql = "select id, name, ifnull(memo,''), mediapath, date, risid from source " \
+              "where mediapath is not Null and(mediapath " \
               "like '/docs/%' or mediapath like 'docs:%') and (mediapath like '%.pdf' or mediapath like '%.PDF')"
         if ids:
             ids_str = ",".join(map(str, ids))
@@ -488,7 +491,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath', 'date'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date', 'risid'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -498,12 +501,13 @@ class App(object):
         Args:
             ids: list of Integer ids for a restricted list of files, or None.
         Returns:
-            List of dictionaries of id, name, memo, mediapath, date
+            List of dictionaries of id, name, memo, mediapath, date, risid
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,''), mediapath, date from source where mediapath like '/images/%' or mediapath like 'images:%'"
+        sql = "select id, name, ifnull(memo,''), mediapath, date, risid from source where " \
+              "mediapath like '/images/%' or mediapath like 'images:%'"
         if ids:
             ids_str = ",".join(map(str, ids))
             sql += f" and id in ({ids_str})"
@@ -512,7 +516,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath', 'date'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date', 'risid'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -520,15 +524,15 @@ class App(object):
     def get_image_and_pdf_filenames(self, ids=None):
         """ Get filenames of image and pdf files.
         Args:
-            ids: list of Integer ids for a restricted list of files, or Nonew.
+            ids: list of Integer ids for a restricted list of files, or None.
         Returns:
-            List of dictionaries of id, name, memo, mediapath, date
+            List of dictionaries of id, name, memo, mediapath, date, risid
         """
 
         if ids is None:
             ids = []
 
-        sql = "select id, name, ifnull(memo,''),mediapath, date from source where "
+        sql = "select id, name, ifnull(memo,''),mediapath, date, risid from source where "
         sql += "(substr(mediapath,1,7) in ('/images', 'images:')) or "
         sql += "(lower(substr(mediapath, -4)) = '.pdf') "
 
@@ -540,7 +544,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath', 'date'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date', 'risid'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -550,13 +554,14 @@ class App(object):
         Args:
             ids: list of Integer ids for a restricted list of files.
         Returns:
-            List of dictionaries of id, name, memo, mediapath, date
+            List of dictionaries of id, name, memo, mediapath, date, risid
         """
 
         if ids is None:
             ids = []
-        sql = "select id, name, ifnull(memo,''), mediapath, date from source where "
-        sql += "(mediapath like '/audio/%' or mediapath like 'audio:%' or mediapath like '/video/%' or mediapath like 'video:%') "
+        sql = "select id, name, ifnull(memo,''), mediapath, date, risid from source where "
+        sql += "(mediapath like '/audio/%' or mediapath like 'audio:%' or " \
+               "mediapath like '/video/%' or mediapath like 'video:%') "
         if ids:
             ids_str = ",".join(map(str, ids))
             sql += f" and id in ({ids_str})"
@@ -565,7 +570,7 @@ class App(object):
         cur.execute(sql)
         result = cur.fetchall()
         res = []
-        keys = 'id', 'name', 'memo', 'mediapath', 'date'
+        keys = 'id', 'name', 'memo', 'mediapath', 'date', 'risid'
         for row in result:
             res.append(dict(zip(keys, row)))
         return res
@@ -609,23 +614,31 @@ class App(object):
             codes.append(dict(zip(keys, row)))
         return codes, categories
     
-    def check_bad_file_links(self):
+    def check_bad_file_links(self, id_=None):
         """ Check all linked files are present.
-         Called from MainWindow.open_project, view_av.
+        Will not state a bad link to an internally created text file.
+        Called from MainWindow.open_project, Manage_files, view_av.
+        Args:
+            id_ : Integer or none for a specific file
          Returns:
              dictionary of id,name, mediapath for bad links
          """
-
         cur = self.conn.cursor()
         sql = "select id, name, mediapath from source where \
-            substr(mediapath,1,6) = 'audio:' \
-            or substr(mediapath,1,5) = 'docs:' \
-            or substr(mediapath,1,7) = 'images:' \
-            or substr(mediapath,1,6) = 'video:' order by name"
-        cur.execute(sql)
+                substr(mediapath,1,6) = 'audio:' \
+                or substr(mediapath,1,5) = 'docs:' \
+                or substr(mediapath,1,7) = 'images:' \
+                or substr(mediapath,1,6) = 'video:' order by name"
+        if id_ is not None:
+            sql = "select id, name, mediapath from source where id=?"
+            cur.execute(sql, [id_])
+        else:
+            cur.execute(sql)
         result = cur.fetchall()
         bad_links = []
         for r in result:
+            if r[2] is None:  # Internally created text file
+                continue
             if r[2][0:5] == "docs:" and not os.path.exists(r[2][5:]):
                 bad_links.append({'name': r[1], 'mediapath': r[2], 'id': r[0]})
             if r[2][0:7] == "images:" and not os.path.exists(r[2][7:]):
@@ -1151,7 +1164,7 @@ class App(object):
         Args:
             jids - a list of journal jids or None
         Returns:
-            List of Dictironaries of journal data
+            List of Dictionaries of journal data
         """
 
         cur = self.conn.cursor()
@@ -1179,7 +1192,7 @@ class App(object):
             res = cur.fetchone()
             if res is not None and res[0] is not None:
                 return res[0]                   
-        except sqlite3.OperationalError: # db vers. 1-4 did not have codername in project table
+        except sqlite3.OperationalError:  # db vers. 1-4 did not have codername in project table
             return ""
         
     def update_coder_names(self):
@@ -1196,7 +1209,7 @@ class App(object):
         """
         if self.conn is None:
             return
-        system_coder_names = [speaker_coder_name] # in the future, we could add '🤖 AI' to the list, and more...
+        system_coder_names = [speaker_coder_name]  # in the future, we could add '🤖 AI' to the list, and more...
         
         cur = self.conn.cursor()
         initial_changes = self.conn.total_changes
@@ -1299,7 +1312,9 @@ class App(object):
             if self.conn.total_changes != initial_changes:
                 self.delete_backup = False
             self.conn.commit()
-        except:
+        except Exception as err:
+            logger.error(err)
+            print(err)
             self.conn.rollback()
             raise
     
@@ -1381,7 +1396,7 @@ class App(object):
         lang = self.settings['language']
         try:
             urllib.request.urlopen(f"https://qualcoder-org.github.io/doc/{lang}/{page_path}")
-        except urllib.error.HTTPError as err:
+        except urllib_err.HTTPError as err:
             logger.warning(f"App.help_wiki:\nhttps://qualcoder-org.github.io/doc/{lang}/{page_path}\n{err}")
             if err.code == 404:
                 lang = "en"
@@ -1473,10 +1488,10 @@ Click "Yes" to start now.')
                 self.app.ai.init_llm(self)      
             self.app.settings['ai_first_startup'] = 'False'
             self.app.write_config_ini(self.app.settings, self.app.ai_models)
-        except Exception as e:
-            type_e = type(e)
-            value = e
-            tb_obj = e.__traceback__
+        except Exception as err:
+            type_e = type(err)
+            value = err
+            tb_obj = err.__traceback__
             # log the exception and show error msg
             qt_exception_hook.exception_hook(type_e, value, tb_obj)
     
@@ -1501,6 +1516,7 @@ Click "Yes" to start now.')
         self.ui.actionREFI_Codebook_import.triggered.connect(self.refi_codebook_import)
         self.ui.actionREFI_QDA_Project_import.triggered.connect(self.refi_project_import)
         self.ui.actionRQDA_Project_import.triggered.connect(self.rqda_project_import)
+        self.ui.actionTaguette_import.triggered.connect(self.taguette_project_import)
         self.ui.actionExport_codebook.triggered.connect(self.codebook)
         self.ui.actionExport_codebook_with_memos.triggered.connect(self.codebook_with_memos)
         self.ui.actionExit.triggered.connect(self.close)
@@ -1665,6 +1681,7 @@ Click "Yes" to start now.')
         self.ui.actionREFI_Codebook_import.setEnabled(False)
         self.ui.actionREFI_QDA_Project_import.setEnabled(True)
         self.ui.actionRQDA_Project_import.setEnabled(True)
+        self.ui.actionTaguette_import.setEnabled(True)
         self.ui.actionExport_codebook.setEnabled(False)
         self.ui.actionImport_plain_text_codes_list.setEnabled(False)
         # Manage menu
@@ -1675,7 +1692,6 @@ Click "Yes" to start now.')
         self.ui.actionImport_survey_2.setEnabled(False)
         self.ui.actionManage_bad_links_to_files.setEnabled(False)
         self.ui.actionManage_references.setEnabled(False)
-        #self.ui.actionImport_twitter_data.setEnabled(False)
         # Coding menu
         self.ui.actionCodes.setEnabled(False)
         self.ui.actionCode_image.setEnabled(False)
@@ -1724,7 +1740,6 @@ Click "Yes" to start now.')
         self.ui.actionManage_attributes.setEnabled(True)
         self.ui.actionImport_survey_2.setEnabled(True)
         self.ui.actionManage_references.setEnabled(True)
-        #self.ui.actionImport_twitter_data.setEnabled(True)
         # Coding menu
         self.ui.actionCodes.setEnabled(True)
         self.ui.actionCode_image.setEnabled(True)
@@ -1794,7 +1809,7 @@ Click "Yes" to start now.')
         msg += _("Style") + f"; {self.app.settings['stylesheet']}"
         self.ui.textEdit.append(msg)
         if platform.system() == "Windows":
-            self.ui.textEdit.append("<p>" + _("Directory (folder) paths / represents backslash") + "</p>")
+            self.ui.textEdit.append("<p>" + _("Folder paths / represents backslash") + "</p>")
         self.ui.textEdit.append("<p>&nbsp;</p>")
         self.ui.textEdit.textCursor().movePosition(QtGui.QTextCursor.MoveOperation.End)
         self.ui.tabWidget.setCurrentWidget(self.ui.tab_action_log)
@@ -2200,6 +2215,21 @@ Click "Yes" to start now.')
             self.app.ai.init_llm(self, rebuild_vectorstore=True)
         self.project_summary_report()
 
+    def taguette_project_import(self):
+        """ Import a Taguette project into a new project space. """
+
+        self.close_project()
+        msg = _(
+            "Step 1: You will be asked for a new QualCoder project name.\nStep 2: You will be asked for the Taguette.sqlite3 file.")
+        Message(self.app, _('RQDA import steps'), msg).exec()
+        self.new_project()
+        # Check project created successfully
+        if self.app.project_name == "":
+            Message(self.app, _('Project creation'), _("Project not successfully created"), "critical").exec()
+            return
+        TaguetteImport(self.app, self.ui.textEdit)
+        self.project_summary_report()
+
     def rqda_project_import(self):
         """ Import an RQDA format project into a new project space. """
 
@@ -2385,7 +2415,7 @@ Click "Yes" to start now.')
         cur.execute("CREATE TABLE ris (risid integer, tag text, longtag text, value text);")
         cur.execute("CREATE TABLE manage_files_display (mfid integer primary key, name text, tblrows text, tblcolumns text, owner text);")
         cur.execute("CREATE TABLE files_filter (filterid integer primary key, name text, filter text, owner text);")
-        self.app.update_coder_names() # will create table coder_names, add current coder, create views, etc.
+        self.app.update_coder_names()  # Create table coder_names, add current coder, create views, etc.
         cur.execute("INSERT INTO project VALUES(?,?,?,?,?,?,?,?)",
                     ('v14', datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"), '', qualcoder_version, 0,
                      0, self.app.settings['codername'], ""))
@@ -2956,7 +2986,7 @@ Click "Yes" to start now.')
         try:
             cur.execute("select name from coder_names")
         except sqlite3.OperationalError:
-            self.app.update_coder_names() # will create table coder_names, add current coder, create views, etc.
+            self.app.update_coder_names()  # Create table coder_names, add current coder, create views, etc.
             cur.execute('update project set databaseversion="v14", about=?', [qualcoder_version])
             self.app.conn.commit()
             self.ui.textEdit.append(_("Updating database to version") + " v14")
@@ -3092,7 +3122,7 @@ Click "Yes" to start now.')
             msg += f"\nText Bookmark: {bookmark_filename[0]}"
             msg += f", position: {result[5]}\n"
         if platform.system() == "Windows":
-            msg += "\n" + _("Directory (folder) paths / represents \\")
+            msg += "\n" + _("Folder paths / represents \\")
         self.ui.textEdit.append(msg)
         bad_links = self.app.check_bad_file_links()
         if bad_links:
@@ -3288,11 +3318,13 @@ Click "Yes" to start now.')
             print(err)
             logger.warning(str(err))
 
+        tag = self.app.version.split("QualCoder ")[1]
+        citation = f"Citation:\nCurtain, C. Dröge, K. (2026) {self.app.version} [Computer software].\n"
+        citation += f"Retrieved from https://github.com/ccbogel/QualCoder/releases/tag/{tag}\n"
+        self.ui.textEdit.append(citation)
 
 def gui():
-    #print("Qt version: " + str(QtCore.qVersion()))
-    #if platform.system() == "Windows":
-    #    os.putenv('QT_QPA_PLATFORM', 'windows:darkmode=0')
+    # print("Qt version: " + str(QtCore.qVersion()))
     app = QtWidgets.QApplication(sys.argv)    
     qual_app = App()
     settings, ai_models = qual_app.load_settings()
@@ -3300,7 +3332,6 @@ def gui():
     # Check Noto Sans installed  - for general application
     install_noto_sans()
     QtGui.QFontDatabase.addApplicationFont(os.path.join(home, ".qualcoder", "NotoSans-Regular.ttf"))
-    # QtGui.QFontDatabase.addApplicationFont(os.path.join(home, ".qualcoder", "NotoSans-Bold.ttf"))
     stylesheet = qual_app.merge_settings_with_default_stylesheet(settings)
     app.setStyleSheet(stylesheet)
     if sys.platform != 'darwin':
@@ -3448,6 +3479,7 @@ def install_droid_sans_mono():
         decoded_data = base64.decodebytes(DroidSansMono)
         file_.write(decoded_data)
 
+
 def install_noto_sans():
     """ Install NotoSans ttf font for general application into .qualcoder folder """
 
@@ -3458,6 +3490,6 @@ def install_noto_sans():
 
 
 if __name__ == "__main__":
-     # Pyinstaller fix
+    # Pyinstaller fix
     multiprocessing.freeze_support()
     gui()

@@ -28,7 +28,7 @@ from PyQt6 import QtWidgets
 from PyQt6 import QtCore
 import qtawesome as qta
 
-from openai import OpenAI
+from openai import OpenAI, BadRequestError
 from .ai_prompts import PromptItem
 from langchain_openai import ChatOpenAI, AzureChatOpenAI
 from langchain_core.globals import set_llm_cache  # Unused
@@ -322,7 +322,10 @@ def update_ai_models(current_models: list, current_model_index: int) -> tuple[li
         msg = _('You are using the "Blablador" service on an old server that will soon be disabled. '
                 'Your configuration will be updated automatically. Please test if the AI access still works as expected. '
                 'You might need to change to a different AI model in the settings dialog under "Advanced AI Settings".')
-        QtWidgets.QMessageBox(parent=None, title=_('AI Setup'), text=msg).exec()
+        msg_box = QtWidgets.QMessageBox()
+        msg_box.setWindowTitle(_('AI Setup'))
+        msg_box.setText(msg)
+        msg_box.exec()
     for model in current_models:
         if model['api_base'] == 'https://helmholtz-blablador.fz-juelich.de:8000/v1':
             model['api_base'] = 'https://api.helmholtz-blablador.fz-juelich.de/v1/'
@@ -1020,6 +1023,19 @@ class AiLLM():
             lang = self.app.settings.get('ai_language', 'English')
         return lang
     
+    def _get_response_format_json_schema(self, schema_name: str, schema: dict):
+        """Build a valid OpenAI-compatible response_format payload for JSON Schema mode."""
+        if not schema_name or not isinstance(schema, dict) or len(schema) == 0:
+            return None
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "schema": schema,
+                "strict": True
+            }
+        }
+    
     def generate_code_descriptions(self, code_name, code_memo='') -> list:
         """Prompts the AI to create a list of 10 short descriptions of the given code.
         This is used to get a better basis for the semantic search in the vectorstore. 
@@ -1032,12 +1048,26 @@ class AiLLM():
             list: list of strings
         """
 
-        json_result = {
-            "descriptions": [
-                "first description",
-                "second description",
-                ...
-            ]
+        # example result: 
+        json_result = """
+{
+    "descriptions": [
+        "first description",
+        "second description"
+    ]
+}
+"""
+        # validation schema:
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "descriptions": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                }
+            },
+            "required": ["descriptions"],
+            "additionalProperties": False
         }
 
         """
@@ -1084,19 +1114,16 @@ class AiLLM():
         config['callbacks'] = [MyCustomSyncHandler(self)]
         self.ai_async_progress_max = round(1000 / 4)  # estimated token count of the result (1000 chars)
 
+        response_format = self._get_response_format_json_schema("code_descriptions", response_schema)
         try:
-            res = self.invoke_with_logging(
-                self.large_llm,
-                code_descriptions_prompt,
-                response_format={"type": "json_object"},
-                config=config,
-                context='generate_code_descriptions',
-                fallback_without_response_format=True,
-                fallback_exceptions=(ValidationError,),
-            )
-        except ValidationError as e:
+            if response_format is not None:
+                res = self.large_llm.invoke(code_descriptions_prompt, response_format=response_format, config=config)
+            else:
+                res = self.large_llm.invoke(code_descriptions_prompt, config=config)
+        except (BadRequestError, ValidationError) as e:
+            # Fallback for providers/models that do not support the selected response format.
             logger.debug(e)
-            raise
+            res = self.large_llm.invoke(code_descriptions_prompt, config=config)
         logger.debug(str(res.content))
         res.content = strip_think_blocks(res.content)
         code_descriptions = list(json_repair.loads(str(res.content))['descriptions'])
@@ -1216,13 +1243,26 @@ class AiLLM():
             progress_callback.emit(_("Stage 2:\nInspecting the data more closely..."))        
 
         # build up the prompt
+        # example result:
         json_result = """
 {
-    "interpretation": your reasoning,
-    "related": your conclusion, true or false
-    "quote": the selected quote or an empty string,
+    "interpretation": "your brief reasoning",
+    "related": true,
+    "quote": "selected quote"
 }
 """
+        # validation schema:
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "interpretation": {"type": "string"},
+                "related": {"type": "boolean"},
+                "quote": {"type": "string"}
+            },
+            "required": ["interpretation", "related", "quote"],
+            "additionalProperties": False
+        }
+
         prompt = [
             SystemMessage(
                 content=self.get_default_system_prompt()
@@ -1235,7 +1275,8 @@ class AiLLM():
                     'Summarize your reasoning briefly in the field "interpretation" of the result. '
                     f'In this particular field, always answer in the language "{self.get_curr_language()}".\n'
                     'If you came to the conclusion that the chunk of data '
-                    'is not related to the code, give back \'False\' in the field "related", otherwise \'True\'.\n'
+                    'is not related to the code, give back false in the field "related", otherwise true. '
+                    'Use JSON booleans, not strings.\n'
                     'If the previous step resulted in \'True\', identify a quote from the chunk of empirical data that contains the part which is '
                     'relevant for the analysis of the given code. Include enough context so that the quote is comprehensable. '
                     'Give back this quote in the field "quote" exactly like in the original, '
@@ -1253,19 +1294,16 @@ class AiLLM():
         self.ai_async_progress_max = 130  # estimated average token count of the result
         
         # send the query to the llm 
+        response_format = self._get_response_format_json_schema("search_analyze_chunk", response_schema)
         try:
-            res = self.invoke_with_logging(
-                self.large_llm,
-                f'{prompt}',
-                response_format={"type": "json_object"},
-                config=config,
-                context='search_analyze_chunk',
-                fallback_without_response_format=True,
-                fallback_exceptions=(ValidationError,),
-            )
-        except ValidationError as e:
+            if response_format is not None:
+                res = self.large_llm.invoke(f'{prompt}', response_format=response_format, config=config)
+            else:
+                res = self.large_llm.invoke(f'{prompt}', config=config)
+        except (BadRequestError, ValidationError) as e:
+            # Fallback for providers/models that do not support the selected response format.
             logger.debug(e)
-            raise
+            res = self.large_llm.invoke(f'{prompt}', config=config) 
         res.content = strip_think_blocks(res.content)
         res_json = json_repair.loads(str(res.content))
         
