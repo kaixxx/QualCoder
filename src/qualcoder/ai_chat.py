@@ -1517,6 +1517,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "When you refer to empirical text evidence, add citations in this exact form: "
             "{REF: \"exact quote from the retrieved evidence\"}. "
             "The quote inside REF must be copied exactly from retrieved evidence (no paraphrasing, no corrections, no translation). "
+            "Important: REF is machine markup and the quote text inside REF is not shown as normal readable text to the user. "
+            "If you want a direct quote to be visible, write the quote explicitly in normal prose and add REF separately. "
+            "Avoid outputs where only a source link remains visible without readable quote text. "
             #"Do not generate HTML links yourself."
         )
 
@@ -2391,7 +2394,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                 "Now provide the final answer to the user in normal prose. "
                 "Do not call MCP anymore. "
                 "The final answer must follow the current conversation language. "
-                "When referring to empirical text evidence, cite it as {REF: \"exact quote\"}."
+                "When referring to empirical text evidence, cite it as {REF: \"exact quote\"}. "
+                "Remember: REF is invisible markup; if you want a quote to be visible, include the quoted text in normal prose and add REF in addition."
             )
             if final_hint != '':
                 final_prompt += '\nHere is a draft idea from your internal planning:\n' + final_hint
