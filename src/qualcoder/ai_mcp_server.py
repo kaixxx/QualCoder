@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import os
+import random
 import re
 import sqlite3
 from datetime import datetime
@@ -1032,7 +1033,7 @@ class AiMcpServer:
 
                     hits.append(
                         {
-                            "rank": position + 1,
+                            "order": position + 1,
                             "position": position,
                             "source_id": source_id,
                             "source_name": source_name,
@@ -1342,8 +1343,7 @@ class AiMcpServer:
                 raise
             return existing
 
-        insert_rows: List[Tuple[Any, ...]] = []
-        pos = 0
+        match_rows: List[Tuple[Any, ...]] = []
         for row in rows:
             source_id = self._to_int(row[0], -1)
             fulltext = "" if row[2] is None else str(row[2])
@@ -1359,10 +1359,8 @@ class AiMcpServer:
                 context_length = max(0, context_end - context_start)
                 if context_length <= 0:
                     continue
-                insert_rows.append(
+                match_rows.append(
                     (
-                        cache_id,
-                        pos,
                         source_id,
                         context_start,
                         context_length,
@@ -1370,11 +1368,18 @@ class AiMcpServer:
                         match_end - match_start,
                     )
                 )
-                pos += 1
-                if pos >= self.max_regex_hits:
+                if len(match_rows) >= self.max_regex_hits:
                     break
-            if pos >= self.max_regex_hits:
+            if len(match_rows) >= self.max_regex_hits:
                 break
+
+        # Regex has no relevance score. Mix matches deterministically to avoid over-weighting early documents.
+        rng = random.Random(cache_key)
+        rng.shuffle(match_rows)
+
+        insert_rows: List[Tuple[Any, ...]] = []
+        for pos, row_data in enumerate(match_rows):
+            insert_rows.append((cache_id, pos, *row_data))
 
         if len(insert_rows) > 0:
             cur.executemany(
@@ -1385,10 +1390,10 @@ class AiMcpServer:
             )
         cur.execute(
             "UPDATE mcp_regex_search_cache SET total_hits=? WHERE id=?",
-            (pos, cache_id),
+            (len(insert_rows), cache_id),
         )
         conn.commit()
-        return cache_id, pos
+        return cache_id, len(insert_rows)
 
     def _vector_search_cache_key(self, queries: List[str], file_ids: List[int],
                                  score_threshold: float, k_per_query: int) -> str:
@@ -1420,6 +1425,7 @@ class AiMcpServer:
             if fid_i > 0:
                 norm_file_ids.append(fid_i)
         payload = {
+            "version": "regex_order_shuffle_v1",
             "pattern": pattern_text,
             "flags": flags_text,
             "file_ids": sorted(set(norm_file_ids)),
