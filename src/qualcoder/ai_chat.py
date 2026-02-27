@@ -1533,14 +1533,193 @@ data collected. This information will accompany every prompt sent to the AI, res
         response = self.ai_mcp_server.handle_request(request)
         return request, response
 
-    def _invoke_json_llm(self, messages: List[Any]) -> Dict[str, Any]:
+    def _mcp_allowed_call_json_schema(self) -> Dict[str, Any]:
+        """JSON schema for allowed MCP calls in planner/reflection outputs."""
+
+        list_params = {
+            "type": "object",
+            "properties": {
+                "cursor": {"type": "string"},
+            },
+            "additionalProperties": False,
+        }
+        empty_params = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        read_params = {
+            "type": "object",
+            "properties": {
+                "uri": {"type": "string"},
+                "start": {"type": ["integer", "number", "string"]},
+                "length": {"type": ["integer", "number", "string"]},
+            },
+            "required": ["uri"],
+            "additionalProperties": False,
+        }
+        prompt_get_params = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "arguments": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            },
+            "required": ["name"],
+            "additionalProperties": False,
+        }
+        return {
+            "type": "object",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "initialize"},
+                        "params": empty_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "resources/list"},
+                        "params": list_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "resources/templates/list"},
+                        "params": list_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "resources/read"},
+                        "params": read_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "prompts/list"},
+                        "params": list_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "prompts/get"},
+                        "params": prompt_get_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+            ],
+            "additionalProperties": False,
+        }
+
+    def _mcp_planner_json_schema(self) -> Dict[str, Any]:
+        """JSON schema for the MCP planner control response."""
+
+        call_schema = self._mcp_allowed_call_json_schema()
+        return {
+            "type": "object",
+            "properties": {
+                "needs_mcp": {"type": "boolean"},
+                "skill_decision": {"type": "string", "enum": ["use_skill", "no_skill", "already_applied"]},
+                "skill_name": {"type": "string"},
+                "skill_reason": {"type": "string"},
+                "plan_summary": {"type": "string"},
+                "user_decision_required": {"type": "boolean"},
+                "decision_question": {"type": "string"},
+                "decision_context": {"type": "string"},
+                "proposed_next_calls": {"type": "array", "items": call_schema},
+                "calls": {"type": "array", "items": call_schema},
+                "answer_brief": {"type": "string"},
+            },
+            "required": [
+                "needs_mcp",
+                "skill_decision",
+                "skill_name",
+                "skill_reason",
+                "plan_summary",
+                "user_decision_required",
+                "decision_question",
+                "decision_context",
+                "proposed_next_calls",
+                "calls",
+                "answer_brief",
+            ],
+            "additionalProperties": False,
+        }
+
+    def _mcp_reflection_json_schema(self) -> Dict[str, Any]:
+        """JSON schema for the MCP reflection control response."""
+
+        call_schema = self._mcp_allowed_call_json_schema()
+        return {
+            "type": "object",
+            "properties": {
+                "enough_information": {"type": "boolean"},
+                "skill_decision": {"type": "string", "enum": ["use_skill", "no_skill", "already_applied"]},
+                "skill_name": {"type": "string"},
+                "skill_reason": {"type": "string"},
+                "reflection_summary": {"type": "string"},
+                "next_step_note": {"type": "string"},
+                "user_decision_required": {"type": "boolean"},
+                "decision_question": {"type": "string"},
+                "decision_context": {"type": "string"},
+                "proposed_next_calls": {"type": "array", "items": call_schema},
+                "revised_calls": {"type": "array", "items": call_schema},
+                "answer_brief": {"type": "string"},
+            },
+            "required": [
+                "enough_information",
+                "skill_decision",
+                "skill_name",
+                "skill_reason",
+                "reflection_summary",
+                "next_step_note",
+                "user_decision_required",
+                "decision_question",
+                "decision_context",
+                "proposed_next_calls",
+                "revised_calls",
+                "answer_brief",
+            ],
+            "additionalProperties": False,
+        }
+
+    def _invoke_json_llm(self, messages: List[Any], schema_name: str = '',
+                         response_schema: Optional[Dict[str, Any]] = None,
+                         context: str = 'mcp_json_control') -> Dict[str, Any]:
         """Invoke model and parse one JSON object response."""
+
+        response_format = None
+        if response_schema is not None:
+            name = str(schema_name).strip()
+            if name != "":
+                response_format = self.app.ai.get_response_format_json_schema(name, response_schema)
 
         llm_response = self.app.ai.invoke_with_logging(
             self.app.ai.large_llm,
             messages,
-            response_format={"type": "json_object"},
-            context='mcp_json_control',
+            response_format=response_format,
+            context=context,
             fallback_without_response_format=True,
         )
         raw = strip_think_blocks(str(llm_response.content)).strip()
@@ -2076,6 +2255,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                 ("resources/list", {}),
                 ("prompts/list", {}),
             ]
+            planner_json_schema = self._mcp_planner_json_schema()
+            reflection_json_schema = self._mcp_reflection_json_schema()
             max_calls_per_round = 4
             max_reflection_rounds = 4
             max_total_tool_calls = 12 + len(bootstrap_calls)
@@ -2148,7 +2329,12 @@ data collected. This information will accompany every prompt sent to the AI, res
             planner_messages: List[Any] = [SystemMessage(content=planner_system_prompt)]
             planner_messages.extend(agent_messages)
             planner_messages.append(HumanMessage(content=planner_user_prompt))
-            plan_data = self._invoke_json_llm(planner_messages)
+            plan_data = self._invoke_json_llm(
+                planner_messages,
+                schema_name='mcp_planner_control',
+                response_schema=planner_json_schema,
+                context='mcp_json_planner',
+            )
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
             proposed_plan_calls = self._normalize_mcp_calls(
                 plan_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
@@ -2269,7 +2455,12 @@ data collected. This information will accompany every prompt sent to the AI, res
                     reflection_prompt += "\nInitial plan summary:\n" + plan_summary
                 append_single_instruct_log("reflection", "user", reflection_prompt)
                 reflection_messages.append(HumanMessage(content=reflection_prompt))
-                reflection_data = self._invoke_json_llm(reflection_messages)
+                reflection_data = self._invoke_json_llm(
+                    reflection_messages,
+                    schema_name='mcp_reflection_control',
+                    response_schema=reflection_json_schema,
+                    context='mcp_json_reflection',
+                )
                 reflection_summary = str(reflection_data.get("reflection_summary", "")).strip()
                 if reflection_summary != "":
                     latest_reflection_summary = reflection_summary
@@ -2334,7 +2525,12 @@ data collected. This information will accompany every prompt sent to the AI, res
                                 content=replanner_user_prompt
                             )
                         )
-                        replan_data = self._invoke_json_llm(replanner_messages)
+                        replan_data = self._invoke_json_llm(
+                            replanner_messages,
+                            schema_name='mcp_replanner_control',
+                            response_schema=planner_json_schema,
+                            context='mcp_json_replanner',
+                        )
                         replan_summary = str(replan_data.get("plan_summary", "")).strip()
                         if replan_summary != "":
                             latest_plan_summary = replan_summary

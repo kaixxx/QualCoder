@@ -1035,6 +1035,10 @@ class AiLLM():
                 "strict": True
             }
         }
+
+    def get_response_format_json_schema(self, schema_name: str, schema: dict):
+        """Public helper for building JSON Schema response_format payloads."""
+        return self._get_response_format_json_schema(schema_name, schema)
     
     def generate_code_descriptions(self, code_name, code_memo='') -> list:
         """Prompts the AI to create a list of 10 short descriptions of the given code.
@@ -1115,15 +1119,15 @@ class AiLLM():
         self.ai_async_progress_max = round(1000 / 4)  # estimated token count of the result (1000 chars)
 
         response_format = self._get_response_format_json_schema("code_descriptions", response_schema)
-        try:
-            if response_format is not None:
-                res = self.large_llm.invoke(code_descriptions_prompt, response_format=response_format, config=config)
-            else:
-                res = self.large_llm.invoke(code_descriptions_prompt, config=config)
-        except (BadRequestError, ValidationError) as e:
-            # Fallback for providers/models that do not support the selected response format.
-            logger.debug(e)
-            res = self.large_llm.invoke(code_descriptions_prompt, config=config)
+        res = self.invoke_with_logging(
+            self.large_llm,
+            code_descriptions_prompt,
+            response_format=response_format,
+            config=config,
+            context='generate_code_descriptions',
+            fallback_without_response_format=True,
+            fallback_exceptions=(BadRequestError, ValidationError),
+        )
         logger.debug(str(res.content))
         res.content = strip_think_blocks(res.content)
         code_descriptions = list(json_repair.loads(str(res.content))['descriptions'])
@@ -1295,15 +1299,15 @@ class AiLLM():
         
         # send the query to the llm 
         response_format = self._get_response_format_json_schema("search_analyze_chunk", response_schema)
-        try:
-            if response_format is not None:
-                res = self.large_llm.invoke(f'{prompt}', response_format=response_format, config=config)
-            else:
-                res = self.large_llm.invoke(f'{prompt}', config=config)
-        except (BadRequestError, ValidationError) as e:
-            # Fallback for providers/models that do not support the selected response format.
-            logger.debug(e)
-            res = self.large_llm.invoke(f'{prompt}', config=config) 
+        res = self.invoke_with_logging(
+            self.large_llm,
+            prompt,
+            response_format=response_format,
+            config=config,
+            context='search_analyze_chunk',
+            fallback_without_response_format=True,
+            fallback_exceptions=(BadRequestError, ValidationError),
+        )
         res.content = strip_think_blocks(res.content)
         res_json = json_repair.loads(str(res.content))
         
