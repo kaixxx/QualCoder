@@ -22,7 +22,7 @@ https://qualcoder-org.github.io/
 
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import Qt, QEvent, QObject, pyqtSignal
-from PyQt6.QtGui import QCursor, QGuiApplication, QAction, QPalette
+from PyQt6.QtGui import QCursor, QGuiApplication, QAction, QPalette, QShortcut, QKeySequence
 from PyQt6.QtWidgets import QTextEdit
 import qtawesome as qta
 
@@ -105,6 +105,8 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.ai_output.linkHovered.connect(self.on_linkHovered)
         self.ui.ai_output.linkActivated.connect(self.on_linkActivated)
         self.ui.pushButton_help.pressed.connect(self.help)
+        self.shortcut_undo_ai_changes = QShortcut(QKeySequence("Ctrl+Shift+U"), self)
+        self.shortcut_undo_ai_changes.activated.connect(self._undo_ai_changes_shortcut)
         ai_chat_signal_emitter.newTextChatSignal.connect(self.new_text_chat)
         self.init_styles()
         self.ai_busy_timer = QtCore.QTimer(self)
@@ -231,6 +233,12 @@ class DialogAIChat(QtWidgets.QDialog):
     def help(self):
         """ Open help in browser. """
         self.app.help_wiki("5.1.-AI-chat-based-analysis")
+
+    def _undo_ai_changes_shortcut(self):
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            return
+        ai.undo_ai_agent_changes()
 
     def get_chat_list(self):
         """Load the current chat list from the database into self.chat_list
@@ -1447,15 +1455,16 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"user_decision_required\": true|false, "
             "\"decision_question\": \"optional free-text question for the user\", "
             "\"decision_context\": \"optional short reason for the question\", "
-            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
-            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
+            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
+            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
             "\"answer_brief\": \"optional draft answer idea\""
             "}\n"
             "Rules:\n"
-            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get.\n"
-            "- The turn is already bootstrapped with initialize + resources/list + prompts/list context; avoid repeating them with identical params.\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get, tools/list, tools/call.\n"
+            "- The turn is already bootstrapped with initialize + resources/list + prompts/list + tools/list context; avoid repeating them with identical params.\n"
             "- Use as few calls as possible and keep them focused.\n"
             "- Prefer specific reads over broad reads. Reading full empirical documents can be costly. Do this only when it is really needed.\n"
+            "- For write actions, call tools/list before the first tools/call in this turn to verify available tool names and expected arguments.\n"
             "- Always evaluate whether a predefined skill from prompts/list is relevant.\n"
             "- Set skill_decision explicitly: use_skill when a skill can improve method quality/structure, otherwise no_skill.\n"
             "- If skill_decision=use_skill and the skill is not already loaded in the conversation, include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
@@ -1463,9 +1472,13 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- plan_summary must be one sentence, user-facing, <=160 characters.\n"
             # "- plan_summary must state the immediate next step and whether a skill is used.\n"
             # "- If skill_decision=use_skill, include the skill_name in plan_summary.\n"
+            "- If the user explicitly asks to create or change project data now, prioritize execution: set needs_mcp=true and include concrete tools/call write actions in calls.\n"
+            "- For explicit execution requests, set user_decision_required=false by default. Use true only when required inputs are missing or the scope is ambiguous.\n"
+            "- Do not convert an explicit execution request into a text-only explanation when the needed tool actions are possible.\n"
             "- If a costly or methodological choice should be confirmed by the user first, set user_decision_required=true.\n"
             "- If user_decision_required=true, provide decision_question in natural language and keep it concise.\n"
             "- If user_decision_required=true, put suggested MCP actions into proposed_next_calls and keep calls empty.\n"
+            "- If the conversation contains an Agent state snapshot with pending_user_decision and the latest user message confirms it, execute pending_user_decision.proposed_next_calls now.\n"
             "- Simple plans can be executed directly. For more complex plans, ask the user first.\n"
             "- If enough evidence is already in the conversation, set needs_mcp=false and calls=[].\n"
             "- Do not output prose outside JSON."
@@ -1473,7 +1486,7 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def _mcp_reflection_system_prompt(self) -> str:
         return (
-            "Your task: Review the collected data and decide whether more MCP calls are needed, including gatering more methodological skill support. "
+            "Your task: Review collected data and action progress, then decide whether more MCP calls are needed, including gatering more methodological skill support. "
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"enough_information\": true|false, "
@@ -1485,18 +1498,20 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"user_decision_required\": true|false, "
             "\"decision_question\": \"optional free-text question for the user\", "
             "\"decision_context\": \"optional short reason for the question\", "
-            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
-            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get\", \"params\": {}}], "
+            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
+            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
             "}\n"
             "Rules:\n"
-            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get.\n"
-            "- Initialize, resources/list, and prompts/list are already available in context unless explicitly changed.\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get, tools/list, tools/call.\n"
+            "- Initialize, resources/list, prompts/list, and tools/list are already available in context unless explicitly changed.\n"
             "- If information is sufficient, set enough_information=true and revised_calls=[].\n"
             "- If information is insufficient, propose only necessary revised_calls.\n"
             "- Re-evaluate skill needs explicitly using skill_decision and skill_reason.\n"
             "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
             "- If method guidance is missing, set skill_decision=use_skill and include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
+            "- If the user explicitly requested write actions, prefer revised_calls that execute remaining writes; do not stop early with explanations only.\n"
+            "- For explicit execution requests, use user_decision_required=true only for real ambiguities or missing required inputs.\n"
             "- If a costly or methodological choice should be confirmed by the user first, set user_decision_required=true.\n"
             "- If user_decision_required=true, provide decision_question in natural language and keep it concise.\n"
             "- If user_decision_required=true, put the suggested follow-up MCP actions into proposed_next_calls and keep revised_calls empty.\n"
@@ -1512,7 +1527,11 @@ data collected. This information will accompany every prompt sent to the AI, res
         return (
             "Your task: "
             "Provide a final answer for the user in normal prose based on the conversation and retrieved project context. "
-            "Do not output JSON. Do not call MCP. "
+            "Do not output JSON. "
+            "Treat MCP execution as already finished for this turn and report outcomes clearly. "
+            "If you have made changes to project data through tool calls, give a short and concise summary of what you have done, but avoid repeating information discussed before. "
+            "If the user asked for an execution but it could not be completed, state exactly what is missing and ask one concise follow-up question. "
+            "Do not claim that tool use is forbidden unless the user explicitly said so. "
             "If information is missing, state that briefly and avoid making up details. "
             "When you refer to empirical text evidence, add citations in this exact form: "
             "{REF: \"exact quote from the retrieved evidence\"}. "
@@ -1532,6 +1551,20 @@ data collected. This information will accompany every prompt sent to the AI, res
         }
         response = self.ai_mcp_server.handle_request(request)
         return request, response
+
+    def _begin_ai_change_set(self, messages: List[Any], chat_idx: int) -> str:
+        """Delegate AI change-set creation to the AI service."""
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            return ""
+        return ai.begin_ai_change_set(messages, chat_idx)
+
+    def _discard_empty_ai_change_set(self, set_id: str) -> None:
+        """Delegate AI change-set cleanup to the AI service."""
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            return
+        ai.discard_empty_ai_change_set(set_id)
 
     def _mcp_allowed_call_json_schema(self) -> Dict[str, Any]:
         """JSON schema for allowed MCP calls in planner/reflection outputs."""
@@ -1569,6 +1602,34 @@ data collected. This information will accompany every prompt sent to the AI, res
                 },
             },
             "required": ["name"],
+            "additionalProperties": False,
+        }
+        tool_list_params = {
+            "type": "object",
+            "properties": {
+                "cursor": {"type": "string"},
+            },
+            "additionalProperties": False,
+        }
+        tool_call_params = {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": [
+                        "codes/create_category",
+                        "codes/create_code",
+                        "codes/create_text_coding",
+                    ],
+                },
+                "arguments": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": True,
+                },
+                "_ai_change_set_id": {"type": "string"},
+            },
+            "required": ["name", "arguments"],
             "additionalProperties": False,
         }
         return {
@@ -1624,6 +1685,24 @@ data collected. This information will accompany every prompt sent to the AI, res
                     "properties": {
                         "method": {"const": "prompts/get"},
                         "params": prompt_get_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "tools/list"},
+                        "params": tool_list_params,
+                    },
+                    "required": ["method", "params"],
+                    "additionalProperties": False,
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "method": {"const": "tools/call"},
+                        "params": tool_call_params,
                     },
                     "required": ["method", "params"],
                     "additionalProperties": False,
@@ -1923,13 +2002,13 @@ data collected. This information will accompany every prompt sent to the AI, res
                 pending_key = None
         return cache
 
-    def _emit_mcp_status(self, signals, chat_idx: int, status_event: Optional[Dict[str, Any]]):
-        status_msg = self.ai_mcp_server.status_event_to_text(status_event)
-        if status_msg.strip() == '':
+    def _emit_mcp_status(self, signals, chat_idx: int, status_text: str):
+        status_msg = self._normalize_progress_note(status_text)
+        if status_msg == '':
             return
         if signals is None or signals.progress is None:
             return
-        payload = {"chat_idx": chat_idx, "status": status_msg, "status_event": status_event}
+        payload = {"chat_idx": chat_idx, "status": status_msg}
         signals.progress.emit(json.dumps(payload, ensure_ascii=False))
 
     def _normalize_progress_note(self, text: Any, max_length: int = 220) -> str:
@@ -1951,7 +2030,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
         if signals is None or signals.progress is None:
             return
-        payload = {"chat_idx": chat_idx, "status": status, "status_event": None}
+        payload = {"chat_idx": chat_idx, "status": status}
         signals.progress.emit(json.dumps(payload, ensure_ascii=False))
 
     def _short_reflection_next_step_note(self, reflection_summary: str,
@@ -2241,11 +2320,15 @@ data collected. This information will accompany every prompt sent to the AI, res
             "resources/read",
             "prompts/list",
             "prompts/get",
+            "tools/list",
+            "tools/call",
         }
 
+        ai_change_set_id = ""
         try:
             history_messages: List[Any] = list(messages)
             agent_messages: List[Any] = [msg for msg in history_messages if not isinstance(msg, SystemMessage)]
+            ai_change_set_id = self._begin_ai_change_set(history_messages, chat_idx)
             final_hint = ''
             tool_messages: List[Dict[str, str]] = []
             tool_messages_streamed = signals is not None and getattr(signals, "progress", None) is not None
@@ -2254,6 +2337,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 ("initialize", {}),
                 ("resources/list", {}),
                 ("prompts/list", {}),
+                ("tools/list", {}),
             ]
             planner_json_schema = self._mcp_planner_json_schema()
             reflection_json_schema = self._mcp_reflection_json_schema()
@@ -2262,6 +2346,22 @@ data collected. This information will accompany every prompt sent to the AI, res
             max_total_tool_calls = 12 + len(bootstrap_calls)
             total_tool_calls = 0
             stop_reason = ""
+            cacheable_methods = {
+                "initialize",
+                "resources/list",
+                "resources/templates/list",
+                "resources/read",
+                "prompts/list",
+                "prompts/get",
+                "tools/list",
+            }
+
+            def _prepare_mcp_request(method_name: str, raw_params: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                request_params = dict(raw_params) if isinstance(raw_params, dict) else {}
+                display_params = dict(request_params)
+                if method_name == "tools/call" and ai_change_set_id != "":
+                    request_params["_ai_change_set_id"] = ai_change_set_id
+                return request_params, display_params
 
             def append_tool_exchange(method_name: str, method_params: Dict[str, Any], rpc_response: Dict[str, Any]):
                 call_content = json.dumps(
@@ -2311,15 +2411,17 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if self.app.ai.ai_async_is_canceled:
                     result["canceled"] = True
                     return result
-                call_key = self._mcp_call_key(method, params)
-                if call_key in mcp_cache:
+                request_params, display_params = _prepare_mcp_request(method, params)
+                call_key = self._mcp_call_key(method, request_params)
+                if method in cacheable_methods and call_key in mcp_cache:
                     continue
-                status_event = self.ai_mcp_server.describe_status_event(method, params)
-                self._emit_mcp_status(signals, chat_idx, status_event)
-                _request, response = self._run_mcp_request(method, params)
-                mcp_cache[call_key] = response
+                status_text = self.ai_mcp_server.describe_status_event(method, request_params)
+                self._emit_mcp_status(signals, chat_idx, status_text)
+                _request, response = self._run_mcp_request(method, request_params)
+                if method in cacheable_methods:
+                    mcp_cache[call_key] = response
                 total_tool_calls += 1
-                append_tool_exchange(method, params, response)
+                append_tool_exchange(method, display_params, response)
 
             planner_system_prompt = self._build_mcp_combined_system_prompt(self._mcp_planner_system_prompt())
             planner_user_prompt = "Create the initial MCP plan now."
@@ -2434,17 +2536,19 @@ data collected. This information will accompany every prompt sent to the AI, res
                             "error": {"code": -32601, "message": "Method not found", "data": method},
                         }
                     else:
-                        call_key = self._mcp_call_key(method, params)
-                        if call_key in mcp_cache:
+                        request_params, display_params = _prepare_mcp_request(method, params)
+                        call_key = self._mcp_call_key(method, request_params)
+                        if method in cacheable_methods and call_key in mcp_cache:
                             response = mcp_cache[call_key]
                         else:
-                            status_event = self.ai_mcp_server.describe_status_event(method, params)
-                            self._emit_mcp_status(signals, chat_idx, status_event)
-                            _request, response = self._run_mcp_request(method, params)
-                            mcp_cache[call_key] = response
+                            status_text = self.ai_mcp_server.describe_status_event(method, request_params)
+                            self._emit_mcp_status(signals, chat_idx, status_text)
+                            _request, response = self._run_mcp_request(method, request_params)
+                            if method in cacheable_methods:
+                                mcp_cache[call_key] = response
                             total_tool_calls += 1
                         executed_any_call = True
-                    append_tool_exchange(method, params, response)
+                    append_tool_exchange(method, display_params if method in allowed_methods else params, response)
 
                 reflection_system_prompt = self._build_mcp_combined_system_prompt(self._mcp_reflection_system_prompt())
                 append_single_instruct_log("reflection", "system", reflection_system_prompt)
@@ -2588,7 +2692,8 @@ data collected. This information will accompany every prompt sent to the AI, res
             self._emit_mcp_status(signals, chat_idx, self.ai_mcp_server.describe_host_status_event("final_response"))
             final_prompt = (
                 "Now provide the final answer to the user in normal prose. "
-                "Do not call MCP anymore. "
+                "Focus on outcomes of this turn and communicate them clearly. "
+                "Do not mention internal MCP stage constraints. "
                 "The final answer must follow the current conversation language. "
                 "When referring to empirical text evidence, cite it as {REF: \"exact quote\"}. "
                 "Remember: REF is invisible markup; if you want a quote to be visible, include the quoted text in normal prose and add REF in addition."
@@ -2636,6 +2741,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             result["tool_messages"] = tool_messages
         except Exception as err:
             result["error"] = _('Error during MCP-based general chat: ') + str(err)
+        finally:
+            if ai_change_set_id != "":
+                self._discard_empty_ai_change_set(ai_change_set_id)
         return result
 
     def ai_mcp_message_callback(self, mcp_result):
@@ -2722,8 +2830,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                         commit_history=True,
                     )
             status = str(payload.get("status", "")).strip()
-            if status == '':
-                status = self.ai_mcp_server.status_event_to_text(payload.get("status_event", None)).strip()
         else:
             status = str(progress_msg).strip()
             chat_idx = self.current_chat_idx

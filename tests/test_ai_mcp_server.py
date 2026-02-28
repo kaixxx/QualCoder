@@ -107,10 +107,17 @@ class TestAiMcpServer(TestCase):
         )
         self.conn.commit()
 
+        self.ai_recorded_changes = []
+
+        def _record_ai_change(change_set_id, operation):
+            self.ai_recorded_changes.append((change_set_id, operation))
+
         self.app = SimpleNamespace(
             project_path=self.project_path,
             project_name="test_project.qda",
             settings={"codername": "default"},
+            conn=self.conn,
+            ai=SimpleNamespace(record_ai_change=_record_ai_change),
         )
         self.server = AiMcpServer(self.app)
 
@@ -124,7 +131,70 @@ class TestAiMcpServer(TestCase):
         self.assertEqual("2025-06-18", res["result"]["protocolVersion"])
         self.assertIn("resources", res["result"]["capabilities"])
         self.assertIn("QualCoder", res["result"]["instructions"])
-        self.assertIn("read-only", res["result"]["instructions"])
+        self.assertIn("tools/call", res["result"]["instructions"])
+
+    def test_tools_list_contains_create_tools(self):
+        res = self.server.handle_request({"jsonrpc": "2.0", "id": 30, "method": "tools/list", "params": {}})
+        self.assertIn("result", res)
+        names = [tool["name"] for tool in res["result"]["tools"]]
+        self.assertIn("codes/create_category", names)
+        self.assertIn("codes/create_code", names)
+        self.assertIn("codes/create_text_coding", names)
+
+    def test_tool_create_category(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/create_category",
+                "arguments": {"name": "cat ai", "memo": "created by ai"},
+                "_ai_change_set_id": "run-1",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["created"])
+        self.assertEqual("AI Agent", payload["category"]["owner"])
+        self.assertTrue(len(self.ai_recorded_changes) > 0)
+        self.assertEqual("create_category", self.ai_recorded_changes[0][1]["type"])
+
+    def test_tool_create_code(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/create_code",
+                "arguments": {"name": "code ai", "memo": "m", "catid": 1, "color": "#ABCDEF"},
+                "_ai_change_set_id": "run-2",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["created"])
+        self.assertEqual("AI Agent", payload["code"]["owner"])
+        self.assertEqual("#ABCDEF", payload["code"]["color"])
+
+    def test_tool_create_text_coding(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 33,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/create_text_coding",
+                "arguments": {"cid": 1, "fid": 1, "quote": "bcd", "memo": "ai coding"},
+                "_ai_change_set_id": "run-3",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["created"])
+        self.assertEqual("AI Agent", payload["coding"]["owner"])
+        self.assertEqual("bcd", payload["coding"]["quote"])
 
     def test_codes_tree_contains_structure_rules_and_speaker_convention(self):
         req = {"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {"uri": "qualcoder://codes/tree"}}
@@ -239,11 +309,9 @@ class TestAiMcpServer(TestCase):
         self.assertEqual(-32602, res["error"]["code"])
 
     def test_status_event_for_code_segments_contains_code_name(self):
-        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://codes/segments/1"})
-        self.assertIsNotNone(event)
-        self.assertEqual("code_segments", event["status_code"])
-        self.assertEqual(1, event["entity_id"])
-        self.assertEqual("code one", event["entity_name"])
+        status = self.server.describe_status_event("resources/read", {"uri": "qualcoder://codes/segments/1"})
+        self.assertTrue(isinstance(status, str))
+        self.assertIn("code one", status)
 
     def test_resources_list_contains_only_top_level_resources(self):
         res = self.server.handle_request({"jsonrpc": "2.0", "id": 2, "method": "resources/list", "params": {}})
@@ -277,34 +345,47 @@ class TestAiMcpServer(TestCase):
         self.assertEqual(-32601, res["error"]["code"])
 
     def test_status_event_for_document_read_contains_id_and_name(self):
-        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://documents/text/1"})
-        self.assertIsNotNone(event)
-        self.assertEqual("document_read", event["status_code"])
-        self.assertEqual(1, event["entity_id"])
-        self.assertEqual("doc one", event["entity_name"])
-        self.assertEqual({"id": 1, "name": "doc one"}, event["message_args"])
+        status = self.server.describe_status_event("resources/read", {"uri": "qualcoder://documents/text/1"})
+        self.assertTrue(isinstance(status, str))
+        self.assertIn("doc one", status)
 
-    def test_status_event_to_text_uses_document_name(self):
-        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://documents/text/1"})
-        txt = self.server.status_event_to_text(event)
-        self.assertIn("doc one", txt)
+    def test_status_text_for_document_read_uses_document_name(self):
+        status = self.server.describe_status_event("resources/read", {"uri": "qualcoder://documents/text/1"})
+        self.assertIn("doc one", status)
 
     def test_status_event_for_documents_list(self):
-        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://documents"})
-        self.assertIsNotNone(event)
-        self.assertEqual("documents_list", event["status_code"])
-        self.assertEqual("documents", event["entity_type"])
+        status = self.server.describe_status_event("resources/read", {"uri": "qualcoder://documents"})
+        self.assertTrue(isinstance(status, str))
+        self.assertTrue(len(status) > 0)
 
     def test_status_event_for_project_coders(self):
-        event = self.server.describe_status_event("resources/read", {"uri": "qualcoder://project/coders"})
-        self.assertIsNotNone(event)
-        self.assertEqual("project_coders", event["status_code"])
-        txt = self.server.status_event_to_text(event)
-        self.assertTrue(len(txt) > 0)
+        status = self.server.describe_status_event("resources/read", {"uri": "qualcoder://project/coders"})
+        self.assertTrue(isinstance(status, str))
+        self.assertTrue(len(status) > 0)
 
     def test_host_status_event_for_final_response(self):
-        event = self.server.describe_host_status_event("final_response")
-        self.assertIsNotNone(event)
-        self.assertEqual("final_response", event["status_code"])
-        txt = self.server.status_event_to_text(event)
-        self.assertTrue(len(txt) > 0)
+        status = self.server.describe_host_status_event("final_response")
+        self.assertTrue(isinstance(status, str))
+        self.assertTrue(len(status) > 0)
+
+    def test_status_event_for_create_category_contains_category_name(self):
+        status = self.server.describe_status_event(
+            "tools/call",
+            {"name": "codes/create_category", "arguments": {"name": "My Category"}},
+        )
+        self.assertIn("My Category", status)
+
+    def test_status_event_for_create_code_contains_code_name(self):
+        status = self.server.describe_status_event(
+            "tools/call",
+            {"name": "codes/create_code", "arguments": {"name": "My Code"}},
+        )
+        self.assertIn("My Code", status)
+
+    def test_status_event_for_create_text_coding_contains_code_and_document_name(self):
+        status = self.server.describe_status_event(
+            "tools/call",
+            {"name": "codes/create_text_coding", "arguments": {"cid": 1, "fid": 1, "quote": "abc"}},
+        )
+        self.assertIn("code one", status)
+        self.assertIn("doc one", status)

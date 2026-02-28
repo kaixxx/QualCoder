@@ -24,6 +24,7 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 import traceback
+from datetime import datetime
 from PyQt6 import QtWidgets
 from PyQt6 import QtCore
 import qtawesome as qta
@@ -42,6 +43,8 @@ from langchain_core.documents.base import Document  # Unused
 from .ai_async_worker import Worker
 from .ai_vectorstore import AiVectorstore
 from .helpers import Message
+from .select_items import DialogSelectItems
+from .confirm_delete import DialogConfirmDelete
 from .error_dlg import qt_exception_hook
 from .html_parser import html_to_text
 import json_repair
@@ -442,6 +445,7 @@ class AiLLM():
     ai_log_handler = None
     ai_log_path = ''
     ai_log_seq = 0
+    ai_change_history = None
     
     def __init__(self, app, parent_text_edit):
         self.app = app
@@ -449,6 +453,7 @@ class AiLLM():
         self.threadpool = QtCore.QThreadPool()
         self.threadpool.setMaxThreadCount(1)
         self.sources_vectorstore = AiVectorstore(self.app, self.parent_text_edit, self.sources_collection)
+        self.ai_change_history = []  # Session-scoped AI write operations for undo
 
     def _ai_log_target_path(self) -> str:
         """Return the file path for the dedicated AI communication log."""
@@ -640,6 +645,568 @@ class AiLLM():
                 raise
         self.log_llm_response(req_id, llm, getattr(res, 'content', ''), context=context)
         return res
+
+    def _ensure_ai_change_history(self):
+        if not isinstance(self.ai_change_history, list):
+            self.ai_change_history = []
+        return self.ai_change_history
+
+    def _ensure_ai_change_set(self, history, set_id: str):
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("id", "")).strip() == set_id:
+                ops = item.get("operations", None)
+                if not isinstance(ops, list):
+                    item["operations"] = []
+                if "name" not in item or str(item.get("name", "")).strip() == "":
+                    item["name"] = _("AI changes")
+                if "created_at" not in item:
+                    item["created_at"] = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                return item
+        new_set = {
+            "id": set_id,
+            "name": _("AI changes"),
+            "created_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+            "operations": [],
+        }
+        history.insert(0, new_set)
+        return new_set
+
+    def begin_ai_change_set(self, messages, chat_idx: int) -> str:
+        """Create one session-scoped AI change set for the current chat turn."""
+
+        history = self._ensure_ai_change_history()
+        now = datetime.now().astimezone()
+        set_id = f'ai-run-{now.strftime("%Y%m%d%H%M%S%f")}-{chat_idx}'
+        title = _("AI changes")
+        title += " [" + now.strftime("%H:%M:%S") + "]"
+
+        change_set = {
+            "id": set_id,
+            "name": title,
+            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "operations": [],
+        }
+        history.insert(0, change_set)
+        return set_id
+
+    def _short_change_label(self, text: str, max_len: int = 36) -> str:
+        txt = " ".join(str(text if text is not None else "").split()).strip()
+        if len(txt) <= max_len:
+            return txt
+        return txt[: max_len - 3] + "..."
+
+    def _lookup_code_name(self, cid: int) -> str:
+        if cid <= 0:
+            return ""
+        try:
+            cur = self.app.conn.cursor()
+            cur.execute("SELECT name FROM code_name WHERE cid=?", (cid,))
+            row = cur.fetchone()
+            if row is None:
+                return ""
+            return str(row[0] if row[0] is not None else "").strip()
+        except Exception:
+            return ""
+
+    def _lookup_source_name(self, fid: int) -> str:
+        if fid <= 0:
+            return ""
+        try:
+            cur = self.app.conn.cursor()
+            cur.execute("SELECT name FROM source WHERE id=?", (fid,))
+            row = cur.fetchone()
+            if row is None:
+                return ""
+            return str(row[0] if row[0] is not None else "").strip()
+        except Exception:
+            return ""
+
+    def _format_name_line(self, prefix: str, names: list, max_items: int = 5) -> str:
+        if not isinstance(names, list) or len(names) == 0:
+            return ""
+        trimmed = [n for n in names if str(n).strip() != ""]
+        if len(trimmed) == 0:
+            return ""
+        shown = trimmed[:max_items]
+        line = prefix + ", ".join(shown)
+        remaining = len(trimmed) - len(shown)
+        if remaining > 0:
+            line += _(" (+{0} more)").format(remaining)
+        return line
+
+    def _refresh_ai_change_set_name(self, change_set: dict, allow_db_lookup: bool = False) -> None:
+        """Update one change-set title from recorded operations."""
+
+        if not isinstance(change_set, dict):
+            return
+        operations = change_set.get("operations", None)
+        if not isinstance(operations, list) or len(operations) == 0:
+            return
+
+        category_count = 0
+        code_count = 0
+        coding_count = 0
+        category_names = []
+        code_names = []
+        coding_targets = {}
+        seen_category_names = set()
+        seen_code_names = set()
+
+        for op in operations:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type", "")).strip()
+            if op_type == "create_category":
+                category_count += 1
+                cat_name = self._short_change_label(op.get("name", ""))
+                if cat_name != "" and cat_name not in seen_category_names:
+                    seen_category_names.add(cat_name)
+                    category_names.append(cat_name)
+            elif op_type == "create_code":
+                code_count += 1
+                code_name = self._short_change_label(op.get("name", ""))
+                if code_name != "" and code_name not in seen_code_names:
+                    seen_code_names.add(code_name)
+                    code_names.append(code_name)
+            elif op_type == "create_coding_text":
+                coding_count += 1
+                cid = int(op.get("cid", -1))
+                fid = int(op.get("fid", -1))
+                code_name = self._short_change_label(op.get("code_name", ""))
+                source_name = self._short_change_label(op.get("source_name", ""))
+                if allow_db_lookup and code_name == "":
+                    code_name = self._short_change_label(self._lookup_code_name(cid))
+                if allow_db_lookup and source_name == "":
+                    source_name = self._short_change_label(self._lookup_source_name(fid))
+                if code_name == "":
+                    if cid > 0:
+                        code_name = _("Code") + " #" + str(cid)
+                    else:
+                        code_name = _("Code")
+                if source_name == "":
+                    if fid > 0:
+                        source_name = _("Document") + " #" + str(fid)
+                    else:
+                        source_name = _("Document")
+                key = code_name + " @ " + source_name
+                coding_targets[key] = int(coding_targets.get(key, 0)) + 1
+
+        parts = []
+        if category_count > 0:
+            parts.append(str(category_count) + " " + _("category(ies)"))
+        if code_count > 0:
+            parts.append(str(code_count) + " " + _("code(s)"))
+        if coding_count > 0:
+            parts.append(str(coding_count) + " " + _("text coding(s)"))
+        if len(parts) == 0:
+            return
+
+        created_at = str(change_set.get("created_at", "")).strip()
+        time_label = created_at
+        if len(created_at) >= 19:
+            time_label = created_at[11:19]
+
+        title = _("AI changes")
+        if time_label != "":
+            title += " [" + time_label + "]"
+        primary_target = ""
+        if len(coding_targets) > 0:
+            sorted_primary = sorted(
+                coding_targets.items(),
+                key=lambda item: (-int(item[1]), str(item[0]).lower()),
+            )
+            primary_target = str(sorted_primary[0][0])
+        first_line = title + ": " + ", ".join(parts)
+        if primary_target != "":
+            first_line += " | " + primary_target
+        lines = [first_line]
+        categories_line = self._format_name_line(_("Categories: "), category_names)
+        if categories_line != "":
+            lines.append(categories_line)
+        codes_line = self._format_name_line(_("Codes: "), code_names)
+        if codes_line != "":
+            lines.append(codes_line)
+        if len(coding_targets) > 0:
+            sorted_targets = sorted(
+                coding_targets.items(),
+                key=lambda item: (-int(item[1]), str(item[0]).lower()),
+            )
+            shown_targets = []
+            for label, count in sorted_targets[:5]:
+                if int(count) > 1:
+                    shown_targets.append(label + " (" + str(int(count)) + ")")
+                else:
+                    shown_targets.append(label)
+            codings_line = _("Codings: ") + "; ".join(shown_targets)
+            remaining_targets = len(sorted_targets) - len(shown_targets)
+            if remaining_targets > 0:
+                codings_line += _(" (+{0} more)").format(remaining_targets)
+            lines.append(codings_line)
+        change_set["name"] = "\n".join(lines)
+
+    def discard_empty_ai_change_set(self, set_id: str) -> None:
+        """Remove a pre-created AI change set if no write operation was recorded."""
+
+        normalized_id = str(set_id).strip()
+        if normalized_id == "":
+            return
+        history = self._ensure_ai_change_history()
+        for idx, item in enumerate(history):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("id", "")).strip() != normalized_id:
+                continue
+            operations = item.get("operations", None)
+            if isinstance(operations, list) and len(operations) == 0:
+                history.pop(idx)
+            return
+
+    def record_ai_change(self, change_set_id: str, operation: dict) -> None:
+        """Append one operation to the session-scoped AI change history."""
+
+        if not isinstance(operation, dict):
+            return
+        history = self._ensure_ai_change_history()
+        normalized_set_id = str(change_set_id).strip()
+        if normalized_set_id == "":
+            normalized_set_id = "ai-run-" + datetime.now().astimezone().strftime("%Y%m%d%H%M%S%f")
+        change_set = self._ensure_ai_change_set(history, normalized_set_id)
+        op_copy = dict(operation)
+        op_copy["change_set_id"] = normalized_set_id
+        change_set["operations"].append(op_copy)
+        self._refresh_ai_change_set_name(change_set)
+
+    def _table_exists(self, table_name: str) -> bool:
+        cur = self.app.conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        return cur.fetchone() is not None
+
+    def _can_undo_create_category(self, cur, op):
+        catid = int(op.get("catid", -1))
+        if catid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT catid, name, owner FROM code_cat WHERE catid=?", (catid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_name = str(op.get("name", "")).strip()
+        if expected_name != "" and row[1] != expected_name:
+            return False, "changed", row
+        if str(row[2]) != "AI Agent":
+            return False, "changed", row
+        return True, "ok", row
+
+    def _can_undo_create_code(self, cur, op):
+        cid = int(op.get("cid", -1))
+        if cid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT cid, name, owner FROM code_name WHERE cid=?", (cid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_name = str(op.get("name", "")).strip()
+        if expected_name != "" and row[1] != expected_name:
+            return False, "changed", row
+        if str(row[2]) != "AI Agent":
+            return False, "changed", row
+        return True, "ok", row
+
+    def _can_undo_create_coding_text(self, cur, op):
+        ctid = int(op.get("ctid", -1))
+        if ctid <= 0:
+            return False, "invalid", None
+        cur.execute(
+            "SELECT ctid, cid, fid, pos0, pos1, owner, ifnull(seltext,'') FROM code_text WHERE ctid=?",
+            (ctid,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected = {
+            "cid": int(op.get("cid", -1)),
+            "fid": int(op.get("fid", -1)),
+            "pos0": int(op.get("pos0", -1)),
+            "pos1": int(op.get("pos1", -1)),
+            "owner": str(op.get("owner", "AI Agent")),
+            "seltext": str(op.get("seltext", "")),
+        }
+        if expected["cid"] > 0 and row[1] != expected["cid"]:
+            return False, "changed", row
+        if expected["fid"] > 0 and row[2] != expected["fid"]:
+            return False, "changed", row
+        if expected["pos0"] >= 0 and row[3] != expected["pos0"]:
+            return False, "changed", row
+        if expected["pos1"] >= 0 and row[4] != expected["pos1"]:
+            return False, "changed", row
+        if expected["owner"] != "" and row[5] != expected["owner"]:
+            return False, "changed", row
+        if expected["seltext"] != "" and row[6] != expected["seltext"]:
+            return False, "changed", row
+        return True, "ok", row
+
+    def _count_code_codings(self, cur, cid: int) -> tuple[int, int]:
+        total = 0
+        non_ai = 0
+        for table in ("code_text", "code_av", "code_image"):
+            if not self._table_exists(table):
+                continue
+            cur.execute(
+                f"SELECT count(*), sum(case when owner != 'AI Agent' then 1 else 0 end) FROM {table} WHERE cid=?",
+                (cid,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                continue
+            total += int(row[0] or 0)
+            non_ai += int(row[1] or 0)
+        return total, non_ai
+
+    def _build_ai_change_impact_text(self, change_set):
+        operations = change_set.get("operations", [])
+        if not isinstance(operations, list) or len(operations) == 0:
+            return ""
+        cur = self.app.conn.cursor()
+
+        code_ids = set()
+        category_ids = set()
+        coding_ctids = set()
+        skipped_changed = 0
+        skipped_missing = 0
+
+        for op in operations:
+            if not isinstance(op, dict):
+                continue
+            op_type = str(op.get("type", "")).strip()
+            if op_type == "create_code":
+                ok, reason, row_data = self._can_undo_create_code(cur, op)
+                if ok:
+                    code_ids.add(int(op.get("cid", -1)))
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "create_category":
+                ok, reason, row_data = self._can_undo_create_category(cur, op)
+                if ok:
+                    category_ids.add(int(op.get("catid", -1)))
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "create_coding_text":
+                ok, reason, row_data = self._can_undo_create_coding_text(cur, op)
+                if ok:
+                    ctid = int(op.get("ctid", -1))
+                    cid = int(op.get("cid", -1))
+                    if ctid > 0 and cid not in code_ids:
+                        coding_ctids.add(ctid)
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+
+        code_codings_total = 0
+        code_codings_non_ai = 0
+        for cid in code_ids:
+            ct_total, ct_non_ai = self._count_code_codings(cur, cid)
+            code_codings_total += ct_total
+            code_codings_non_ai += ct_non_ai
+
+        detach_codes = 0
+        detach_subcats = 0
+        for catid in category_ids:
+            cur.execute("SELECT count(*) FROM code_name WHERE catid=?", (catid,))
+            detach_codes += int((cur.fetchone() or [0])[0] or 0)
+            cur.execute("SELECT count(*) FROM code_cat WHERE supercatid=?", (catid,))
+            detach_subcats += int((cur.fetchone() or [0])[0] or 0)
+
+        standalone_codings_total = 0
+        standalone_codings_non_ai = 0
+        for ctid in coding_ctids:
+            cur.execute("SELECT owner FROM code_text WHERE ctid=?", (ctid,))
+            row = cur.fetchone()
+            if row is None:
+                continue
+            standalone_codings_total += 1
+            if str(row[0]) != "AI Agent":
+                standalone_codings_non_ai += 1
+
+        lines = []
+        if len(code_ids) > 0:
+            lines.append(
+                _("Undo will remove ") + str(len(code_ids)) + _(" code(s) and ") +
+                str(code_codings_total) + _(" related coding(s).")
+            )
+            if code_codings_non_ai > 0:
+                lines.append(
+                    _("Warning: ") + str(code_codings_non_ai) +
+                    _(" of these codings are not owned by 'AI Agent'.")
+                )
+        if len(category_ids) > 0:
+            lines.append(
+                _("Undo will remove ") + str(len(category_ids)) + _(" category(ies). ") +
+                str(detach_codes) + _(" code(s) and ") + str(detach_subcats) +
+                _(" subcategory(ies) would be detached, not deleted.")
+            )
+        if standalone_codings_total > 0:
+            lines.append(
+                _("Undo will remove ") + str(standalone_codings_total) + _(" standalone text coding(s).")
+            )
+            if standalone_codings_non_ai > 0:
+                lines.append(
+                    _("Warning: ") + str(standalone_codings_non_ai) +
+                    _(" standalone coding(s) are not owned by 'AI Agent'.")
+                )
+        if skipped_changed > 0:
+            lines.append(
+                str(skipped_changed) + _(" operation(s) appear changed since creation and may be skipped.")
+            )
+        if skipped_missing > 0:
+            lines.append(
+                str(skipped_missing) + _(" operation(s) are already missing and may be skipped.")
+            )
+        return "\n".join(lines)
+
+    def _undo_ai_change_set(self, change_set):
+        operations = change_set.get("operations", [])
+        if not isinstance(operations, list):
+            return {"undone": 0, "skipped": 0}
+        stats = {
+            "undone": 0,
+            "skipped_changed": 0,
+            "skipped_missing": 0,
+            "skipped_invalid": 0,
+            "deleted_code_codings": 0,
+            "deleted_code_codings_non_ai": 0,
+        }
+        cur = self.app.conn.cursor()
+        try:
+            for op in reversed(operations):
+                if not isinstance(op, dict):
+                    stats["skipped_invalid"] += 1
+                    continue
+                op_type = str(op.get("type", "")).strip()
+
+                if op_type == "create_coding_text":
+                    ok, reason, row = self._can_undo_create_coding_text(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cur.execute("DELETE FROM code_text WHERE ctid=?", (int(row[0]),))
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type == "create_code":
+                    ok, reason, row = self._can_undo_create_code(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cid = int(row[0])
+                    coding_total, coding_non_ai = self._count_code_codings(cur, cid)
+                    stats["deleted_code_codings"] += coding_total
+                    stats["deleted_code_codings_non_ai"] += coding_non_ai
+                    if self._table_exists("code_text"):
+                        cur.execute("DELETE FROM code_text WHERE cid=?", (cid,))
+                    if self._table_exists("code_av"):
+                        cur.execute("DELETE FROM code_av WHERE cid=?", (cid,))
+                    if self._table_exists("code_image"):
+                        cur.execute("DELETE FROM code_image WHERE cid=?", (cid,))
+                    cur.execute("DELETE FROM code_name WHERE cid=?", (cid,))
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type == "create_category":
+                    ok, reason, row = self._can_undo_create_category(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    catid = int(row[0])
+                    cur.execute("UPDATE code_name SET catid=NULL WHERE catid=?", (catid,))
+                    cur.execute("UPDATE code_cat SET supercatid=NULL WHERE supercatid=?", (catid,))
+                    cur.execute("DELETE FROM code_cat WHERE catid=?", (catid,))
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                stats["skipped_invalid"] += 1
+
+            self.app.conn.commit()
+            self.app.delete_backup = False
+        except Exception:
+            self.app.conn.rollback()
+            raise
+        return stats
+
+    def undo_ai_agent_changes(self):
+        """Undo one selected AI-agent change set from the current app session."""
+
+        history = self._ensure_ai_change_history()
+        options = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            ops = item.get("operations", [])
+            if isinstance(ops, list) and len(ops) > 0:
+                self._refresh_ai_change_set_name(item, allow_db_lookup=True)
+                options.append(item)
+        if len(options) == 0:
+            Message(self.app, _("Undo AI changes"), _("No AI changes available to undo.")).exec()
+            return
+
+        ui = DialogSelectItems(self.app, options, _("Select AI changes to undo"), "single")
+        ok = ui.exec()
+        if not ok:
+            return
+        selected = ui.get_selected()
+        if not isinstance(selected, dict):
+            return
+
+        impact_text = self._build_ai_change_impact_text(selected)
+        confirm_text = _("Undo AI changes: ") + str(selected.get("name", ""))
+        if impact_text != "":
+            confirm_text += "\n\n" + impact_text
+        confirm_text += "\n\n" + _("Do you want to continue?")
+        confirm = DialogConfirmDelete(self.app, confirm_text, _("Undo AI changes"))
+        if not confirm.exec():
+            return
+
+        stats = self._undo_ai_change_set(selected)
+        if selected in history:
+            history.remove(selected)
+
+        msg = _("Undo AI changes: ") + str(selected.get("name", "")) + "\n"
+        msg += _("Undone operations: ") + str(stats.get("undone", 0)) + "\n"
+        skipped = int(stats.get("skipped_changed", 0)) + int(stats.get("skipped_missing", 0)) + int(stats.get("skipped_invalid", 0))
+        if skipped > 0:
+            msg += _("Skipped operations: ") + str(skipped) + "\n"
+        non_ai_loss = int(stats.get("deleted_code_codings_non_ai", 0))
+        if non_ai_loss > 0:
+            msg += _("Warning: removed codings not owned by 'AI Agent': ") + str(non_ai_loss) + "\n"
+        if self.parent_text_edit is not None:
+            try:
+                self.parent_text_edit.append(msg)
+            except Exception:
+                pass
+        Message(self.app, _("Undo AI changes"), msg).exec()
 
     # Icons (https://pictogrammers.com/library/mdi/)
     def code_analysis_icon(self):

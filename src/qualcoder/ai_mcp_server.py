@@ -1,7 +1,7 @@
 ﻿# -*- coding: utf-8 -*-
 
 """
-Internal MCP server for QualCoder (read-only phase).
+Internal MCP server for QualCoder.
 
 This module uses the official MCP Python SDK (low-level server) and exposes
 an in-process JSON-RPC bridge (`handle_request`) so the current chat flow can
@@ -26,7 +26,7 @@ from .ai_skills import AiSkillsCatalog
 
 
 class AiMcpServer:
-    """Internal read-only MCP server for QualCoder project data."""
+    """Internal MCP server for QualCoder project data."""
 
     protocol_version = "2025-06-18"
     server_name = "qualcoder-internal-mcp"
@@ -47,18 +47,7 @@ class AiMcpServer:
     default_regex_context_chars = 120
     max_regex_context_chars = 1000
     max_regex_hits = 20000
-    STATUS_REVIEW_AVAILABLE_MATERIALS = "status.review.available_materials"
-    STATUS_REVIEW_DOCUMENT_LIST = "status.review.document_list"
-    STATUS_REVIEW_CODE_TREE = "status.review.code_tree"
-    STATUS_REVIEW_DOCUMENT = "status.review.document"
-    STATUS_REVIEW_RESOURCE = "status.review.resource"
-    STATUS_REVIEW_CODE_SEGMENTS = "status.review.code_segments"
-    STATUS_REVIEW_VECTOR_SEARCH = "status.review.vector_search"
-    STATUS_REVIEW_REGEX_SEARCH = "status.review.regex_search"
-    STATUS_PLAN_MCP_STEPS = "status.plan.mcp_steps"
-    STATUS_EXECUTE_MCP_STEPS = "status.execute.mcp_steps"
-    STATUS_REFLECT_MCP_RESULTS = "status.reflect.mcp_results"
-    STATUS_FORMULATE_RESPONSE = "status.final.formulate_response"
+    AI_AGENT_OWNER = "AI Agent"
 
     def __init__(self, app):
         self.app = app
@@ -73,13 +62,14 @@ class AiMcpServer:
 
     def _server_instructions(self) -> str:
         return (
-            "QualCoder internal MCP server (read-only). "
-            "Use resources/list, resources/read, prompts/list, and prompts/get. "
+            "QualCoder internal MCP server. "
+            "Use resources/list, resources/read, prompts/list, prompts/get, tools/list, and tools/call. "
             "Available resources: text documents list (qualcoder://documents), document text by id "
             "(qualcoder://documents/text/{id}), code tree (qualcoder://codes/tree), and coded text segments by code id "
             "(qualcoder://codes/segments/{cid}), semantic vector search "
             "(qualcoder://vector/search?q=...), and regular-expression search "
             "(qualcoder://search/regex?pattern=...). "
+            "Available write tools: create category, create code, and create text coding. "
             "Available prompts represent QualCoder skills from system, user, and project scope."
         )
 
@@ -120,8 +110,7 @@ class AiMcpServer:
                 req = types.ReadResourceRequest(params=types.ReadResourceRequestParams(uri=uri_with_window))
                 result = self._dispatch_sdk(types.ReadResourceRequest, req)
             elif method == "tools/list":
-                req = types.ListToolsRequest(params=self._pagination_params(params))
-                result = self._dispatch_sdk(types.ListToolsRequest, req)
+                result = self._list_tools_payload()
             elif method == "tools/call":
                 name = str(params.get("name", "")).strip()
                 if name == "":
@@ -129,8 +118,8 @@ class AiMcpServer:
                 args = params.get("arguments")
                 if args is not None and not isinstance(args, dict):
                     raise ValueError("Tool arguments must be an object.")
-                req = types.CallToolRequest(params=types.CallToolRequestParams(name=name, arguments=args))
-                result = self._dispatch_sdk(types.CallToolRequest, req)
+                change_set_id = str(params.get("_ai_change_set_id", "")).strip()
+                result = self._call_tool_payload(name, args, change_set_id)
             elif method == "prompts/list":
                 result = self._list_prompts_payload()
             elif method == "prompts/get":
@@ -151,166 +140,91 @@ class AiMcpServer:
         except Exception as err:
             return self._error_response(request_id, -32603, "Internal error", str(err))
 
-    def describe_status_event(self, method: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Describe a user-facing status event for a request, if applicable."""
+    def describe_status_event(self, method: str, params: Dict[str, Any]) -> str:
+        """Describe one user-facing status line for a request, if applicable."""
 
         if method == "initialize":
-            return None
+            return ""
         if method == "resources/templates/list":
-            return None
+            return ""
         if method == "resources/list":
-            return {
-                "status_code": "resources_list",
-                "phase": "start",
-                "method": method,
-                "message_id": self.STATUS_REVIEW_AVAILABLE_MATERIALS,
-                "message_args": {},
-            }
+            return ""
+        if method == "tools/list":
+            return ""
+        if method == "tools/call":
+            tool_name = str(params.get("name", "")).strip()
+            if tool_name == "":
+                return ""
+            tool_args = params.get("arguments", {})
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+            if tool_name == "codes/create_category":
+                cat_name = " ".join(str(tool_args.get("name", "")).split()).strip()
+                if cat_name == "":
+                    cat_name = _("(unnamed category)")
+                return _('Creating category "{name}"...').format(name=cat_name)
+            if tool_name == "codes/create_code":
+                code_name = " ".join(str(tool_args.get("name", "")).split()).strip()
+                if code_name == "":
+                    code_name = _("(unnamed code)")
+                return _('Creating code "{name}"...').format(name=code_name)
+            if tool_name == "codes/create_text_coding":
+                cid = self._to_int(tool_args.get("cid"), -1)
+                fid = self._to_int(tool_args.get("fid"), -1)
+                code_name = self._fetch_code_name(cid) if cid > 0 else None
+                if code_name is None or str(code_name).strip() == "":
+                    code_name = _("Code") + (f" #{cid}" if cid > 0 else "")
+                doc_name = self._fetch_source_name(fid) if fid > 0 else None
+                if doc_name is None or str(doc_name).strip() == "":
+                    doc_name = _("Document") + (f" #{fid}" if fid > 0 else "")
+                return _('Creating text coding for code "{code}" in document "{document}"...').format(
+                    code=str(code_name),
+                    document=str(doc_name),
+                )
+            return _('Executing tool "{name}"...').format(name=tool_name)
         if method != "resources/read":
-            return None
+            return ""
 
         uri = str(params.get("uri", ""))
         uri_base = uri.split("?", 1)[0]
-        base_event = {
-            "phase": "start",
-            "method": method,
-            "uri": uri_base,
-            "message_args": {},
-        }
 
         if uri_base == "qualcoder://documents":
-            return {
-                **base_event,
-                "status_code": "documents_list",
-                "entity_type": "documents",
-                "message_id": self.STATUS_REVIEW_DOCUMENT_LIST,
-            }
+            return _('Reviewing the list of text documents...')
         if uri_base == "qualcoder://codes/tree":
-            return {
-                **base_event,
-                "status_code": "codes_tree",
-                "entity_type": "codes_tree",
-                "message_id": self.STATUS_REVIEW_CODE_TREE,
-            }
+            return _('Reviewing the current code structure...')
         if uri_base == "qualcoder://vector/search":
-            return {
-                **base_event,
-                "status_code": "vector_search",
-                "entity_type": "vector_search",
-                "message_id": self.STATUS_REVIEW_VECTOR_SEARCH,
-            }
+            return _('Running semantic search in the project data...')
         if uri_base == "qualcoder://search/regex":
-            return {
-                **base_event,
-                "status_code": "regex_search",
-                "entity_type": "regex_search",
-                "message_id": self.STATUS_REVIEW_REGEX_SEARCH,
-            }
+            return _('Running keyword search in the project data...')
         code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_base)
         if code_segments_match is not None:
             cid = int(code_segments_match.group(1))
             code_name = self._fetch_code_name(cid)
             if code_name is None or code_name == "":
                 code_name = f"Code {cid}"
-            return {
-                **base_event,
-                "status_code": "code_segments",
-                "entity_type": "code_segments",
-                "entity_id": cid,
-                "entity_name": code_name,
-                "message_id": self.STATUS_REVIEW_CODE_SEGMENTS,
-                "message_args": {"id": cid, "name": code_name},
-            }
+            return _('Reviewing coded text segments for "{name}"...').format(name=code_name)
         doc_match = re.fullmatch(r"qualcoder://documents/text/(\d+)", uri_base)
         if doc_match is not None:
             doc_id = int(doc_match.group(1))
             doc_name = self._fetch_source_name(doc_id)
             if doc_name is None or doc_name == "":
                 doc_name = f"Document {doc_id}"
-            return {
-                **base_event,
-                "status_code": "document_read",
-                "entity_type": "document",
-                "entity_id": doc_id,
-                "entity_name": doc_name,
-                "message_id": self.STATUS_REVIEW_DOCUMENT,
-                "message_args": {"id": doc_id, "name": doc_name},
-            }
+            return _('Reviewing text document "{name}"...').format(name=doc_name)
 
-        return {
-            **base_event,
-            "status_code": "resource_read",
-            "entity_type": "resource",
-            "message_id": self.STATUS_REVIEW_RESOURCE,
-        }
+        return _('Reviewing project material...')
 
-    def describe_host_status_event(self, phase: str) -> Optional[Dict[str, Any]]:
-        """Describe non-MCP but related host-side status events."""
+    def describe_host_status_event(self, phase: str) -> str:
+        """Describe non-MCP but related host-side status lines."""
 
         if phase == "planning":
-            return {
-                "status_code": "planning",
-                "phase": "start",
-                "message_id": self.STATUS_PLAN_MCP_STEPS,
-                "message_args": {},
-            }
+            return _('Planning how to gather project evidence...')
         if phase == "execution":
-            return {
-                "status_code": "execution",
-                "phase": "start",
-                "message_id": self.STATUS_EXECUTE_MCP_STEPS,
-                "message_args": {},
-            }
+            return _('Executing MCP retrieval steps...')
         if phase == "reflection":
-            return {
-                "status_code": "reflection",
-                "phase": "start",
-                "message_id": self.STATUS_REFLECT_MCP_RESULTS,
-                "message_args": {},
-            }
+            return _('Reflecting on retrieved evidence and revising the plan...')
         if phase == "final_response":
-            return {
-                "status_code": "final_response",
-                "phase": "start",
-                "message_id": self.STATUS_FORMULATE_RESPONSE,
-                "message_args": {},
-            }
-        return None
-
-    def status_event_to_text(self, status_event: Optional[Dict[str, Any]]) -> str:
-        """Convert a status event into user-facing text, translated if gettext is available."""
-
-        if status_event is None:
-            return ""
-        message_id = str(status_event.get("message_id", "")).strip()
-        if message_id == "":
-            return ""
-        message_args = status_event.get("message_args", {})
-        if not isinstance(message_args, dict):
-            message_args = {}
-        templates = {
-            # Keep literal msgids in _() calls so gettext extraction can discover them.
-            self.STATUS_REVIEW_AVAILABLE_MATERIALS: _('Reviewing available project materials...'),
-            self.STATUS_REVIEW_DOCUMENT_LIST: _('Reviewing the list of text documents...'),
-            self.STATUS_REVIEW_CODE_TREE: _('Reviewing the current code structure...'),
-            self.STATUS_REVIEW_DOCUMENT: _('Reviewing text document "{name}"...'),
-            self.STATUS_REVIEW_RESOURCE: _('Reviewing project material...'),
-            self.STATUS_REVIEW_CODE_SEGMENTS: _('Reviewing coded text segments for "{name}"...'),
-            self.STATUS_REVIEW_VECTOR_SEARCH: _('Running semantic search in the project data...'),
-            self.STATUS_REVIEW_REGEX_SEARCH: _('Running keyword search in the project data...'),
-            self.STATUS_PLAN_MCP_STEPS: _('Planning how to gather project evidence...'),
-            self.STATUS_EXECUTE_MCP_STEPS: _('Executing MCP retrieval steps...'),
-            self.STATUS_REFLECT_MCP_RESULTS: _('Reflecting on retrieved evidence and revising the plan...'),
-            self.STATUS_FORMULATE_RESPONSE: _('Formulating a response based on the selected materials...'),
-        }
-        translated = templates.get(message_id)
-        if translated is None:
-            # Backward compatibility if older serialized events contain literal text IDs.
-            translated = _(message_id)
-        try:
-            return translated.format(**message_args)
-        except Exception:
-            return translated
+            return _('Formulating a response based on the selected materials...')
+        return ""
 
     def _initialize_result(self) -> Dict[str, Any]:
         result = types.InitializeResult(
@@ -422,11 +336,11 @@ class AiMcpServer:
 
         @self._sdk_server.list_tools()
         async def _list_tools(_: types.ListToolsRequest) -> types.ListToolsResult:
-            return types.ListToolsResult(tools=[])
+            return types.ListToolsResult.model_validate(self._list_tools_payload())
 
         @self._sdk_server.call_tool()
         async def _call_tool(_name: str, _arguments: Dict[str, Any]) -> Dict[str, Any]:
-            raise RuntimeError("No MCP tools are enabled yet. Current phase is read-only resources.")
+            return self._call_tool_payload(_name, _arguments, "")
 
         @self._sdk_server.list_prompts()
         async def _list_prompts(_: types.ListPromptsRequest) -> types.ListPromptsResult:
@@ -516,6 +430,62 @@ class AiMcpServer:
             )
         return {"prompts": prompts}
 
+    def _list_tools_payload(self) -> Dict[str, Any]:
+        return {
+            "tools": [
+                {
+                    "name": "codes/create_category",
+                    "description": (
+                        "Create a new code category. Use this only when explicitly needed by the user request."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "memo": {"type": "string"},
+                            "supercatid": {"type": ["integer", "null"]},
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/create_code",
+                    "description": (
+                        "Create a new code. Use catid to assign the code to a category, or null for top-level."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "memo": {"type": "string"},
+                            "catid": {"type": ["integer", "null"]},
+                            "color": {"type": "string"},
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/create_text_coding",
+                    "description": (
+                        "Create one text coding by code id and quoted text in a text document."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cid": {"type": "integer"},
+                            "fid": {"type": "integer"},
+                            "quote": {"type": "string"},
+                            "memo": {"type": "string"},
+                        },
+                        "required": ["cid", "fid", "quote"],
+                        "additionalProperties": False,
+                    },
+                },
+            ]
+        }
+
     def _get_prompt_payload(self, name: str, arguments: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if arguments is not None and not isinstance(arguments, dict):
             raise ValueError("Prompt arguments must be an object.")
@@ -542,6 +512,325 @@ class AiMcpServer:
                 }
             ],
         }
+
+    def _call_tool_payload(self, name: str, arguments: Optional[Dict[str, Any]], change_set_id: str) -> Dict[str, Any]:
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            raise ValueError("Tool arguments must be an object.")
+        tool_name = str(name).strip()
+        if tool_name == "":
+            raise ValueError("Missing tool name.")
+
+        if tool_name == "codes/create_category":
+            payload = self._tool_create_category(arguments, change_set_id)
+        elif tool_name == "codes/create_code":
+            payload = self._tool_create_code(arguments, change_set_id)
+        elif tool_name == "codes/create_text_coding":
+            payload = self._tool_create_text_coding(arguments, change_set_id)
+        else:
+            raise ValueError(f"Unknown tool name: {tool_name}")
+
+        return {
+            "isError": False,
+            "structuredContent": payload,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(payload, ensure_ascii=False),
+                }
+            ],
+        }
+
+    def _tool_create_category(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        name = " ".join(str(arguments.get("name", "")).split()).strip()
+        if name == "":
+            raise ValueError("Category name must not be empty.")
+        memo = str(arguments.get("memo", "") if arguments.get("memo", "") is not None else "")
+        supercatid_raw = arguments.get("supercatid", None)
+        supercatid = None
+        if supercatid_raw is not None:
+            supercatid = self._to_int(supercatid_raw, -1)
+            if supercatid <= 0:
+                raise ValueError("supercatid must be a positive integer or null.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if supercatid is not None:
+                row = cur.execute("SELECT catid FROM code_cat WHERE catid=?", (supercatid,)).fetchone()
+                if row is None:
+                    raise ValueError(f"Parent category id {supercatid} not found.")
+
+            existing = cur.execute(
+                "SELECT catid, owner, ifnull(memo,''), supercatid FROM code_cat WHERE lower(name)=lower(?)",
+                (name,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "tool": "codes/create_category",
+                    "created": False,
+                    "reason": "already_exists",
+                    "category": {
+                        "catid": int(existing[0]),
+                        "name": name,
+                        "owner": existing[1],
+                        "memo": existing[2],
+                        "supercatid": existing[3],
+                    },
+                }
+
+            cur.execute(
+                "INSERT INTO code_cat (name, memo, owner, date, supercatid) VALUES (?, ?, ?, ?, ?)",
+                (name, memo, self.AI_AGENT_OWNER, now, supercatid),
+            )
+            catid = int(cur.lastrowid)
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "create_category",
+                    "catid": catid,
+                    "name": name,
+                    "memo": memo,
+                    "supercatid": supercatid,
+                    "owner": self.AI_AGENT_OWNER,
+                    "created_at": now,
+                },
+            )
+            return {
+                "tool": "codes/create_category",
+                "created": True,
+                "category": {
+                    "catid": catid,
+                    "name": name,
+                    "memo": memo,
+                    "owner": self.AI_AGENT_OWNER,
+                    "date": now,
+                    "supercatid": supercatid,
+                },
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_create_code(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        name = " ".join(str(arguments.get("name", "")).split()).strip()
+        if name == "":
+            raise ValueError("Code name must not be empty.")
+        memo = str(arguments.get("memo", "") if arguments.get("memo", "") is not None else "")
+        catid_raw = arguments.get("catid", None)
+        catid = None
+        if catid_raw is not None:
+            catid = self._to_int(catid_raw, -1)
+            if catid <= 0:
+                raise ValueError("catid must be a positive integer or null.")
+        color = self._normalize_hex_color(arguments.get("color"))
+        if color == "":
+            color = "#8A8A8A"
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            if catid is not None:
+                row = cur.execute("SELECT catid FROM code_cat WHERE catid=?", (catid,)).fetchone()
+                if row is None:
+                    raise ValueError(f"Category id {catid} not found.")
+
+            existing = cur.execute(
+                "SELECT cid, owner, ifnull(memo,''), catid, color FROM code_name WHERE lower(name)=lower(?)",
+                (name,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "tool": "codes/create_code",
+                    "created": False,
+                    "reason": "already_exists",
+                    "code": {
+                        "cid": int(existing[0]),
+                        "name": name,
+                        "owner": existing[1],
+                        "memo": existing[2],
+                        "catid": existing[3],
+                        "color": existing[4],
+                    },
+                }
+
+            cur.execute(
+                "INSERT INTO code_name (name, memo, catid, owner, date, color) VALUES (?, ?, ?, ?, ?, ?)",
+                (name, memo, catid, self.AI_AGENT_OWNER, now, color),
+            )
+            cid = int(cur.lastrowid)
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "create_code",
+                    "cid": cid,
+                    "name": name,
+                    "memo": memo,
+                    "catid": catid,
+                    "color": color,
+                    "owner": self.AI_AGENT_OWNER,
+                    "created_at": now,
+                },
+            )
+            return {
+                "tool": "codes/create_code",
+                "created": True,
+                "code": {
+                    "cid": cid,
+                    "name": name,
+                    "memo": memo,
+                    "catid": catid,
+                    "color": color,
+                    "owner": self.AI_AGENT_OWNER,
+                    "date": now,
+                },
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_create_text_coding(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        cid = self._to_int(arguments.get("cid"), -1)
+        fid = self._to_int(arguments.get("fid"), -1)
+        quote = str(arguments.get("quote", "") if arguments.get("quote", "") is not None else "").strip()
+        memo = str(arguments.get("memo", "") if arguments.get("memo", "") is not None else "")
+
+        if cid <= 0:
+            raise ValueError("cid must be a positive integer.")
+        if fid <= 0:
+            raise ValueError("fid must be a positive integer.")
+        if quote == "":
+            raise ValueError("quote must not be empty.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+            code_row = cur.execute("SELECT cid, name FROM code_name WHERE cid=?", (cid,)).fetchone()
+            if code_row is None:
+                raise ValueError(f"Code id {cid} not found.")
+
+            source_row = cur.execute(
+                "SELECT id, name, ifnull(fulltext,'') FROM source WHERE id=? AND fulltext IS NOT NULL",
+                (fid,),
+            ).fetchone()
+            if source_row is None:
+                raise ValueError(f"Text document id {fid} not found.")
+            fulltext = str(source_row[2])
+
+            pos0, pos1 = self._quote_search(quote, fulltext)
+            if pos0 < 0 or pos1 <= pos0:
+                raise ValueError("quote could not be matched in the document text.")
+            seltext = fulltext[pos0:pos1]
+
+            existing = cur.execute(
+                "SELECT ctid FROM code_text WHERE cid=? AND fid=? AND pos0=? AND pos1=? AND owner=?",
+                (cid, fid, pos0, pos1, self.AI_AGENT_OWNER),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "tool": "codes/create_text_coding",
+                    "created": False,
+                    "reason": "already_exists",
+                    "coding": {
+                        "ctid": int(existing[0]),
+                        "cid": cid,
+                        "fid": fid,
+                        "pos0": pos0,
+                        "pos1": pos1,
+                        "owner": self.AI_AGENT_OWNER,
+                    },
+                }
+
+            cur.execute(
+                "INSERT INTO code_text (cid, fid, seltext, pos0, pos1, owner, date, memo) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cid, fid, seltext, pos0, pos1, self.AI_AGENT_OWNER, now, memo),
+            )
+            ctid = int(cur.lastrowid)
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "create_coding_text",
+                    "ctid": ctid,
+                    "cid": cid,
+                    "fid": fid,
+                    "code_name": str(code_row[1] if code_row[1] is not None else ""),
+                    "source_name": str(source_row[1] if source_row[1] is not None else ""),
+                    "pos0": pos0,
+                    "pos1": pos1,
+                    "seltext": seltext,
+                    "owner": self.AI_AGENT_OWNER,
+                    "memo": memo,
+                    "created_at": now,
+                },
+            )
+            return {
+                "tool": "codes/create_text_coding",
+                "created": True,
+                "coding": {
+                    "ctid": ctid,
+                    "cid": cid,
+                    "fid": fid,
+                    "pos0": pos0,
+                    "pos1": pos1,
+                    "quote": seltext,
+                    "owner": self.AI_AGENT_OWNER,
+                    "date": now,
+                },
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _normalize_hex_color(self, value: Any) -> str:
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if re.fullmatch(r"#[0-9A-Fa-f]{6}", text) is None:
+            return ""
+        return text.upper()
+
+    def _quote_search(self, quote: str, fulltext: str) -> Tuple[int, int]:
+        """Find quote boundaries, preferring ai_llm.ai_quote_search with graceful fallback."""
+
+        try:
+            from .ai_llm import ai_quote_search as _ai_quote_search
+            return _ai_quote_search(quote, fulltext)
+        except Exception:
+            quote_text = str(quote).strip()
+            if quote_text == "":
+                return -1, -1
+            start = fulltext.find(quote_text)
+            if start < 0:
+                return -1, -1
+            return start, start + len(quote_text)
+
+    def _record_ai_change(self, change_set_id: str, operation: Dict[str, Any]) -> None:
+        ai = getattr(self.app, "ai", None)
+        if ai is not None and hasattr(ai, "record_ai_change"):
+            ai.record_ai_change(change_set_id, operation)
 
     def _codes_tree(self) -> Dict[str, Any]:
         categories = []
