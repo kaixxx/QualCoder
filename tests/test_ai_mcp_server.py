@@ -215,6 +215,8 @@ class TestAiMcpServer(TestCase):
         self.assertIn("result", res)
         templates = [r["uriTemplate"] for r in res["result"]["resourceTemplates"]]
         self.assertIn("qualcoder://codes/segments/{cid}", templates)
+        self.assertIn("qualcoder://vector/search{?q,cursor,page_size,file_ids,exclude_cids,score_threshold,k_per_query}", templates)
+        self.assertIn("qualcoder://search/regex{?pattern,flags,cursor,page_size,file_ids,exclude_cids,context_chars}", templates)
 
     def test_project_coders_resource_contains_visibility(self):
         req = {"jsonrpc": "2.0", "id": 20, "method": "resources/read", "params": {"uri": "qualcoder://project/coders"}}
@@ -338,6 +340,59 @@ class TestAiMcpServer(TestCase):
         self.assertEqual(1, payload["id"])
         self.assertEqual("cdef", payload["text"])
         self.assertEqual(2, payload["start"])
+
+    def test_parse_vector_search_options_accepts_file_ids_and_exclude_cids(self):
+        options = self.server._parse_vector_search_options(
+            {
+                "q": ["work"],
+                "file_ids": ["1,2"],
+                "exclude_cids": ["4,5"],
+            }
+        )
+        self.assertEqual([1, 2], options["file_ids"])
+        self.assertEqual([4, 5], options["exclude_cids"])
+
+    def test_parse_regex_search_options_accepts_file_ids_and_exclude_cids(self):
+        options = self.server._parse_regex_search_options(
+            {
+                "pattern": ["abc"],
+                "file_ids": ["1,2"],
+                "exclude_cids": ["7,8"],
+            }
+        )
+        self.assertEqual([1, 2], options["file_ids"])
+        self.assertEqual([7, 8], options["exclude_cids"])
+
+    def test_regex_search_with_file_ids_filters_to_selected_documents(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 34,
+            "method": "resources/read",
+            "params": {"uri": "qualcoder://search/regex?pattern=.&file_ids=1&context_chars=0&page_size=50"},
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        self.assertEqual([1], payload["selection"]["file_ids"])
+        self.assertTrue(len(payload["hits"]) > 0)
+        self.assertTrue(all(hit["source_id"] == 1 for hit in payload["hits"]))
+
+    def test_regex_search_exclude_cids_returns_only_new_passages(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 35,
+            "method": "resources/read",
+            "params": {
+                "uri": "qualcoder://search/regex?pattern=.&file_ids=1&exclude_cids=1&context_chars=0&page_size=50"
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = json.loads(res["result"]["contents"][0]["text"])
+        self.assertEqual([1], payload["selection"]["exclude_cids"])
+        self.assertEqual(1, len(payload["hits"]))
+        self.assertEqual(1, payload["hits"][0]["source_id"])
+        self.assertEqual(5, payload["hits"][0]["match_start"])
 
     def test_unknown_method_returns_jsonrpc_error(self):
         res = self.server.handle_request({"jsonrpc": "2.0", "id": 4, "method": "unknown/method", "params": {}})
