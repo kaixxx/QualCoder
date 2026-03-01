@@ -772,7 +772,8 @@ class App(object):
                 'dialogreport_code_summary_splitter0', 'dialogreport_code_summary_splitter0',
                 'stylesheet', 'backup_num', 'codetext_chunksize',
                 'report_text_context_characters', 'report_text_context_style',
-                'ai_enable', 'ai_first_startup', 'ai_model_index', 'ai_chat_sidebar', 'ai_chat_sidebar_width'
+                'ai_enable', 'ai_first_startup', 'ai_model_index', 'ai_chat_sidebar',
+                'ai_chat_sidebar_width', 'ai_chat_splitter_output_bottom'
                 ]
         for key in keys:
             if key not in settings_data:
@@ -803,6 +804,8 @@ class App(object):
                     settings_data[key] = 'False'
                 if key == 'ai_chat_sidebar_width':
                     settings_data[key] = 320
+                if key == 'ai_chat_splitter_output_bottom':
+                    settings_data[key] = 80
                     
         # Check AI models
         if len(ai_models) == 0:  # No models loaded, create default
@@ -1109,7 +1112,8 @@ class App(object):
             'ai_first_startup': 'True',
             'ai_model_index': -1,
             'ai_chat_sidebar': 'False',
-            'ai_chat_sidebar_width': 320
+            'ai_chat_sidebar_width': 320,
+            'ai_chat_splitter_output_bottom': 80
         }
 
     def get_file_texts(self, file_ids=None):
@@ -1465,7 +1469,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.init_ui()
         self.ui.tabWidget.setCurrentIndex(0)
         self.show()
-        QtWidgets.QApplication.processEvents() 
+        QtWidgets.QApplication.processEvents()
+        QtCore.QTimer.singleShot(0, self._restore_ai_splitters_after_show)
         # Setup AI
         try:
             global AiLLM
@@ -2218,15 +2223,14 @@ Click "Yes" to start now.')
         self.ai_chat_window.show()
 
     def _get_saved_ai_sidebar_width(self, fallback_total=1000):
-        """Return configured sidebar width as integer with sane bounds."""
+        """Return configured sidebar width without imposing artificial minima."""
 
         try:
             width = int(self.app.settings.get('ai_chat_sidebar_width', 320))
         except (TypeError, ValueError):
             width = 320
-        min_sidebar = 80
-        max_sidebar = max(min_sidebar, int(fallback_total) - 240)
-        return max(min_sidebar, min(width, max_sidebar))
+        total = max(2, int(fallback_total))
+        return max(1, min(width, total - 1))
 
     def _remember_ai_sidebar_width(self):
         """Read current splitter sidebar width and keep it in settings (in-memory)."""
@@ -2242,8 +2246,17 @@ Click "Yes" to start now.')
         sizes = self.ui.splitter.sizes()
         total = sum(sizes) if sum(sizes) > 0 else 1000
         sidebar_width = self._get_saved_ai_sidebar_width(fallback_total=total)
-        main_width = max(240, total - sidebar_width)
+        main_width = max(1, total - sidebar_width)
         self.ui.splitter.setSizes([main_width, sidebar_width])
+
+    def _restore_ai_splitters_after_show(self):
+        """Re-apply saved splitter positions once window geometry is finalized."""
+
+        if self.ai_chat_window is not None:
+            self.ai_chat_window.restore_ai_output_splitter()
+        if self.ai_chat_sidebar_mode:
+            self._apply_ai_sidebar_splitter_sizes()
+            QtCore.QTimer.singleShot(30, self._apply_ai_sidebar_splitter_sizes)
 
     def set_ai_chat_sidebar_mode(self, enabled, persist=True):
         """Switch AI chat between main tab view and sidebar view."""
@@ -2271,6 +2284,7 @@ Click "Yes" to start now.')
             self.ui.tabWidget.setCurrentWidget(self.ui.tab_action_log)
             self._apply_ai_sidebar_splitter_sizes()
             QtCore.QTimer.singleShot(0, self._apply_ai_sidebar_splitter_sizes)
+            QtCore.QTimer.singleShot(30, self._apply_ai_sidebar_splitter_sizes)
         else:
             sizes = self.ui.splitter.sizes()
             total = sum(sizes) if sum(sizes) > 0 else 1000

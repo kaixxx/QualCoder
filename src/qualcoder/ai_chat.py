@@ -125,6 +125,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.comboBox_ai_chats.setView(combo_view)
         self.ui.comboBox_ai_chats.currentIndexChanged.connect(self.combo_chat_selection_changed)
         self.ui.toolButton_close_sidebar.pressed.connect(self.close_sidebar_view)
+        self.ui.splitter_ai_output.splitterMoved.connect(self.on_ai_output_splitter_moved)
         self.ui.ai_output.linkHovered.connect(self.on_linkHovered)
         self.ui.ai_output.linkActivated.connect(self.on_linkActivated)
         self.ui.pushButton_help.pressed.connect(self.help)
@@ -158,6 +159,11 @@ class DialogAIChat(QtWidgets.QDialog):
         ai_output_size_policy = self.ui.ai_output.sizePolicy()
         ai_output_size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Ignored)
         self.ui.ai_output.setSizePolicy(ai_output_size_policy)
+        self.ai_output_splitter_save_timer = QtCore.QTimer(self)
+        self.ai_output_splitter_save_timer.setSingleShot(True)
+        self.ai_output_splitter_save_timer.timeout.connect(self.persist_ai_output_splitter_setting)
+        self.ai_output_splitter_restore_attempts = 0
+        QtCore.QTimer.singleShot(0, self.restore_ai_output_splitter)
         self.ui.scrollArea_ai_output.verticalScrollBar().valueChanged.connect(self.on_ai_output_scroll)
         self.set_sidebar_mode(False)
 
@@ -175,6 +181,8 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.pushButton_help.setIcon(qta.icon('mdi6.help'))
         self.ui.pushButton_help.setFixedHeight(self.ui.pushButton_delete.height())
         self.ui.pushButton_help.setFixedWidth(self.ui.pushButton_help.height())
+        self.ui.toolButton_close_sidebar.setIcon(qta.icon('mdi6.arrow-left-bold-outline'))
+        self.ui.toolButton_close_sidebar.setIconSize(QtCore.QSize(16, 16))
         doc_font = f'font: {self.app.settings["docfontsize"]}pt \'{self.app.settings["font"]}\';'
         self.ai_response_style = f'"{doc_font} color: #356399;"'
         self.ai_user_style = f'"{doc_font} color: #287368;"'
@@ -258,6 +266,8 @@ class DialogAIChat(QtWidgets.QDialog):
         self.fill_chat_list()
     
     def close(self):
+        self.on_ai_output_splitter_moved()
+        self.persist_ai_output_splitter_setting()
         if self.chat_history_conn is not None:
             self.chat_history_conn.close()
             
@@ -271,16 +281,63 @@ class DialogAIChat(QtWidgets.QDialog):
             return
         ai.undo_ai_agent_changes()
 
+    def _get_saved_ai_output_splitter_bottom(self):
+        """Return the saved bottom pane height for the AI output splitter."""
+
+        try:
+            bottom_height = int(self.app.settings.get('ai_chat_splitter_output_bottom', 80))
+        except (TypeError, ValueError):
+            bottom_height = 80
+        return max(1, bottom_height)
+
+    def restore_ai_output_splitter(self):
+        """Restore splitter position so the lower pane defaults to 80px when unset."""
+
+        sizes = self.ui.splitter_ai_output.sizes()
+        total_height = sum(sizes)
+        if total_height <= 0:
+            total_height = self.ui.splitter_ai_output.height()
+        if total_height <= 0:
+            # Layout is not ready yet; retry briefly, but avoid endless retries.
+            if self.ai_output_splitter_restore_attempts < 20:
+                self.ai_output_splitter_restore_attempts += 1
+                QtCore.QTimer.singleShot(0, self.restore_ai_output_splitter)
+            return
+        self.ai_output_splitter_restore_attempts = 0
+        bottom_height = min(self._get_saved_ai_output_splitter_bottom(), max(1, total_height - 1))
+        top_height = max(1, total_height - bottom_height)
+        self.ui.splitter_ai_output.setSizes([top_height, bottom_height])
+
+    def on_ai_output_splitter_moved(self, pos=None, index=None):
+        """Track splitter movement and persist the current lower pane height."""
+
+        sizes = self.ui.splitter_ai_output.sizes()
+        if len(sizes) < 2:
+            return
+        bottom_height = int(sizes[1])
+        if bottom_height <= 0:
+            return
+        self.app.settings['ai_chat_splitter_output_bottom'] = bottom_height
+        self.ai_output_splitter_save_timer.start(400)
+
+    def persist_ai_output_splitter_setting(self):
+        """Write splitter setting to config.ini after drag operations settle."""
+
+        try:
+            self.app.write_config_ini(self.app.settings, self.app.ai_models)
+        except Exception as e_:
+            logger.debug(f"Could not persist ai output splitter setting: {e_}")
+
     def _move_left_buttons_to_chat(self):
         """Place left action buttons at the bottom of the chat area (sidebar mode)."""
 
         self.ui.verticalLayout_2.removeWidget(self.ui.widget_left_buttons)
-        self.ui.gridLayout_2.addWidget(self.ui.widget_left_buttons, 4, 0, 1, 2)
+        self.ui.verticalLayout_4.addWidget(self.ui.widget_left_buttons)
 
     def _move_left_buttons_to_left(self):
         """Place left action buttons back under the tree view (main mode)."""
 
-        self.ui.gridLayout_2.removeWidget(self.ui.widget_left_buttons)
+        self.ui.verticalLayout_4.removeWidget(self.ui.widget_left_buttons)
         self.ui.verticalLayout_2.addWidget(self.ui.widget_left_buttons)
 
     def _move_chat_widget_to_sidebar(self):
@@ -311,6 +368,7 @@ class DialogAIChat(QtWidgets.QDialog):
         """Switch dialog internals between main view and sidebar view."""
 
         if enabled:
+            self.ui.gridLayout.setContentsMargins(0, 0, 0, 0)
             self._move_chat_widget_to_sidebar()
             self._move_left_buttons_to_chat()
             self._detach_widget_left_from_grid()
@@ -323,6 +381,7 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ui.widget_left.setVisible(False)
             self.ui.widget_top.setVisible(True)
         else:
+            self.ui.gridLayout.setContentsMargins(6, 6, 6, 6)
             self._move_chat_widget_to_main()
             self._attach_widget_left_to_grid()
             self._move_left_buttons_to_left()
@@ -331,6 +390,7 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ui.widget_top.setVisible(False)
         self.ui.gridLayout.invalidate()
         self.updateGeometry()
+        QtCore.QTimer.singleShot(0, self.restore_ai_output_splitter)
 
     def close_sidebar_view(self):
         """Close sidebar mode and return AI chat to the main tab."""
