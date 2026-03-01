@@ -22,7 +22,7 @@ https://qualcoder-org.github.io/
 
 from PyQt6 import QtWidgets, QtCore
 from PyQt6.QtCore import Qt, QEvent, QObject, pyqtSignal
-from PyQt6.QtGui import QCursor, QGuiApplication, QAction, QPalette, QShortcut, QKeySequence
+from PyQt6.QtGui import QCursor, QGuiApplication, QAction, QPalette, QShortcut, QKeySequence, QStandardItemModel, QStandardItem
 from PyQt6.QtWidgets import QTextEdit
 import qtawesome as qta
 
@@ -96,12 +96,35 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.pushButton_new_analysis.clicked.connect(self.button_new_clicked)
         self.ui.pushButton_delete.clicked.connect(self.delete_chat)
         self.ui.pushButton_delete.setShortcut('Delete')
-        self.ui.listWidget_chat_list.itemSelectionChanged.connect(self.chat_list_selection_changed)
+        self.chat_list_model = QStandardItemModel(self)
+        self.ui.treeView_chat_list.setModel(self.chat_list_model)
+        self.ui.treeView_chat_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.ui.treeView_chat_list.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         # Enable editing of items on double click and when pressing F2
-        self.ui.listWidget_chat_list.setEditTriggers(QtWidgets.QListWidget.EditTrigger.DoubleClicked | QtWidgets.QListWidget.EditTrigger.EditKeyPressed)
-        self.ui.listWidget_chat_list.itemChanged.connect(self.chat_list_item_changed)
-        self.ui.listWidget_chat_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-        self.ui.listWidget_chat_list.customContextMenuRequested.connect(self.open_context_menu)
+        self.ui.treeView_chat_list.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked |
+            QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        self.ui.treeView_chat_list.selectionModel().selectionChanged.connect(self.chat_list_selection_changed)
+        self.chat_list_model.itemChanged.connect(self.chat_list_item_changed)
+        self.ui.treeView_chat_list.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.treeView_chat_list.customContextMenuRequested.connect(self.open_context_menu)
+        self.ui.comboBox_ai_chats.setModel(self.chat_list_model)
+        self.ui.comboBox_ai_chats.setModelColumn(0)
+        self.ui.comboBox_ai_chats.setMinimumContentsLength(1)
+        self.ui.comboBox_ai_chats.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo_size_policy = self.ui.comboBox_ai_chats.sizePolicy()
+        combo_size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Ignored)
+        self.ui.comboBox_ai_chats.setSizePolicy(combo_size_policy)
+        self.ui.comboBox_ai_chats.setMinimumWidth(0)
+        combo_view = QtWidgets.QTreeView(self.ui.comboBox_ai_chats)
+        combo_view.setRootIsDecorated(False)
+        combo_view.header().setVisible(False)
+        self.ui.comboBox_ai_chats.setView(combo_view)
+        self.ui.comboBox_ai_chats.currentIndexChanged.connect(self.combo_chat_selection_changed)
+        self.ui.toolButton_close_sidebar.pressed.connect(self.close_sidebar_view)
         self.ui.ai_output.linkHovered.connect(self.on_linkHovered)
         self.ui.ai_output.linkActivated.connect(self.on_linkActivated)
         self.ui.pushButton_help.pressed.connect(self.help)
@@ -128,7 +151,15 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_text_text = ''
         self.ai_text_start_pos = -1
         self.ai_output_autoscroll = True
+        self.setMinimumWidth(0)
+        self.ui.widget_chat.setMinimumWidth(0)
+        self.ui.scrollArea_ai_output.setMinimumWidth(0)
+        self.ui.ai_output.setMinimumWidth(0)
+        ai_output_size_policy = self.ui.ai_output.sizePolicy()
+        ai_output_size_policy.setHorizontalPolicy(QtWidgets.QSizePolicy.Policy.Ignored)
+        self.ui.ai_output.setSizePolicy(ai_output_size_policy)
         self.ui.scrollArea_ai_output.verticalScrollBar().valueChanged.connect(self.on_ai_output_scroll)
+        self.set_sidebar_mode(False)
 
     def init_styles(self):
         """Set up the stylesheets for the ui and the chat entries
@@ -240,6 +271,80 @@ class DialogAIChat(QtWidgets.QDialog):
             return
         ai.undo_ai_agent_changes()
 
+    def _move_left_buttons_to_chat(self):
+        """Place left action buttons at the bottom of the chat area (sidebar mode)."""
+
+        self.ui.verticalLayout_2.removeWidget(self.ui.widget_left_buttons)
+        self.ui.gridLayout_2.addWidget(self.ui.widget_left_buttons, 4, 0, 1, 2)
+
+    def _move_left_buttons_to_left(self):
+        """Place left action buttons back under the tree view (main mode)."""
+
+        self.ui.gridLayout_2.removeWidget(self.ui.widget_left_buttons)
+        self.ui.verticalLayout_2.addWidget(self.ui.widget_left_buttons)
+
+    def _move_chat_widget_to_sidebar(self):
+        """Use full width below the top bar in sidebar mode."""
+
+        self.ui.gridLayout.removeWidget(self.ui.widget_chat)
+        self.ui.gridLayout.addWidget(self.ui.widget_chat, 3, 0, 1, 2)
+
+    def _move_chat_widget_to_main(self):
+        """Restore split layout with chat on the right side."""
+
+        self.ui.gridLayout.removeWidget(self.ui.widget_chat)
+        self.ui.gridLayout.addWidget(self.ui.widget_chat, 3, 1, 1, 1)
+
+    def _detach_widget_left_from_grid(self):
+        """Remove left panel from outer grid so it contributes no minimum width."""
+
+        if self.ui.gridLayout.indexOf(self.ui.widget_left) != -1:
+            self.ui.gridLayout.removeWidget(self.ui.widget_left)
+
+    def _attach_widget_left_to_grid(self):
+        """Insert left panel back into outer grid in main view."""
+
+        if self.ui.gridLayout.indexOf(self.ui.widget_left) == -1:
+            self.ui.gridLayout.addWidget(self.ui.widget_left, 3, 0, 1, 1)
+
+    def set_sidebar_mode(self, enabled):
+        """Switch dialog internals between main view and sidebar view."""
+
+        if enabled:
+            self._move_chat_widget_to_sidebar()
+            self._move_left_buttons_to_chat()
+            self._detach_widget_left_from_grid()
+            self.setMinimumWidth(0)
+            self.ui.widget_chat.setMinimumWidth(0)
+            self.ui.widget_top.setMinimumWidth(0)
+            self.ui.comboBox_ai_chats.setMinimumWidth(0)
+            self.ui.widget_left.setMinimumWidth(0)
+            self.ui.widget_left.setMaximumWidth(0)
+            self.ui.widget_left.setVisible(False)
+            self.ui.widget_top.setVisible(True)
+        else:
+            self._move_chat_widget_to_main()
+            self._attach_widget_left_to_grid()
+            self._move_left_buttons_to_left()
+            self.ui.widget_left.setMaximumWidth(16777215)
+            self.ui.widget_left.setVisible(True)
+            self.ui.widget_top.setVisible(False)
+        self.ui.gridLayout.invalidate()
+        self.updateGeometry()
+
+    def close_sidebar_view(self):
+        """Close sidebar mode and return AI chat to the main tab."""
+
+        self.main_window.close_ai_chat_sidebar()
+
+    def combo_chat_selection_changed(self, index):
+        """Select the current chat when chosen via sidebar combo box."""
+
+        if index < 0:
+            self._set_chat_list_current_row(-1)
+            return
+        self._set_chat_list_current_row(index)
+
     def get_chat_list(self):
         """Load the current chat list from the database into self.chat_list
         """
@@ -250,7 +355,7 @@ class DialogAIChat(QtWidgets.QDialog):
             self.current_chat_idx = len(self.chat_list) - 1    
             
     def fill_chat_list(self):
-        self.ui.listWidget_chat_list.clear()
+        self.chat_list_model.clear()
         self.get_chat_list()
         for i in range(len(self.chat_list)):
             chat = self.chat_list[i]
@@ -270,17 +375,15 @@ class DialogAIChat(QtWidgets.QDialog):
             elif analysis_type == 'code chat':
                 icon = self.app.ai.code_analysis_icon()
 
-            item = QtWidgets.QListWidgetItem(icon, name)
+            item = QStandardItem(icon, name)
             item.setToolTip(tooltip_text)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-            
-            # Adding the item to the QListWidget
-            self.ui.listWidget_chat_list.addItem(item)
+            item.setEditable(True)
+            self.chat_list_model.appendRow(item)
             #if i == self.current_chat_idx:
             #    item.setSelected(True)
         if self.current_chat_idx >= len(self.chat_list):
             self.current_chat_idx = len(self.chat_list) - 1
-        self.ui.listWidget_chat_list.setCurrentRow(self.current_chat_idx)
+        self._set_chat_list_current_row(self.current_chat_idx)
         self.chat_list_selection_changed(force_update=True)
 
     def new_chat(self, name, analysis_type, summary, analysis_prompt):
@@ -294,7 +397,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.fill_chat_list()
         # select new chat
         self.current_chat_idx = self.find_chat_idx(cursor.lastrowid)
-        self.ui.listWidget_chat_list.setCurrentRow(self.current_chat_idx)
+        self._set_chat_list_current_row(self.current_chat_idx)
         self.ai_output_autoscroll = True
         self.chat_list_selection_changed()
 
@@ -1062,22 +1165,45 @@ data collected. This information will accompany every prompt sent to the AI, res
 
         return re.sub(ref_pattern, replace_ref, res)
 
-    def chat_list_selection_changed(self, force_update=False):
-        self.ui.pushButton_delete.setEnabled(self.current_chat_idx > -1)
-        if (not force_update) and (self.current_chat_idx == self.ui.listWidget_chat_list.currentRow()):
+    def _chat_list_current_row(self):
+        index = self.ui.treeView_chat_list.currentIndex()
+        if index.isValid():
+            return index.row()
+        return -1
+
+    def _set_chat_list_current_row(self, row):
+        if row is None or row < 0 or row >= self.chat_list_model.rowCount():
+            with QtCore.QSignalBlocker(self.ui.comboBox_ai_chats):
+                self.ui.comboBox_ai_chats.setCurrentIndex(-1)
+            self.ui.treeView_chat_list.setCurrentIndex(QtCore.QModelIndex())
+            return
+        with QtCore.QSignalBlocker(self.ui.comboBox_ai_chats):
+            self.ui.comboBox_ai_chats.setCurrentIndex(row)
+        index = self.chat_list_model.index(row, 0)
+        self.ui.treeView_chat_list.setCurrentIndex(index)
+
+    def chat_list_selection_changed(self, selected=None, deselected=None, force_update=False):
+        current_row = self._chat_list_current_row()
+        with QtCore.QSignalBlocker(self.ui.comboBox_ai_chats):
+            self.ui.comboBox_ai_chats.setCurrentIndex(current_row)
+        self.ui.pushButton_delete.setEnabled(current_row > -1)
+        if (not force_update) and (self.current_chat_idx == current_row):
             return
         if self.app.ai.cancel(True):
             # AI generation is either finished or canceled, we can change to another chat
-            self.current_chat_idx = self.ui.listWidget_chat_list.currentRow()
+            self.current_chat_idx = current_row
             self.ui.pushButton_delete.setEnabled(self.current_chat_idx > -1)
             self.history_update_message_list()
             self.update_chat_window(scroll_to_bottom=False)
         else:  # return to previous chat
-            self.ui.listWidget_chat_list.setCurrentRow(self.current_chat_idx)
+            self._set_chat_list_current_row(self.current_chat_idx)
         
-    def chat_list_item_changed(self, item: QtWidgets.QListWidgetItem):
+    def chat_list_item_changed(self, item: QStandardItem):
         """This method is called whenever the name of a chat is edited in the list"""
-        chat_id = self.chat_list[self.current_chat_idx][0]
+        row = item.row()
+        if row < 0 or row >= len(self.chat_list):
+            return
+        chat_id = self.chat_list[row][0]
         curr_name = item.text()
         cursor = self.chat_history_conn.cursor()
         cursor.execute('UPDATE chats SET name = ? WHERE id = ?', (curr_name, chat_id))
@@ -1086,8 +1212,11 @@ data collected. This information will accompany every prompt sent to the AI, res
         self.update_chat_window()
 
     def open_context_menu(self, position):
+        index = self.ui.treeView_chat_list.indexAt(position)
+        if index.isValid():
+            self.ui.treeView_chat_list.setCurrentIndex(index)
         context_menu = QtWidgets.QMenu(self)
-        if self.ui.listWidget_chat_list.count() > 0:
+        if self.chat_list_model.rowCount() > 0:
             if self.current_chat_idx > -1:
                 edit_action = QAction("Edit Title", self)
                 delete_action = QAction("Delete Chat", self)
@@ -1105,13 +1234,13 @@ data collected. This information will accompany every prompt sent to the AI, res
             # search_action.triggered.connect(self.search_chat)
 
         if len(context_menu.actions()) > 0:
-            context_menu.exec(self.ui.listWidget_chat_list.mapToGlobal(position))
+            context_menu.exec(self.ui.treeView_chat_list.viewport().mapToGlobal(position))
 
     def edit_title(self):
         """Edit the title of the current chat"""
-        selected_item = self.ui.listWidget_chat_list.currentItem()
-        if selected_item:
-            self.ui.listWidget_chat_list.editItem(selected_item)
+        index = self.ui.treeView_chat_list.currentIndex()
+        if index.isValid():
+            self.ui.treeView_chat_list.edit(index)
 
     def export_chat(self):
         """Export the current chat into a html or txt file"""
@@ -1167,9 +1296,9 @@ data collected. This information will accompany every prompt sent to the AI, res
     """    
     def search_chat(self):
         # Fulll text search over all chats, will be implemented later
-        selected_item = self.ui.listWidget_chat_list.currentItem()
-        if selected_item:
-            print(f"Searching chat: {selected_item.text()}")
+        index = self.ui.treeView_chat_list.currentIndex()
+        if index.isValid():
+            print(f"Searching chat: {index.data()}")
     """
 
     def button_new_clicked(self):

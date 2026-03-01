@@ -14,95 +14,122 @@
    <string>QualCoder</string>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QGridLayout" name="gridLayout">
-    <property name="topMargin">
-     <number>0</number>
-    </property>
-    <property name="bottomMargin">
-     <number>0</number>
-    </property>
-    <item row="0" column="0">
-     <widget class="QTabWidget" name="tabWidget">
-      <property name="currentIndex">
-       <number>0</number>
+   <layout class="QHBoxLayout" name="horizontalLayout">
+    <item>
+     <widget class="QSplitter" name="splitter">
+      <property name="orientation">
+       <enum>Qt::Horizontal</enum>
       </property>
-      <widget class="QWidget" name="tab_action_log">
-       <attribute name="title">
-        <string>Action Log</string>
-       </attribute>
-       <layout class="QGridLayout" name="gridLayout_2">
-        <item row="0" column="0">
-         <widget class="QTextEdit" name="textEdit"/>
-        </item>
+      <property name="childrenCollapsible">
+       <bool>false</bool>
+      </property>
+      <widget class="QTabWidget" name="tabWidget">
+       <property name="tabPosition">
+        <enum>QTabWidget::North</enum>
+       </property>
+       <property name="currentIndex">
+        <number>0</number>
+       </property>
+       <widget class="QWidget" name="tab_action_log">
+        <attribute name="title">
+         <string>Action Log</string>
+        </attribute>
+        <layout class="QGridLayout" name="gridLayout_2">
+         <item row="0" column="0">
+          <widget class="QTextEdit" name="textEdit"/>
+         </item>
+        </layout>
+       </widget>
+       <widget class="QWidget" name="tab_manage">
+        <attribute name="title">
+         <string>Manage</string>
+        </attribute>
+        <widget class="QLabel" name="label_manage">
+         <property name="geometry">
+          <rect>
+           <x>20</x>
+           <y>20</y>
+           <width>861</width>
+           <height>71</height>
+          </rect>
+         </property>
+         <property name="text">
+          <string>Select an option in the Files and Cases menu. </string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </widget>
+       <widget class="QWidget" name="tab_coding">
+        <attribute name="title">
+         <string>Coding</string>
+        </attribute>
+        <widget class="QLabel" name="label_coding">
+         <property name="geometry">
+          <rect>
+           <x>20</x>
+           <y>20</y>
+           <width>811</width>
+           <height>71</height>
+          </rect>
+         </property>
+         <property name="text">
+          <string>Select an option in the Coding menu. </string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </widget>
+       <widget class="QWidget" name="tab_reports">
+        <attribute name="title">
+         <string>Reports</string>
+        </attribute>
+        <widget class="QLabel" name="label_reports">
+         <property name="geometry">
+          <rect>
+           <x>20</x>
+           <y>20</y>
+           <width>831</width>
+           <height>71</height>
+          </rect>
+         </property>
+         <property name="text">
+          <string>Select an option in the Reports menu. </string>
+         </property>
+         <property name="wordWrap">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </widget>
+       <widget class="QWidget" name="tab_ai_chat">
+        <attribute name="title">
+         <string>AI Chat</string>
+        </attribute>
+       </widget>
+      </widget>
+      <widget class="QWidget" name="sidebar" native="true">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <layout class="QHBoxLayout" name="horizontalLayout_2">
+        <property name="leftMargin">
+         <number>0</number>
+        </property>
+        <property name="topMargin">
+         <number>0</number>
+        </property>
+        <property name="rightMargin">
+         <number>0</number>
+        </property>
+        <property name="bottomMargin">
+         <number>0</number>
+        </property>
        </layout>
-      </widget>
-      <widget class="QWidget" name="tab_manage">
-       <attribute name="title">
-        <string>Manage</string>
-       </attribute>
-       <widget class="QLabel" name="label_manage">
-        <property name="geometry">
-         <rect>
-          <x>20</x>
-          <y>20</y>
-          <width>861</width>
-          <height>71</height>
-         </rect>
-        </property>
-        <property name="text">
-         <string>Select an option in the Files and Cases menu. </string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-       </widget>
-      </widget>
-      <widget class="QWidget" name="tab_coding">
-       <attribute name="title">
-        <string>Coding</string>
-       </attribute>
-       <widget class="QLabel" name="label_coding">
-        <property name="geometry">
-         <rect>
-          <x>20</x>
-          <y>20</y>
-          <width>811</width>
-          <height>71</height>
-         </rect>
-        </property>
-        <property name="text">
-         <string>Select an option in the Coding menu. </string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-       </widget>
-      </widget>
-      <widget class="QWidget" name="tab_reports">
-       <attribute name="title">
-        <string>Reports</string>
-       </attribute>
-       <widget class="QLabel" name="label_reports">
-        <property name="geometry">
-         <rect>
-          <x>20</x>
-          <y>20</y>
-          <width>831</width>
-          <height>71</height>
-         </rect>
-        </property>
-        <property name="text">
-         <string>Select an option in the Reports menu. </string>
-        </property>
-        <property name="wordWrap">
-         <bool>true</bool>
-        </property>
-       </widget>
-      </widget>
-      <widget class="QWidget" name="tab_ai_chat">
-       <attribute name="title">
-        <string>AI Chat</string>
-       </attribute>
       </widget>
      </widget>
     </item>
@@ -114,7 +141,7 @@
      <x>0</x>
      <y>0</y>
      <width>1024</width>
-     <height>26</height>
+     <height>22</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuProject">
@@ -225,6 +252,7 @@
     <addaction name="actionAI_Prompts"/>
     <addaction name="separator"/>
     <addaction name="actionAI_Chat"/>
+    <addaction name="actionAI_Chat_Sidebar"/>
     <addaction name="actionAI_Search_and_Coding"/>
    </widget>
    <addaction name="menuProject"/>
@@ -603,6 +631,11 @@
   <action name="actionTaguette_import">
    <property name="text">
     <string>Taguette import</string>
+   </property>
+  </action>
+  <action name="actionAI_Chat_Sidebar">
+   <property name="text">
+    <string>AI Chat Sidebar</string>
    </property>
   </action>
  </widget>

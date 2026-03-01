@@ -772,7 +772,7 @@ class App(object):
                 'dialogreport_code_summary_splitter0', 'dialogreport_code_summary_splitter0',
                 'stylesheet', 'backup_num', 'codetext_chunksize',
                 'report_text_context_characters', 'report_text_context_style',
-                'ai_enable', 'ai_first_startup', 'ai_model_index'
+                'ai_enable', 'ai_first_startup', 'ai_model_index', 'ai_chat_sidebar', 'ai_chat_sidebar_width'
                 ]
         for key in keys:
             if key not in settings_data:
@@ -799,6 +799,10 @@ class App(object):
                     settings_data[key] = 'True' 
                 if key == 'ai_model_index':
                     settings_data[key] = '0'
+                if key == 'ai_chat_sidebar':
+                    settings_data[key] = 'False'
+                if key == 'ai_chat_sidebar_width':
+                    settings_data[key] = 320
                     
         # Check AI models
         if len(ai_models) == 0:  # No models loaded, create default
@@ -1103,7 +1107,9 @@ class App(object):
             'codetext_chunksize': 50000,
             'ai_enable': 'False',
             'ai_first_startup': 'True',
-            'ai_model_index': -1
+            'ai_model_index': -1,
+            'ai_chat_sidebar': 'False',
+            'ai_chat_sidebar_width': 320
         }
 
     def get_file_texts(self, file_ids=None):
@@ -1428,6 +1434,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.heartbeat_worker = None
         self.lock_file_path = ''
         self.ai_chat_window = None
+        self.ai_chat_sidebar_mode = False
+        self.ai_chat_tab_sidebar_button = None
         
         if platform.system() == "Windows" and self.app.settings['stylesheet'] == "native":
             # Make 'Fusion' the standard native style on Windows https://www.qt.io/blog/dark-mode-on-windows-11-with-qt-6.5
@@ -1585,6 +1593,8 @@ Click "Yes" to start now.')
         self.ui.actionAI_Edit_Project_Memo.triggered.connect(self.project_memo)
         self.ui.actionAI_Prompts.triggered.connect(self.ai_prompts)
         self.ui.actionAI_Chat.triggered.connect(self.ai_go_chat)
+        self.ui.actionAI_Chat_Sidebar.setCheckable(True)
+        self.ui.actionAI_Chat_Sidebar.toggled.connect(self.toggle_ai_chat_sidebar)
         self.ui.actionAI_Search_and_Coding.triggered.connect(self.ai_go_search)
         # Help menu
         self.ui.actionContents.setShortcut('Alt+H')
@@ -1597,6 +1607,10 @@ Click "Yes" to start now.')
         # Ensure the action_log always scrolls to the very bottom once new log entries are added:
         self.ui.textEdit.verticalScrollBar().rangeChanged.connect(self.action_log_scroll_bottom)
         self.ui.textEdit.setReadOnly(True)
+        self.ui.splitter.setChildrenCollapsible(False)
+        self.ui.splitter.setCollapsible(1, False)
+        self.ui.sidebar.setMinimumWidth(0)
+        self.ui.splitter.splitterMoved.connect(self.on_main_splitter_moved)
         self.settings_report()
         
         self.ui.tabWidget.setCurrentIndex(0)
@@ -1610,6 +1624,7 @@ Click "Yes" to start now.')
             self.ui.tabWidget.setTabIcon(4, qta.icon('mdi6.message-processing-outline', color=self.app.highlight_color()))  # Ai Chat
         except Exception as e_:
             logger.log(e_)
+        self._setup_ai_chat_tab_sidebar_button()
         
     def fill_recent_projects_menu_actions(self):
         """ Get the recent projects from the .qualcoder txt file.
@@ -2133,10 +2148,161 @@ Click "Yes" to start now.')
         self.tab_layout_helper(self.ui.tab_coding, ui)
 
     def ai_chat(self):
-        """ Add AI chat to tab. """
+        """Initialize AI chat and place it in tab or sidebar based on settings."""
 
         self.ai_chat_window = DialogAIChat(self.app, self.ui.textEdit, self)
-        self.tab_layout_helper(self.ui.tab_ai_chat, self.ai_chat_window)
+        sidebar_mode = self.app.settings.get('ai_chat_sidebar', 'False') == 'True'
+        self.set_ai_chat_sidebar_mode(sidebar_mode, persist=False)
+
+    def _setup_ai_chat_tab_sidebar_button(self):
+        """Add a small button in the AI chat tab to move the chat into sidebar view."""
+
+        tab_index = self.ui.tabWidget.indexOf(self.ui.tab_ai_chat)
+        if tab_index < 0:
+            return
+        tab_bar = self.ui.tabWidget.tabBar()
+        button = QtWidgets.QToolButton(tab_bar)
+        button.setAutoRaise(True)
+        button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        button.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(_('Move AI Chat to sidebar view'))
+        button.setFixedSize(22, 22)
+        icon_color = tab_bar.tabTextColor(tab_index)
+        if not icon_color.isValid():
+            icon_color = tab_bar.palette().color(QtGui.QPalette.ColorRole.WindowText)
+        try:
+            button.setIcon(qta.icon('mdi6.arrow-right-bold-outline', color=icon_color))
+            button.setIconSize(QtCore.QSize(16, 16))
+        except Exception:
+            button.setText(">")
+        button.clicked.connect(self.open_ai_chat_sidebar_from_tab_button)
+
+        self.ai_chat_tab_sidebar_button = button
+        tab_bar.setTabButton(
+            tab_index, QtWidgets.QTabBar.ButtonPosition.RightSide, button
+        )
+
+    def open_ai_chat_sidebar_from_tab_button(self):
+        """Switch AI chat to sidebar mode from the tab button."""
+
+        if self.app.settings['ai_enable'] != 'True':
+            msg = _('Please enable the AI first and set it up in Settings.')
+            Message(self.app, _('Ai Chat'), msg).exec()
+            return
+        self.ui.actionAI_Chat_Sidebar.setChecked(True)
+
+    def _ensure_widget_layout(self, widget):
+        """Ensure a widget has a layout so child widgets can be hosted in it."""
+
+        layout = widget.layout()
+        if layout is None:
+            layout = QtWidgets.QVBoxLayout()
+            layout.setContentsMargins(0, 0, 0, 0)
+            widget.setLayout(layout)
+        return layout
+
+    def _move_ai_chat_to_host(self, host_widget):
+        """Reparent the AI chat widget without closing or recreating it."""
+
+        if self.ai_chat_window is None:
+            return
+        current_parent = self.ai_chat_window.parentWidget()
+        if current_parent is not None:
+            current_layout = current_parent.layout()
+            if current_layout is not None:
+                current_layout.removeWidget(self.ai_chat_window)
+        target_layout = self._ensure_widget_layout(host_widget)
+        if target_layout.indexOf(self.ai_chat_window) == -1:
+            target_layout.addWidget(self.ai_chat_window)
+        self.ai_chat_window.setParent(host_widget)
+        self.ai_chat_window.show()
+
+    def _get_saved_ai_sidebar_width(self, fallback_total=1000):
+        """Return configured sidebar width as integer with sane bounds."""
+
+        try:
+            width = int(self.app.settings.get('ai_chat_sidebar_width', 320))
+        except (TypeError, ValueError):
+            width = 320
+        min_sidebar = 80
+        max_sidebar = max(min_sidebar, int(fallback_total) - 240)
+        return max(min_sidebar, min(width, max_sidebar))
+
+    def _remember_ai_sidebar_width(self):
+        """Read current splitter sidebar width and keep it in settings (in-memory)."""
+
+        if self.ui.sidebar.isVisible():
+            sizes = self.ui.splitter.sizes()
+            if len(sizes) >= 2 and sizes[1] > 0:
+                self.app.settings['ai_chat_sidebar_width'] = int(sizes[1])
+
+    def _apply_ai_sidebar_splitter_sizes(self):
+        """Apply main/sidebar splitter sizes from the stored sidebar width."""
+
+        sizes = self.ui.splitter.sizes()
+        total = sum(sizes) if sum(sizes) > 0 else 1000
+        sidebar_width = self._get_saved_ai_sidebar_width(fallback_total=total)
+        main_width = max(240, total - sidebar_width)
+        self.ui.splitter.setSizes([main_width, sidebar_width])
+
+    def set_ai_chat_sidebar_mode(self, enabled, persist=True):
+        """Switch AI chat between main tab view and sidebar view."""
+
+        if self.ai_chat_window is None:
+            return
+        if self.ai_chat_sidebar_mode and not bool(enabled):
+            self._remember_ai_sidebar_width()
+        enabled = bool(enabled)
+        self.ai_chat_sidebar_mode = enabled
+
+        if enabled:
+            self._move_ai_chat_to_host(self.ui.sidebar)
+        else:
+            self._move_ai_chat_to_host(self.ui.tab_ai_chat)
+
+        self.ai_chat_window.set_sidebar_mode(enabled)
+        ai_tab_index = self.ui.tabWidget.indexOf(self.ui.tab_ai_chat)
+        self.ui.tabWidget.setTabVisible(ai_tab_index, not enabled)
+        self.ui.sidebar.setVisible(enabled)
+
+        if enabled:
+            self.ui.sidebar.setMinimumWidth(0)
+            self.ai_chat_window.setMinimumWidth(0)
+            self.ui.tabWidget.setCurrentWidget(self.ui.tab_action_log)
+            self._apply_ai_sidebar_splitter_sizes()
+            QtCore.QTimer.singleShot(0, self._apply_ai_sidebar_splitter_sizes)
+        else:
+            sizes = self.ui.splitter.sizes()
+            total = sum(sizes) if sum(sizes) > 0 else 1000
+            self.ui.splitter.setSizes([total, 0])
+
+        with QtCore.QSignalBlocker(self.ui.actionAI_Chat_Sidebar):
+            self.ui.actionAI_Chat_Sidebar.setChecked(enabled)
+
+        if persist:
+            if enabled:
+                self._remember_ai_sidebar_width()
+            self.app.settings['ai_chat_sidebar'] = 'True' if enabled else 'False'
+            self.app.write_config_ini(self.app.settings, self.app.ai_models)
+
+    def toggle_ai_chat_sidebar(self, checked):
+        """Handle menu toggle for AI chat sidebar mode."""
+
+        self.set_ai_chat_sidebar_mode(checked)
+        if not checked:
+            self.ui.tabWidget.setCurrentWidget(self.ui.tab_ai_chat)
+
+    def close_ai_chat_sidebar(self):
+        """Return AI chat from sidebar back into the main AI tab."""
+
+        self.set_ai_chat_sidebar_mode(False)
+        self.ui.tabWidget.setCurrentWidget(self.ui.tab_ai_chat)
+
+    def on_main_splitter_moved(self, pos, index):  # pos/index are Qt callback args
+        """Track current AI sidebar width while user drags splitter."""
+
+        if self.ai_chat_sidebar_mode:
+            self._remember_ai_sidebar_width()
 
     def tab_layout_helper(self, tab_widget, ui):
         """ Used when loading a coding, report or manage dialog  in to a tab widget.
@@ -3282,7 +3448,11 @@ Click "Yes" to start now.')
             msg = _('Please enable the AI first and set it up in Settings.')
             Message(self.app, _('Ai Chat'), msg).exec() 
             return
-        self.ui.tabWidget.setCurrentWidget(self.ui.tab_ai_chat) 
+        if self.ai_chat_sidebar_mode:
+            self.set_ai_chat_sidebar_mode(True, persist=False)
+        else:
+            self.set_ai_chat_sidebar_mode(False, persist=False)
+            self.ui.tabWidget.setCurrentWidget(self.ui.tab_ai_chat)
 
     def ai_go_search(self):
         """ Action triggered by AI Search and Coding menu item."""
