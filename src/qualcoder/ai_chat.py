@@ -2689,7 +2689,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 result["stream_messages"] = []
                 return result
 
-            self._emit_mcp_status(signals, chat_idx, self.ai_mcp_server.describe_host_status_event("final_response"))
+            self._emit_mcp_status(signals, chat_idx, _('Preparing response...'))
             final_prompt = (
                 "Now provide the final answer to the user in normal prose. "
                 "Focus on outcomes of this turn and communicate them clearly. "

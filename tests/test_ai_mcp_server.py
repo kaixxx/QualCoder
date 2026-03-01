@@ -418,11 +418,6 @@ class TestAiMcpServer(TestCase):
         self.assertTrue(isinstance(status, str))
         self.assertTrue(len(status) > 0)
 
-    def test_host_status_event_for_final_response(self):
-        status = self.server.describe_host_status_event("final_response")
-        self.assertTrue(isinstance(status, str))
-        self.assertTrue(len(status) > 0)
-
     def test_status_event_for_create_category_contains_category_name(self):
         status = self.server.describe_status_event(
             "tools/call",

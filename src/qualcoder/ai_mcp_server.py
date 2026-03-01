@@ -214,19 +214,6 @@ class AiMcpServer:
 
         return _('Reviewing project material...')
 
-    def describe_host_status_event(self, phase: str) -> str:
-        """Describe non-MCP but related host-side status lines."""
-
-        if phase == "planning":
-            return _('Planning how to gather project evidence...')
-        if phase == "execution":
-            return _('Executing MCP retrieval steps...')
-        if phase == "reflection":
-            return _('Reflecting on retrieved evidence and revising the plan...')
-        if phase == "final_response":
-            return _('Formulating a response based on the selected materials...')
-        return ""
-
     def _initialize_result(self) -> Dict[str, Any]:
         result = types.InitializeResult(
             protocolVersion=self.protocol_version,
