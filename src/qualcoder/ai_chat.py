@@ -1238,8 +1238,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if scroll_to_bottom:
                     self.ai_output_scroll_to_bottom()
                     self.ui.plainTextEdit_question.setFocus()
-                else:
-                    self.ui.scrollArea_ai_output.verticalScrollBar().setValue(0)
                 self.is_updating_chat_window = False
         else:
             self.ui.ai_output.setText('')
@@ -3312,6 +3310,18 @@ data collected. This information will accompany every prompt sent to the AI, res
                 QtWidgets.QToolTip.showText(QCursor.pos(), tooltip_txt, self.ui.ai_output)
         else:
             QtWidgets.QToolTip.hideText()
+
+    def _open_text_reference(self, doc_id: int, start: int, end: int):
+        """Show AI chat in sidebar mode and open the selected text span."""
+
+        if not getattr(self.main_window, 'ai_chat_sidebar_mode', False):
+            self.main_window.set_ai_chat_sidebar_mode(True)
+        self.main_window.text_coding(
+            task='documents',
+            doc_id=int(doc_id),
+            doc_sel_start=int(start),
+            doc_sel_end=int(end)
+        )
             
     def on_linkActivated(self, link: str):
 
@@ -3330,10 +3340,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                     logger.debug(f'Link: "{link}" - Error: {e}')
                     coding = None
                 if coding is not None:
-                    self.main_window.text_coding(task='documents', 
-                                                 doc_id=int(coding[0]), 
-                                                 doc_sel_start=int(coding[1]), 
-                                                 doc_sel_end=int(coding[2]))
+                    self._open_text_reference(int(coding[0]), int(coding[1]), int(coding[2]))
                 else:
                     msg = _('Invalid source reference.')
                     Message(self.app, _('AI Chat'), msg, icon='critical').exec()
@@ -3348,10 +3355,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                     else:
                         source_id, start, length, line_start, line_end = chunk_id_elem
                     end = int(start) + int(length)
-                    self.main_window.text_coding(task='documents',
-                                                 doc_id=int(source_id), 
-                                                 doc_sel_start=int(start), 
-                                                 doc_sel_end=end)
+                    self._open_text_reference(int(source_id), int(start), end)
                 except Exception as e:
                     logger.debug(f'Link: "{link}" - Error: {e}')
                     source_id = None  # TODO source_id not used
@@ -3361,10 +3365,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                     quote_id = link[len('quote:'):]
                     source_id, start, length = quote_id.split('_')
                     end = int(start) + int(length)
-                    self.main_window.text_coding(task='documents',
-                                                 doc_id=int(source_id), 
-                                                 doc_sel_start=int(start), 
-                                                 doc_sel_end=end)
+                    self._open_text_reference(int(source_id), int(start), end)
             elif link.startswith('action:topic_chat_analyze_more'):
                 self.topic_chat_analyze_more()
 
