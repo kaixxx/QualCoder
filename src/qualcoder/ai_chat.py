@@ -20,7 +20,7 @@ https://qualcoder.wordpress.com/
 https://qualcoder-org.github.io/
 """
 
-from PyQt6 import QtWidgets, QtCore
+from PyQt6 import QtWidgets, QtCore, QtGui
 from PyQt6.QtCore import Qt, QEvent, QObject, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QAction, QPalette, QShortcut, QKeySequence, QStandardItemModel, QStandardItem
 from PyQt6.QtWidgets import QTextEdit
@@ -42,6 +42,7 @@ import os
 import sqlite3
 import webbrowser
 import re
+import unicodedata
 
 from .ai_search_dialog import DialogAiSearch
 from .GUI.ui_ai_chat import Ui_Dialog_ai_chat
@@ -473,6 +474,7 @@ class DialogAIChat(QtWidgets.QDialog):
 
         self.new_chat(name, 'general chat', summary, '')
         system_prompt = self._general_chat_base_system_prompt()
+        self.ai_text_doc_id = None
         self.process_message('system', system_prompt)    
         self.update_chat_window()  
 
@@ -1019,6 +1021,94 @@ data collected. This information will accompany every prompt sent to the AI, res
         else:
             self.ai_output_autoscroll = False
 
+    def _build_ai_output_document(self, width_px):
+        """Build a QTextDocument for the current chat HTML at the given layout width."""
+
+        html_text = self.ui.ai_output.text()
+        if html_text is None or html_text == '':
+            return None
+        try:
+            width = max(1, int(width_px))
+        except (TypeError, ValueError):
+            width = max(1, int(self.ui.ai_output.width()))
+        doc = QtGui.QTextDocument()
+        doc.setDefaultFont(self.ui.ai_output.font())
+        doc.setHtml(html_text)
+        doc.setTextWidth(float(width))
+        return doc
+
+    def _document_y_for_char_position(self, doc, char_pos):
+        """Return vertical y-coordinate for a character position in a QTextDocument."""
+
+        if doc is None:
+            return 0.0
+        max_pos = max(0, int(doc.characterCount()) - 1)
+        pos = max(0, min(int(char_pos), max_pos))
+        block = doc.findBlock(pos)
+        if not block.isValid():
+            return 0.0
+        block_top = float(doc.documentLayout().blockBoundingRect(block).top())
+        layout = block.layout()
+        if layout is None or layout.lineCount() == 0:
+            return block_top
+        rel_pos = max(0, pos - int(block.position()))
+        line = layout.lineForTextPosition(rel_pos)
+        if not line.isValid():
+            line = layout.lineAt(max(0, layout.lineCount() - 1))
+        return block_top + float(line.y())
+
+    def capture_ai_output_top_anchor(self):
+        """Capture a width-independent anchor representing the top visible text position."""
+
+        bar = self.ui.scrollArea_ai_output.verticalScrollBar()
+        scroll_value = int(bar.value())
+        max_value = int(bar.maximum())
+        if max_value <= 0:
+            return {'mode': 'top'}
+        if scroll_value >= max(0, max_value - 2):
+            return {'mode': 'bottom'}
+        doc = self._build_ai_output_document(self.ui.ai_output.width())
+        if doc is None:
+            return {'mode': 'value', 'value': scroll_value}
+        pos = int(doc.documentLayout().hitTest(
+            QtCore.QPointF(1.0, float(scroll_value) + 1.0),
+            QtCore.Qt.HitTestAccuracy.FuzzyHit
+        ))
+        if pos < 0:
+            pos = 0
+        y_pos = self._document_y_for_char_position(doc, pos)
+        offset = float(scroll_value) - y_pos
+        return {'mode': 'char', 'char_pos': int(pos), 'offset': float(offset)}
+
+    def restore_ai_output_top_anchor(self, anchor):
+        """Restore a previously captured top-text anchor after layout/width changes."""
+
+        if not isinstance(anchor, dict):
+            return
+        mode = str(anchor.get('mode', ''))
+        bar = self.ui.scrollArea_ai_output.verticalScrollBar()
+        if mode == 'bottom':
+            bar.setValue(bar.maximum())
+            return
+        if mode == 'top':
+            bar.setValue(0)
+            return
+        if mode == 'char':
+            doc = self._build_ai_output_document(self.ui.ai_output.width())
+            if doc is None:
+                return
+            char_pos = int(anchor.get('char_pos', 0))
+            offset = float(anchor.get('offset', 0.0))
+            y_pos = self._document_y_for_char_position(doc, char_pos)
+            target = int(round(y_pos + offset))
+            target = max(0, min(target, int(bar.maximum())))
+            bar.setValue(target)
+            return
+        if mode == 'value':
+            target = int(anchor.get('value', 0))
+            target = max(0, min(target, int(bar.maximum())))
+            bar.setValue(target)
+
     def update_chat_window(self, scroll_to_bottom=True):
         """load current chat into self.ai_output"""
         if self.current_chat_idx > -1:
@@ -1156,74 +1246,87 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.ui.plainTextEdit_question.setEnabled(False)
             self.ui.pushButton_question.setEnabled(False)
             
-    def _replace_text_references(self, text, streaming=False):
-        if self.ai_text_doc_id is None: 
-            # we are not in text analysis chat
-            return text
-                
-        pattern = r'\{REF: ([\"\'“”„‘’«»])(.+?)([\"\'“”„‘’«»])\}'
-        fulltext = self.app.get_text_fulltext(self.ai_text_doc_id)    
-        
-        # Replacement function
-        def replace_match(match):
-            if streaming:
-                return f'({self.ai_text_doc_name})'
-            quote = match.group(2)
-            
-            quote_start, quote_end = ai_quote_search(quote, self.ai_text_text)
-            if quote_start > -1 < quote_end:
-                quote = self.ai_text_text[quote_start:quote_end]
-                quote_start += self.ai_text_start_pos
-                quote_end += self.ai_text_start_pos
-                line_start, line_end = self.app.get_line_numbers(fulltext, quote_start, quote_end)
-                if line_start + line_end > 0:
-                    if line_start == line_end:  # one line
-                        a = f'(<a href="quote:{self.ai_text_doc_id}_{quote_start}_{len(quote)}">{self.ai_text_doc_name}: {line_start}</a>)'
-                    else:  # multiple lines
-                        a = f'(<a href="quote:{self.ai_text_doc_id}_{quote_start}_{len(quote)}">{self.ai_text_doc_name}: {line_start} - {line_end}</a>)'
-                else:  # no lines found
-                    a = f'(<a href="quote:{self.ai_text_doc_id}_{quote_start}_{len(quote)}">{self.ai_text_doc_name}</a>)'
-                return a
-            else:  # not found
-                return _('(unknown reference)')
-            
-        # Use re.sub with replacement function
-        res = re.sub(pattern, replace_match, text)
-        
-        # If streaming, delete incomplete references at the end
-        if streaming:
-            incomplete = re.search(r'\{REF:[^\}]*$', res)
-            if incomplete:
-                res = res[:incomplete.start()].rstrip()
-        
-        return res
+    def _strip_ref_quotes(self, raw: Any) -> str:
+        """Remove wrapping quote marks from a REF payload while preserving inner text."""
 
-    def replace_references(self, text, streaming=False, chat_idx=None):
-        """Replace text-analysis and MCP/general-chat references with clickable links."""
+        text = str(raw if raw is not None else "").strip()
+        while text and (text[0] in "\"'" or unicodedata.category(text[0]) in ("Pi", "Pf")):
+            text = text[1:].lstrip()
+        while text and (text[-1] in "\"'" or unicodedata.category(text[-1]) in ("Pi", "Pf")):
+            text = text[:-1].rstrip()
+        return text
+
+    def _text_ref_candidates(self) -> List[Dict[str, Any]]:
+        """Expose the active text-analysis excerpt as a single resolver candidate."""
+
+        source_id = self._safe_int(self.ai_text_doc_id, -1)
+        start = self._safe_int(self.ai_text_start_pos, -1)
+        text = str(self.ai_text_text if self.ai_text_text is not None else "")
+        if source_id <= 0 or start < 0 or text.strip() == "":
+            return []
+        source_name = str(self.ai_text_doc_name if self.ai_text_doc_name is not None else "").strip()
+        if source_name == "":
+            source_name = self.get_filename(source_id)
+        return [{
+            "source_id": source_id,
+            "source_name": source_name,
+            "start": start,
+            "length": len(text),
+            "text": text,
+        }]
+
+    def _replace_references_from_candidates(
+            self,
+            text: Any,
+            candidates: List[Dict[str, Any]],
+            streaming: bool = False,
+            streaming_placeholder: Optional[str] = None) -> str:
+        """Replace {REF: ...} tags using a prepared list of evidence candidates."""
 
         res = str(text)
-
-        # Text-analysis chat keeps its existing deterministic REF->quote flow.
-        if self.ai_text_doc_id is not None:
-            return self._replace_text_references(res, streaming=streaming)
-
-        # General/MCP chat: convert {REF: "..."} by matching quotes against retrieved evidence.
         if streaming:
-            res = re.sub(r'\{REF:[^\}]*\}', _('(source reference)'), res)
+            placeholder = streaming_placeholder if streaming_placeholder is not None else _('(source reference)')
+            res = re.sub(r'\{REF:[^\}]*\}', placeholder, res)
             incomplete_ref = re.search(r'\{REF:[^\}]*$', res)
             if incomplete_ref:
                 res = res[:incomplete_ref.start()].rstrip()
             return res
 
-        candidates = self._collect_ref_candidates(chat_idx)
         ref_pattern = r'\{REF:\s*(.+?)\s*\}'
 
         def replace_ref(match):
-            raw = str(match.group(1)).strip()
-            quote = raw.strip(' "\'')
+            quote = self._strip_ref_quotes(match.group(1))
             return self._resolve_ref_quote_to_anchor(quote, candidates)
 
         return re.sub(ref_pattern, replace_ref, res)
+
+    def _replace_text_references(self, text, streaming=False):
+        """Replace REF tags for text-analysis chats using the shared resolver."""
+
+        candidates = self._text_ref_candidates()
+        if not candidates:
+            return str(text)
+        source_name = str(candidates[0].get("source_name", "")).strip()
+        return self._replace_references_from_candidates(
+            text,
+            candidates,
+            streaming=streaming,
+            streaming_placeholder=f'({source_name})' if source_name != "" else _('(source reference)')
+        )
+
+    def replace_references(self, text, streaming=False, chat_idx=None):
+        """Replace text-analysis and MCP/general-chat references with clickable links."""
+
+        res = str(text)
+        if self.ai_text_doc_id is not None:
+            return self._replace_text_references(res, streaming=streaming)
+        candidates = self._collect_ref_candidates(chat_idx)
+        return self._replace_references_from_candidates(
+            res,
+            candidates,
+            streaming=streaming,
+            streaming_placeholder=_('(source reference)')
+        )
 
     def _chat_list_current_row(self):
         index = self.ui.treeView_chat_list.currentIndex()

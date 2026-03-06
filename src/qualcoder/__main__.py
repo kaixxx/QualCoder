@@ -2263,6 +2263,12 @@ Click "Yes" to start now.')
 
         if self.ai_chat_window is None:
             return
+        ai_output_anchor = self.ai_chat_window.capture_ai_output_top_anchor()
+
+        def restore_ai_output_anchor():
+            if self.ai_chat_window is not None:
+                self.ai_chat_window.restore_ai_output_top_anchor(ai_output_anchor)
+
         if self.ai_chat_sidebar_mode and not bool(enabled):
             self._remember_ai_sidebar_width()
         enabled = bool(enabled)
@@ -2289,6 +2295,10 @@ Click "Yes" to start now.')
             sizes = self.ui.splitter.sizes()
             total = sum(sizes) if sum(sizes) > 0 else 1000
             self.ui.splitter.setSizes([total, 0])
+        restore_ai_output_anchor()
+        QtCore.QTimer.singleShot(0, restore_ai_output_anchor)
+        QtCore.QTimer.singleShot(30, restore_ai_output_anchor)
+        QtCore.QTimer.singleShot(90, restore_ai_output_anchor)
 
         with QtCore.QSignalBlocker(self.ui.actionAI_Chat_Sidebar):
             self.ui.actionAI_Chat_Sidebar.setChecked(enabled)
