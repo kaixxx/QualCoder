@@ -108,6 +108,25 @@
           </widget>
          </item>
          <item>
+          <widget class="QPushButton" name="pushButton_undo">
+           <property name="enabled">
+            <bool>false</bool>
+           </property>
+           <property name="sizePolicy">
+            <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+             <horstretch>0</horstretch>
+             <verstretch>0</verstretch>
+            </sizepolicy>
+           </property>
+           <property name="toolTip">
+            <string>Selectively undo AI induced changes</string>
+           </property>
+           <property name="text">
+            <string/>
+           </property>
+          </widget>
+         </item>
+         <item>
           <widget class="QPushButton" name="pushButton_help">
            <property name="sizePolicy">
             <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
@@ -195,7 +214,7 @@
                <x>0</x>
                <y>0</y>
                <width>670</width>
-               <height>249</height>
+               <height>137</height>
               </rect>
              </property>
              <layout class="QVBoxLayout" name="verticalLayout">

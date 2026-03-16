@@ -27,6 +27,7 @@ import traceback
 from datetime import datetime
 from PyQt6 import QtWidgets
 from PyQt6 import QtCore
+from PyQt6 import QtGui
 import qtawesome as qta
 
 from openai import OpenAI, BadRequestError
@@ -410,8 +411,8 @@ def ai_quote_search(quote: str, original: str) -> tuple[int, int]:
         return -1, -1
 
     # combine all matched blocks from the first start to the last end:
-    start_idx = orig_spans[0][0]
-    end_idx = orig_spans[-1][1]
+    start_idx = int(orig_spans[0][0])
+    end_idx = int(orig_spans[-1][1])
         
     # only accept a match if it reaches 80% of the max score -> prevents false positives
     max_score = len(quote) * aligner.match_score
@@ -651,6 +652,18 @@ class AiLLM():
             self.ai_change_history = []
         return self.ai_change_history
 
+    def has_undoable_ai_changes(self) -> bool:
+        """Return whether the current session contains AI changes that can be undone."""
+
+        history = self._ensure_ai_change_history()
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            operations = item.get("operations", None)
+            if isinstance(operations, list) and len(operations) > 0:
+                return True
+        return False
+
     def _ensure_ai_change_set(self, history, set_id: str):
         for item in history:
             if not isinstance(item, dict):
@@ -660,13 +673,13 @@ class AiLLM():
                 if not isinstance(ops, list):
                     item["operations"] = []
                 if "name" not in item or str(item.get("name", "")).strip() == "":
-                    item["name"] = _("AI changes")
+                    item["name"] = "" # _("AI changes")
                 if "created_at" not in item:
                     item["created_at"] = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
                 return item
         new_set = {
             "id": set_id,
-            "name": _("AI changes"),
+            "name": "",  # _("AI changes")
             "created_at": datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S"),
             "operations": [],
         }
@@ -679,8 +692,8 @@ class AiLLM():
         history = self._ensure_ai_change_history()
         now = datetime.now().astimezone()
         set_id = f'ai-run-{now.strftime("%Y%m%d%H%M%S%f")}-{chat_idx}'
-        title = _("AI changes")
-        title += " [" + now.strftime("%H:%M:%S") + "]"
+        title = "" # _("AI changes")
+        title += "[" + now.strftime("%H:%M:%S") + "]"
 
         change_set = {
             "id": set_id,
@@ -736,7 +749,67 @@ class AiLLM():
             line += _(" (+{0} more)").format(remaining)
         return line
 
-    def _refresh_ai_change_set_name(self, change_set: dict, allow_db_lookup: bool = False) -> None:
+    def _format_ai_change_age(self, created_at: str) -> str:
+        """Return a relative age label for one stored AI change set."""
+
+        created_text = str(created_at if created_at is not None else "").strip()
+        if created_text == "":
+            return ""
+
+        try:
+            now = datetime.now().astimezone()
+            created_dt = datetime.strptime(created_text, "%Y-%m-%d %H:%M:%S")
+            created_dt = created_dt.replace(tzinfo=now.tzinfo)
+        except Exception:
+            return ""
+
+        if created_dt > now:
+            created_dt = now
+
+        day_diff = (now.date() - created_dt.date()).days
+        if day_diff > 0:
+            if day_diff == 1:
+                return _("1 day ago")
+            return _("{0} days ago").format(day_diff)
+
+        seconds_diff = max(0, int((now - created_dt).total_seconds()))
+        minute_count = seconds_diff // 60
+        if minute_count < 60:
+            if minute_count == 1:
+                return _("1 minute ago")
+            return _("{0} minutes ago").format(minute_count)
+
+        hour_count = minute_count // 60
+        if hour_count == 1:
+            return _("1 hour ago")
+        return _("{0} hours ago").format(hour_count)
+
+    def _blend_color(self, base: QtGui.QColor, overlay: QtGui.QColor, amount: float) -> QtGui.QColor:
+        """Blend palette colors to create readable separators in light and dark themes."""
+
+        factor = max(0.0, min(1.0, float(amount)))
+        red = int(round(base.red() * (1.0 - factor) + overlay.red() * factor))
+        green = int(round(base.green() * (1.0 - factor) + overlay.green() * factor))
+        blue = int(round(base.blue() * (1.0 - factor) + overlay.blue() * factor))
+        return QtGui.QColor(red, green, blue)
+
+    def _ai_change_list_stylesheet(self, list_view: QtWidgets.QListView) -> str:
+        palette = list_view.palette()
+        base_color = palette.color(QtGui.QPalette.ColorRole.Base)
+        text_color = palette.color(QtGui.QPalette.ColorRole.Text)
+        blend_amount = 0.42 if base_color.lightness() < 128 else 0.28
+        separator_color = self._blend_color(base_color, text_color, blend_amount)
+        return (
+            "QListView::item {"
+            f"border-bottom: 1px solid {separator_color.name()};"
+            "}"
+        )
+
+    def _refresh_ai_change_set_name(
+            self,
+            change_set: dict,
+            allow_db_lookup: bool = False,
+            use_relative_time: bool = False) -> None:
         """Update one change-set title from recorded operations."""
 
         if not isinstance(change_set, dict):
@@ -805,22 +878,20 @@ class AiLLM():
 
         created_at = str(change_set.get("created_at", "")).strip()
         time_label = created_at
-        if len(created_at) >= 19:
-            time_label = created_at[11:19]
+        if use_relative_time:
+            relative_time = self._format_ai_change_age(created_at)
+            if relative_time != "":
+                time_label = relative_time
+        elif len(created_at) >= 19:
+            time_label = created_at[11:19] # extract HH:MM:SS from timestamp
 
-        title = _("AI changes")
+        title = "" # _("AI changes")
         if time_label != "":
-            title += " [" + time_label + "]"
-        primary_target = ""
-        if len(coding_targets) > 0:
-            sorted_primary = sorted(
-                coding_targets.items(),
-                key=lambda item: (-int(item[1]), str(item[0]).lower()),
-            )
-            primary_target = str(sorted_primary[0][0])
-        first_line = title + ": " + ", ".join(parts)
-        if primary_target != "":
-            first_line += " | " + primary_target
+            if use_relative_time:
+                title += time_label
+            else:
+                title += "[" + time_label + "]"
+        first_line = title if title != "" else ", ".join(parts)
         lines = [first_line]
         categories_line = self._format_name_line(_("Categories: "), category_names)
         if categories_line != "":
@@ -829,21 +900,15 @@ class AiLLM():
         if codes_line != "":
             lines.append(codes_line)
         if len(coding_targets) > 0:
-            sorted_targets = sorted(
-                coding_targets.items(),
-                key=lambda item: (-int(item[1]), str(item[0]).lower()),
-            )
             shown_targets = []
-            for label, count in sorted_targets[:5]:
+            for label, count in coding_targets.items():
                 if int(count) > 1:
                     shown_targets.append(label + " (" + str(int(count)) + ")")
                 else:
                     shown_targets.append(label)
-            codings_line = _("Codings: ") + "; ".join(shown_targets)
-            remaining_targets = len(sorted_targets) - len(shown_targets)
-            if remaining_targets > 0:
-                codings_line += _(" (+{0} more)").format(remaining_targets)
-            lines.append(codings_line)
+            codings_line = self._format_name_line(_("Codings: "), shown_targets)
+            if codings_line != "":
+                lines.append(codings_line)
         change_set["name"] = "\n".join(lines)
 
     def discard_empty_ai_change_set(self, set_id: str) -> None:
@@ -1166,13 +1231,15 @@ class AiLLM():
                 continue
             ops = item.get("operations", [])
             if isinstance(ops, list) and len(ops) > 0:
-                self._refresh_ai_change_set_name(item, allow_db_lookup=True)
+                self._refresh_ai_change_set_name(item, allow_db_lookup=True, use_relative_time=True)
                 options.append(item)
         if len(options) == 0:
             Message(self.app, _("Undo AI changes"), _("No AI changes available to undo.")).exec()
             return
 
         ui = DialogSelectItems(self.app, options, _("Select AI changes to undo"), "single")
+        ui.ui.listView.setStyleSheet(self._ai_change_list_stylesheet(ui.ui.listView))
+        
         ok = ui.exec()
         if not ok:
             return
@@ -1181,7 +1248,7 @@ class AiLLM():
             return
 
         impact_text = self._build_ai_change_impact_text(selected)
-        confirm_text = _("Undo AI changes: ") + str(selected.get("name", ""))
+        confirm_text = _("Undo AI changes from {timestamp}").format(timestamp=str(selected.get("name", "")))
         if impact_text != "":
             confirm_text += "\n\n" + impact_text
         confirm_text += "\n\n" + _("Do you want to continue?")
@@ -1193,7 +1260,7 @@ class AiLLM():
         if selected in history:
             history.remove(selected)
 
-        msg = _("Undo AI changes: ") + str(selected.get("name", "")) + "\n"
+        msg = _("Undo AI changes from {timestamp}").format(timestamp=str(selected.get("name", ""))) + "\n"
         msg += _("Undone operations: ") + str(stats.get("undone", 0)) + "\n"
         skipped = int(stats.get("skipped_changed", 0)) + int(stats.get("skipped_missing", 0)) + int(stats.get("skipped_invalid", 0))
         if skipped > 0:

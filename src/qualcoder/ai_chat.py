@@ -130,6 +130,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.ai_output.linkHovered.connect(self.on_linkHovered)
         self.ui.ai_output.linkActivated.connect(self.on_linkActivated)
         self.ui.pushButton_help.pressed.connect(self.help)
+        self.ui.pushButton_undo.pressed.connect(self._undo_ai_changes_shortcut)
         self.shortcut_undo_ai_changes = QShortcut(QKeySequence("Ctrl+Shift+U"), self)
         self.shortcut_undo_ai_changes.activated.connect(self._undo_ai_changes_shortcut)
         ai_chat_signal_emitter.newTextChatSignal.connect(self.new_text_chat)
@@ -167,6 +168,7 @@ class DialogAIChat(QtWidgets.QDialog):
         QtCore.QTimer.singleShot(0, self.restore_ai_output_splitter)
         self.ui.scrollArea_ai_output.verticalScrollBar().valueChanged.connect(self.on_ai_output_scroll)
         self.set_sidebar_mode(False)
+        self._update_undo_button_state()
 
     def init_styles(self):
         """Set up the stylesheets for the ui and the chat entries
@@ -182,6 +184,9 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.pushButton_help.setIcon(qta.icon('mdi6.help'))
         self.ui.pushButton_help.setFixedHeight(self.ui.pushButton_delete.height())
         self.ui.pushButton_help.setFixedWidth(self.ui.pushButton_help.height())
+        self.ui.pushButton_undo.setIcon(qta.icon('mdi6.undo'))
+        self.ui.pushButton_undo.setFixedHeight(self.ui.pushButton_delete.height())
+        self.ui.pushButton_undo.setFixedWidth(self.ui.pushButton_undo.height())
         self.ui.toolButton_close_sidebar.setIcon(qta.icon('mdi6.arrow-left-bold-outline'))
         self.ui.toolButton_close_sidebar.setIconSize(QtCore.QSize(16, 16))
         doc_font = f'font: {self.app.settings["docfontsize"]}pt \'{self.app.settings["font"]}\';'
@@ -265,6 +270,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.chat_history_conn.commit()
         self.current_chat_idx = -1
         self.fill_chat_list()
+        self._update_undo_button_state()
     
     def close(self):
         self.on_ai_output_splitter_moved()
@@ -279,8 +285,22 @@ class DialogAIChat(QtWidgets.QDialog):
     def _undo_ai_changes_shortcut(self):
         ai = getattr(self.app, "ai", None)
         if ai is None:
+            self._update_undo_button_state()
             return
         ai.undo_ai_agent_changes()
+        self._update_undo_button_state()
+
+    def _update_undo_button_state(self):
+        """Enable undo only when the current AI session has undoable changes."""
+
+        enabled = False
+        ai = getattr(self.app, "ai", None)
+        if ai is not None and hasattr(ai, "has_undoable_ai_changes"):
+            try:
+                enabled = bool(ai.has_undoable_ai_changes())
+            except Exception:
+                enabled = False
+        self.ui.pushButton_undo.setEnabled(enabled)
 
     def _get_saved_ai_output_splitter_bottom(self):
         """Return the saved bottom pane height for the AI output splitter."""
@@ -3040,6 +3060,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         self.ai_streaming_output = ''
         if not isinstance(mcp_result, dict):
             self.process_message('info', _('Error: Invalid result from MCP general chat worker.'), self.current_streaming_chat_idx)
+            self._update_undo_button_state()
             return
 
         chat_idx = int(mcp_result.get("chat_idx", self.current_streaming_chat_idx))
@@ -3048,11 +3069,13 @@ data collected. This information will accompany every prompt sent to the AI, res
 
         if mcp_result.get("canceled", False):
             self.process_message('info', _('Chat has been canceled by the user.'), chat_idx)
+            self._update_undo_button_state()
             return
 
         err = str(mcp_result.get("error", "")).strip()
         if err != '':
             self.process_message('info', err, chat_idx)
+            self._update_undo_button_state()
             return
 
         tool_messages = mcp_result.get("tool_messages", None)
@@ -3077,15 +3100,18 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.history_update_message_list(db_conn)
             finally:
                 db_conn.close()
+        self._update_undo_button_state()
 
         direct_ai_message = str(mcp_result.get("direct_ai_message", "")).strip()
         if direct_ai_message != "":
             self.process_message('ai', direct_ai_message, chat_idx)
+            self._update_undo_button_state()
             return
 
         stream_messages = mcp_result.get("stream_messages", None)
         if stream_messages is None or not isinstance(stream_messages, list) or len(stream_messages) == 0:
             self.process_message('info', _('Error: Invalid message stream from MCP general chat worker.'), chat_idx)
+            self._update_undo_button_state()
             return
 
         self.current_streaming_chat_idx = chat_idx
@@ -3096,6 +3122,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                                     streaming_callback=self.ai_streaming_callback,
                                     error_callback=self.ai_error_callback)
         self.update_chat_window()
+        self._update_undo_button_state()
 
     def ai_mcp_progress_callback(self, progress_msg):
         """Receive live MCP status updates from the worker thread."""
@@ -3122,8 +3149,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             status = str(progress_msg).strip()
             chat_idx = self.current_chat_idx
         if status == '':
+            self._update_undo_button_state()
             return
         self.process_message('agent_status', status, chat_idx)
+        self._update_undo_button_state()
     
     def ai_streaming_callback(self, streamed_text):  # TODO streamed_text unused
         self.update_chat_window()
