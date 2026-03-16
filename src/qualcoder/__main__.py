@@ -1440,6 +1440,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ai_chat_window = None
         self.ai_chat_sidebar_mode = False
         self.ai_chat_tab_sidebar_button = None
+        self.last_non_ai_chat_tab = None
         
         if platform.system() == "Windows" and self.app.settings['stylesheet'] == "native":
             # Make 'Fusion' the standard native style on Windows https://www.qt.io/blog/dark-mode-on-windows-11-with-qt-6.5
@@ -1601,6 +1602,7 @@ Click "Yes" to start now.')
         self.ui.actionAI_Chat_Sidebar.setCheckable(True)
         self.ui.actionAI_Chat_Sidebar.toggled.connect(self.toggle_ai_chat_sidebar)
         self.ui.actionAI_Search_and_Coding.triggered.connect(self.ai_go_search)
+        self.ui.tabWidget.currentChanged.connect(self.remember_last_non_ai_chat_tab)
         # Help menu
         self.ui.actionContents.setShortcut('Alt+H')
         self.ui.actionContents.triggered.connect(self.help)
@@ -1619,6 +1621,7 @@ Click "Yes" to start now.')
         self.settings_report()
         
         self.ui.tabWidget.setCurrentIndex(0)
+        self.last_non_ai_chat_tab = self.ui.tab_action_log
         self.ai_chat()
         # add tab widget icons
         try:
@@ -2258,11 +2261,40 @@ Click "Yes" to start now.')
             self._apply_ai_sidebar_splitter_sizes()
             QtCore.QTimer.singleShot(30, self._apply_ai_sidebar_splitter_sizes)
 
-    def set_ai_chat_sidebar_mode(self, enabled, persist=True):
+    def remember_last_non_ai_chat_tab(self, index):
+        """Store the most recent visible main tab other than AI Chat."""
+
+        widget = self.ui.tabWidget.widget(index)
+        if widget is None or widget == self.ui.tab_ai_chat:
+            return
+        if not self.ui.tabWidget.isTabVisible(index):
+            return
+        self.last_non_ai_chat_tab = widget
+
+    def get_tab_after_ai_chat_sidebar_switch(self):
+        """Choose which main tab to show when AI chat moves into the sidebar."""
+
+        current_widget = self.ui.tabWidget.currentWidget()
+        current_index = self.ui.tabWidget.indexOf(current_widget)
+        if (
+            current_widget is not None
+            and current_widget != self.ui.tab_ai_chat
+            and current_index >= 0
+            and self.ui.tabWidget.isTabVisible(current_index)
+        ):
+            return current_widget
+        if self.last_non_ai_chat_tab is not None:
+            return self.last_non_ai_chat_tab
+        return self.ui.tab_action_log
+
+    def set_ai_chat_sidebar_mode(self, enabled, persist=True, target_tab=None):
         """Switch AI chat between main tab view and sidebar view."""
 
         if self.ai_chat_window is None:
             return
+        sidebar_target_tab = None
+        if bool(enabled):
+            sidebar_target_tab = target_tab if target_tab is not None else self.get_tab_after_ai_chat_sidebar_switch()
         ai_output_anchor = self.ai_chat_window.capture_ai_output_top_anchor()
 
         def restore_ai_output_anchor():
@@ -2287,7 +2319,7 @@ Click "Yes" to start now.')
         if enabled:
             self.ui.sidebar.setMinimumWidth(0)
             self.ai_chat_window.setMinimumWidth(0)
-            self.ui.tabWidget.setCurrentWidget(self.ui.tab_action_log)
+            self.ui.tabWidget.setCurrentWidget(sidebar_target_tab)
             self._apply_ai_sidebar_splitter_sizes()
             QtCore.QTimer.singleShot(0, self._apply_ai_sidebar_splitter_sizes)
             QtCore.QTimer.singleShot(30, self._apply_ai_sidebar_splitter_sizes)

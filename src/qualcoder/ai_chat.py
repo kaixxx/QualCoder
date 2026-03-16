@@ -3342,7 +3342,10 @@ data collected. This information will accompany every prompt sent to the AI, res
         """Show AI chat in sidebar mode and open the selected text span."""
 
         if not getattr(self.main_window, 'ai_chat_sidebar_mode', False):
-            self.main_window.set_ai_chat_sidebar_mode(True)
+            self.main_window.set_ai_chat_sidebar_mode(
+                True,
+                target_tab=self.main_window.ui.tab_coding
+            )
         self.main_window.text_coding(
             task='documents',
             doc_id=int(doc_id),
