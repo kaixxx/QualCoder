@@ -459,14 +459,7 @@
       <property name="bottomMargin">
        <number>0</number>
       </property>
-      <item row="0" column="0">
-       <widget class="QLabel" name="label">
-        <property name="text">
-         <string>AI Chat</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
+      <item row="0" column="2">
        <widget class="QToolButton" name="toolButton_close_sidebar">
         <property name="toolTip">
          <string>Enlarge AI Chat</string>
@@ -476,8 +469,22 @@
         </property>
        </widget>
       </item>
+      <item row="0" column="0">
+       <widget class="QLabel" name="label">
+        <property name="text">
+         <string>AI Chat</string>
+        </property>
+       </widget>
+      </item>
       <item row="1" column="0" colspan="2">
        <widget class="QComboBox" name="comboBox_ai_chats"/>
+      </item>
+      <item row="1" column="2">
+       <widget class="QToolButton" name="toolButton_edit_title">
+        <property name="text">
+         <string>...</string>
+        </property>
+       </widget>
       </item>
      </layout>
     </widget>

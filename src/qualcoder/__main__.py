@@ -2209,6 +2209,11 @@ Click "Yes" to start now.')
             widget.setLayout(layout)
         return layout
 
+    def _ai_chat_sidebar_host_widget(self):
+        """Return the widget that should host AI chat in sidebar mode."""
+
+        return self.ui.sidebar_frame
+
     def _move_ai_chat_to_host(self, host_widget):
         """Reparent the AI chat widget without closing or recreating it."""
 
@@ -2307,7 +2312,7 @@ Click "Yes" to start now.')
         self.ai_chat_sidebar_mode = enabled
 
         if enabled:
-            self._move_ai_chat_to_host(self.ui.sidebar)
+            self._move_ai_chat_to_host(self._ai_chat_sidebar_host_widget())
         else:
             self._move_ai_chat_to_host(self.ui.tab_ai_chat)
 

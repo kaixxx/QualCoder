@@ -126,6 +126,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.comboBox_ai_chats.setView(combo_view)
         self.ui.comboBox_ai_chats.currentIndexChanged.connect(self.combo_chat_selection_changed)
         self.ui.toolButton_close_sidebar.pressed.connect(self.close_sidebar_view)
+        self.ui.toolButton_edit_title.pressed.connect(self.edit_title)
         self.ui.splitter_ai_output.splitterMoved.connect(self.on_ai_output_splitter_moved)
         self.ui.ai_output.linkHovered.connect(self.on_linkHovered)
         self.ui.ai_output.linkActivated.connect(self.on_linkActivated)
@@ -147,6 +148,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_search_code_name = None
         self.ai_search_code_memo = None
         self.chat_list = []
+        self._is_updating_chat_title_item = False
         self.ai_search_file_ids = []
         self.ai_search_code_ids = []
         self.ai_text_doc_id = None
@@ -173,6 +175,16 @@ class DialogAIChat(QtWidgets.QDialog):
     def init_styles(self):
         """Set up the stylesheets for the ui and the chat entries
         """
+        font_css = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
+        dialog_bg = self.ui.pushButton_question.palette().color(QPalette.ColorRole.Button).name()
+
+#        self.setStyleSheet(f"""
+#            QDialog#Dialog_ai_chat {{
+#                {font_css}
+#                background-color: {dialog_bg};
+#            }}
+#        """)        
+        
         self.font = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         self.setStyleSheet(self.font)
         # Set progressBar color to default highlight color
@@ -189,6 +201,8 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.pushButton_undo.setFixedWidth(self.ui.pushButton_undo.height())
         self.ui.toolButton_close_sidebar.setIcon(qta.icon('mdi6.arrow-left-bold-outline'))
         self.ui.toolButton_close_sidebar.setIconSize(QtCore.QSize(16, 16))
+        self.ui.toolButton_edit_title.setIcon(qta.icon('mdi6.pencil-outline'))
+        self.ui.toolButton_edit_title.setIconSize(QtCore.QSize(16, 16))
         doc_font = f'font: {self.app.settings["docfontsize"]}pt \'{self.app.settings["font"]}\';'
         self.ai_response_style = f'"{doc_font} color: #356399;"'
         self.ai_user_style = f'"{doc_font} color: #287368;"'
@@ -441,10 +455,7 @@ class DialogAIChat(QtWidgets.QDialog):
         for i in range(len(self.chat_list)):
             chat = self.chat_list[i]
             id_, name, analysis_type, summary, date, analysis_prompt = chat
-            if analysis_type != 'general chat':
-                tooltip_text = f"{name}\nType: {analysis_type}\nSummary: {summary}\nDate: {date}\nPrompt: {analysis_prompt}"
-            else:
-                tooltip_text = f"{name}\nType: {analysis_type}\nSummary: {summary}\nDate: {date}"
+            tooltip_text = self._chat_tooltip_text(chat)
 
             # Creating a new QListWidgetItem
             if analysis_type == 'general chat':
@@ -466,6 +477,68 @@ class DialogAIChat(QtWidgets.QDialog):
             self.current_chat_idx = len(self.chat_list) - 1
         self._set_chat_list_current_row(self.current_chat_idx)
         self.chat_list_selection_changed(force_update=True)
+
+    def _chat_tooltip_text(self, chat):
+        """Build tooltip text for a chat list item."""
+
+        id_, name, analysis_type, summary, date, analysis_prompt = chat
+        if analysis_type != 'general chat':
+            return f"{name}\nType: {analysis_type}\nSummary: {summary}\nDate: {date}\nPrompt: {analysis_prompt}"
+        return f"{name}\nType: {analysis_type}\nSummary: {summary}\nDate: {date}"
+
+    def _refresh_chat_name_views(self):
+        """Force visible chat-title widgets to repaint after a model update."""
+
+        self.ui.treeView_chat_list.viewport().update()
+        self.ui.treeView_chat_list.update()
+        self.ui.comboBox_ai_chats.view().viewport().update()
+        self.ui.comboBox_ai_chats.view().update()
+        self.ui.comboBox_ai_chats.update()
+
+    def _create_text_input_dialog(self, title: str, label: str, text: str) -> QtWidgets.QInputDialog:
+        """Create the standard styled text input dialog for embedded AI chat usage."""
+
+        dialog = QtWidgets.QInputDialog(self.main_window)
+        dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
+        dialog.setWindowTitle(title)
+        dialog.setWindowFlags(dialog.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
+        dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        dialog.setModal(True)
+        dialog.setInputMode(QtWidgets.QInputDialog.InputMode.TextInput)
+        dialog.setLabelText(label)
+        dialog.setTextValue(text)
+        dialog.resize(320, 20)
+        return dialog
+
+    def _rename_chat_at_row(self, row: int, new_name: str) -> bool:
+        """Persist a new title for the chat at the given row."""
+
+        if row < 0 or row >= len(self.chat_list):
+            return False
+        clean_name = str(new_name).strip()
+        if clean_name == '':
+            Message(self.app, _('AI Chat'), _('Please enter a chat title.'), icon='warning').exec()
+            return False
+        chat = self.chat_list[row]
+        chat_id = chat[0]
+        if clean_name == chat[1]:
+            return False
+        cursor = self.chat_history_conn.cursor()
+        cursor.execute('UPDATE chats SET name = ? WHERE id = ?', (clean_name, chat_id))
+        self.chat_history_conn.commit()
+        updated_chat = (chat[0], clean_name, chat[2], chat[3], chat[4], chat[5])
+        self.chat_list[row] = updated_chat
+        item = self.chat_list_model.item(row)
+        if item is not None:
+            self._is_updating_chat_title_item = True
+            try:
+                item.setText(clean_name)
+                item.setToolTip(self._chat_tooltip_text(updated_chat))
+            finally:
+                self._is_updating_chat_title_item = False
+        self._refresh_chat_name_views()
+        self.update_chat_window()
+        return True
 
     def new_chat(self, name, analysis_type, summary, analysis_prompt):
         date = datetime.now()
@@ -1381,16 +1454,20 @@ data collected. This information will accompany every prompt sent to the AI, res
         
     def chat_list_item_changed(self, item: QStandardItem):
         """This method is called whenever the name of a chat is edited in the list"""
+        if self._is_updating_chat_title_item:
+            return
         row = item.row()
         if row < 0 or row >= len(self.chat_list):
             return
-        chat_id = self.chat_list[row][0]
-        curr_name = item.text()
-        cursor = self.chat_history_conn.cursor()
-        cursor.execute('UPDATE chats SET name = ? WHERE id = ?', (curr_name, chat_id))
-        self.chat_history_conn.commit()
-        self.get_chat_list()
-        self.update_chat_window()
+        previous_name = self.chat_list[row][1]
+        if not self._rename_chat_at_row(row, item.text()):
+            self._is_updating_chat_title_item = True
+            try:
+                item.setText(previous_name)
+                item.setToolTip(self._chat_tooltip_text(self.chat_list[row]))
+            finally:
+                self._is_updating_chat_title_item = False
+            self._refresh_chat_name_views()
 
     def open_context_menu(self, position):
         index = self.ui.treeView_chat_list.indexAt(position)
@@ -1419,9 +1496,15 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def edit_title(self):
         """Edit the title of the current chat"""
-        index = self.ui.treeView_chat_list.currentIndex()
-        if index.isValid():
-            self.ui.treeView_chat_list.edit(index)
+        row = self.current_chat_idx
+        if row < 0 or row >= len(self.chat_list):
+            return
+        current_name = self.chat_list[row][1]
+        dialog = self._create_text_input_dialog(_('Edit chat title'), _('Title:'), current_name)
+        ok = dialog.exec()
+        if not ok:
+            return
+        self._rename_chat_at_row(row, dialog.textValue())
 
     def export_chat(self):
         """Export the current chat into a html or txt file"""
