@@ -31,9 +31,9 @@ import re
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 
-from .GUI.ui_dialog_report_code_summary import Ui_Dialog_code_summary
 from .color_selector import TextColor
-from .simple_wordcloud import stopwords as cloud_stopwords
+from .GUI.ui_dialog_report_code_summary import Ui_Dialog_code_summary
+from .stopwords import *
 
 # If VLC not installed, it will not crash
 vlc = None
@@ -50,11 +50,6 @@ logger = logging.getLogger(__name__)
 class DialogReportCodeSummary(QtWidgets.QDialog):
     """ Provide a summary report for selected code.
     """
-
-    app = None
-    parent_tetEdit = None
-    categories = []
-    codes = []
 
     def __init__(self, app, parent_textedit):
         self.app = app
@@ -79,13 +74,18 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         self.ui.pushButton_search_next.pressed.connect(self.search_results_next)
         self.ui.treeWidget.setStyleSheet(treefont)
         self.ui.treeWidget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        languages = ["  ", "Deutsch de", "English en", "Español es", "Français fr", "Italiano it", "Português pt"]
+        for lang in languages:
+            self.ui.comboBox_stopwords.addItem(lang)
+        self.categories = []
+        self.codes = []
         self.fill_tree()
         # These signals after the tree is filled the first time
         self.ui.treeWidget.itemCollapsed.connect(self.get_collapsed)
         self.ui.treeWidget.itemExpanded.connect(self.get_collapsed)
-
         self.ui.treeWidget.itemClicked.connect(self.fill_text_edit)
         self.ui.textEdit.setTabChangesFocus(True)
+        self.ui.comboBox_stopwords.currentTextChanged.connect(self.fill_text_edit)
 
     def splitter_sizes(self):
         """ Detect size changes in splitter and store in app.settings variable. """
@@ -264,6 +264,8 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         """ Get data about file and fill text edit. """
 
         current = self.ui.treeWidget.currentItem()
+        if not current:
+            return
         if current.text(1)[0:3] != 'cid':
             self.ui.textEdit.setText("")
             return
@@ -342,9 +344,11 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         text += _("Total characters: ") + f"{total_chars:,d}"
         text += "  " + _("Average characters: ") + f"{int(avg_chars)}\n"
 
-        # Get stopwords from user created list or default to simple_wordcloud stopwords
+        # Get stopwords from user created list or
+        # TODO default to user selection
         stopwords_file_path = os.path.join(os.path.expanduser('~'), ".qualcoder", "stopwords.txt")
         user_created_stopwords = []
+        stopwords = []
         try:
             # Can get UnicodeDecode Error on Windows so using error handler
             with open(stopwords_file_path, "r", encoding="utf-8", errors="backslashreplace") as stopwords_file:
@@ -357,7 +361,20 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                     user_created_stopwords.append(stopword.strip())  # Remove line ending
             stopwords = user_created_stopwords
         except FileNotFoundError as err:
-            stopwords = cloud_stopwords
+            pass
+        if not user_created_stopwords:
+            stopwords = []
+            language = self.ui.comboBox_stopwords.currentText()
+            if language.endswith("de"):
+                stopwords = de.splitlines()
+            if language.endswith("en"):
+                stopwords = en.splitlines()
+            if language.endswith("es"):
+                stopwords = es.splitlines()
+            if language.endswith("fr"):
+                stopwords = fr.splitlines()
+            if language.endswith("pt"):
+                stopwords = pt.splitlines()
 
         # Remove punctuation. Convert to lower case
         chars = ""
@@ -374,7 +391,7 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                 word_list.append(word)
         msg = _(
             "Word calculations: Words use alphabet characters and include the apostrophe. "
-            "All other characters are word separators. Excludes English stopwords")
+            "All other characters are word separators.")
         text += f"{msg}\n"
         text += _("Words: ") + f"{len(word_list):,d}\n"
 
@@ -392,7 +409,12 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         max_count = len(word_freq)
         if max_count > 100:
             max_count = 100
-        text += _("Top 100 words") + "\n"
+        text += _("Top 100 words") + ". "
+        if self.ui.comboBox_stopwords.currentText() != "  " and not user_created_stopwords:
+            text += _("Applying stopwords: ") + self.ui.comboBox_stopwords.currentText()
+        if user_created_stopwords:
+            text += _("Applying stopwords from: .qualcoder/stopwords.txt")
+        text += "\n"
         for i in range(0, max_count):
             text += f"{word_freq[i][1]}   {word_freq[i][0]} | "
         text += "\n"

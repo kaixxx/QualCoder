@@ -22,14 +22,9 @@ https://qualcoder-org.github.io/
 
 import webbrowser
 from copy import deepcopy
-import datetime
 import logging
 import os
-from PyQt6 import QtWidgets
-import sys
-import traceback
 from wordcloud import WordCloud
-from PIL import ImageColor
 
 path = os.path.abspath(os.path.dirname(__file__))
 logger = logging.getLogger(__name__)
@@ -71,29 +66,6 @@ color_ranges = [
      "range": ["#C61A09", "#DF2C14", "#ED3419", "#FB3B1E", "#FF4122", "#FF6242", "#FF8164", "#FFA590", "#FFC9BB"]}
 ]
 
-stopwords = ["a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't", "as",
-             "at",
-             "b", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "c", "can",
-             "can't", "could", "couldn't",
-             "d", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
-             "e", "each", "f", "few", "for", "from", "further", "g", "get", "got",
-             "h", "had", "hadn't", "has", "hasn't", "have", "haven't", "having", "he", "he's", "her", "here",
-             "hers", "herself", "him", "himself", "his", "how",
-             "i", "i'll", "i'm", "i've", "if", "in", "into", "is", "is'nt", "isn't", "it", "it's", "its", "itself",
-             "j", "just", "k", "l", "m", "me", "more", "most", "my", "myself", "n", "no", "nor", "not", "now",
-             "o", "of", "off", "oh", "on", "once", "only", "or", "other", "our", "ours", "ourselves", "out", "over",
-             "own",
-             "p", "pre", "put", "q", "r", "re",
-             "s", "same", "she", "she'd", "she's", "should", "shouldn't", "so", "some", "such",
-             "t", "than", "that", "that's", "the", "their", "theirs", "them", "themselves", "then", "there", "there's",
-             "these",
-             "they", "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too",
-             "u", "uh", "um", "under", "until", "up", "us", "v", "very",
-             "w", "was", "wasn't", "we", "we're", "we've", "were", "weren't", "what",
-             "what's", "when", "where", "which", "while",
-             "who", "who's", "whom", "why", "will", "with", "would", "wouldn't",
-             "x", "y", "you", "you'd", "you'ld", "you're", "you've", "your", "yours", "yourself", "yourselves", "z"]
-
 
 class Wordcloud:
     """Create a wordcloud using the `wordcloud` package.
@@ -114,18 +86,18 @@ class Wordcloud:
     """
 
     def __init__(
-        self,
-        app,
-        fulltext,
-        width=800,
-        height=600,
-        max_words=200,
-        background_color="black",
-        text_color="random",
-        reverse_colors=False,
-        ngrams=1,
-        stopwords_filepath2=None
-    ):
+            self,
+            app,
+            fulltext,
+            width=800,
+            height=600,
+            max_words=200,
+            background_color="black",
+            text_color="random",
+            reverse_colors=False,
+            ngrams=1,
+            stopwords_filepath2=None,
+            save_filepath=None):
         self.app = app
         self.width = width
         self.height = height
@@ -155,7 +127,7 @@ class Wordcloud:
                     self.stopwords.append(stopword.strip())
         except FileNotFoundError as err:
             print(err)
-            self.stopwords = stopwords
+            pass
 
         # ---- TEXT PREPROCESSING + NGRAMS ----
         # 1) Clean text (letters + apostrophes, lowercased)
@@ -214,10 +186,14 @@ class Wordcloud:
 
         # Generate image from frequencies
         wc.generate_from_frequencies(freq)
-
-        temp_filepath = os.path.join(os.path.expanduser("~"), ".qualcoder", "wordcloud_temp.png")
-        wc.to_file(temp_filepath)
-        webbrowser.open(temp_filepath)
+        # Guardar la imagen en la ruta seleccionada. Save the image to the selected path
+        if save_filepath:
+            wc.to_file(save_filepath)
+            webbrowser.open(save_filepath)
+        else:
+            temp_filepath = os.path.join(os.path.expanduser("~"), ".qualcoder", "wordcloud_temp.png")
+            wc.to_file(temp_filepath)
+            webbrowser.open(temp_filepath)
 
     # ---------------- helper methods ----------------
 
@@ -270,6 +246,7 @@ class Wordcloud:
             return fixed_color
 
         return single_color_func, None
+
 
 if __name__ == "__main__":
     test_text = "qualcoder qualcoder qualcoder qualcoder dogs cats birds qualitative analysis  qualitative analysis qualitative analysis research research"
