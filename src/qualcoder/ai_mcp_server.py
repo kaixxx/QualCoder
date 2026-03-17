@@ -38,9 +38,7 @@ class AiMcpServer:
     default_segments_max_chars = 8000
     max_segments_chars_limit = 50000
     default_vector_page_size = 20
-    max_vector_page_size = 100
     default_vector_k_per_query = 50
-    max_vector_k_per_query = 200
     default_vector_score_threshold = 0.5
     default_regex_page_size = 20
     max_regex_page_size = 100
@@ -295,12 +293,12 @@ class AiMcpServer:
                     mimeType="application/json",
                 ),
                 types.ResourceTemplate(
-                    uriTemplate="qualcoder://vector/search{?q,cursor,page_size,file_ids,exclude_cids,score_threshold,k_per_query}",
+                    uriTemplate="qualcoder://vector/search{?q,cursor,file_ids,exclude_cids,score_threshold}",
                     name="Semantic vector search",
                     description=(
                         "Search semantically similar text chunks. Pass one or more q parameters "
-                        "(for example ?q=work&q=employment). Optional params: cursor, page_size, "
-                        "file_ids, exclude_cids, score_threshold, k_per_query."
+                        "(for example ?q=work&q=employment). Optional params: cursor, "
+                        "file_ids, exclude_cids, score_threshold."
                     ),
                     mimeType="application/json",
                 ),
@@ -1011,20 +1009,11 @@ class AiMcpServer:
         cursor = self._to_int(query.get("cursor", [0])[0], 0)
         cursor = max(0, cursor)
 
-        page_size = self._to_int(query.get("page_size", [self.default_vector_page_size])[0], self.default_vector_page_size)
-        page_size = max(1, min(page_size, self.max_vector_page_size))
-
         score_threshold = self._to_float(
             query.get("score_threshold", [self.default_vector_score_threshold])[0],
             self.default_vector_score_threshold,
         )
         score_threshold = max(0.0, min(score_threshold, 1.0))
-
-        k_per_query = self._to_int(
-            query.get("k_per_query", [self.default_vector_k_per_query])[0],
-            self.default_vector_k_per_query,
-        )
-        k_per_query = max(1, min(k_per_query, self.max_vector_k_per_query))
 
         file_ids = self._parse_positive_int_list_options(query, ("file_ids",))
         exclude_cids = self._parse_positive_int_list_options(query, ("exclude_cids", "exclude_code_ids", "cids"))
@@ -1032,11 +1021,9 @@ class AiMcpServer:
         return {
             "queries": deduped_queries,
             "cursor": cursor,
-            "page_size": page_size,
             "file_ids": file_ids,
             "exclude_cids": exclude_cids,
             "score_threshold": score_threshold,
-            "k_per_query": k_per_query,
         }
 
     def _parse_regex_search_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
@@ -1094,9 +1081,7 @@ class AiMcpServer:
         if not isinstance(queries, list) or len(queries) == 0:
             raise ValueError("Missing vector search query.")
         cursor = max(0, self._to_int(options.get("cursor", 0), 0))
-        page_size = max(1, min(self._to_int(options.get("page_size", self.default_vector_page_size),
-                                            self.default_vector_page_size),
-                               self.max_vector_page_size))
+        page_size = self.default_vector_page_size
         file_ids = options.get("file_ids", [])
         if not isinstance(file_ids, list):
             file_ids = []
@@ -1105,8 +1090,7 @@ class AiMcpServer:
             exclude_cids = []
         score_threshold = max(0.0, min(self._to_float(options.get("score_threshold", self.default_vector_score_threshold),
                                                       self.default_vector_score_threshold), 1.0))
-        k_per_query = max(1, min(self._to_int(options.get("k_per_query", self.default_vector_k_per_query),
-                                              self.default_vector_k_per_query), self.max_vector_k_per_query))
+        k_per_query = self.default_vector_k_per_query
 
         cache_key = self._vector_search_cache_key(queries, file_ids, exclude_cids, score_threshold, k_per_query)
 
@@ -1209,11 +1193,9 @@ class AiMcpServer:
                 "selection": {
                     "queries": queries,
                     "cursor": cursor,
-                    "page_size": page_size,
                     "file_ids": file_ids,
                     "exclude_cids": exclude_cids,
                     "score_threshold": score_threshold,
-                    "k_per_query": k_per_query,
                     "total_hits": total_hits,
                     "returned_hits": len(hits),
                     "next_cursor": next_cursor,

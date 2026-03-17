@@ -215,7 +215,7 @@ class TestAiMcpServer(TestCase):
         self.assertIn("result", res)
         templates = [r["uriTemplate"] for r in res["result"]["resourceTemplates"]]
         self.assertIn("qualcoder://codes/segments/{cid}", templates)
-        self.assertIn("qualcoder://vector/search{?q,cursor,page_size,file_ids,exclude_cids,score_threshold,k_per_query}", templates)
+        self.assertIn("qualcoder://vector/search{?q,cursor,file_ids,exclude_cids,score_threshold}", templates)
         self.assertIn("qualcoder://search/regex{?pattern,flags,cursor,page_size,file_ids,exclude_cids,context_chars}", templates)
 
     def test_project_coders_resource_contains_visibility(self):
@@ -351,6 +351,20 @@ class TestAiMcpServer(TestCase):
         )
         self.assertEqual([1, 2], options["file_ids"])
         self.assertEqual([4, 5], options["exclude_cids"])
+        self.assertNotIn("page_size", options)
+        self.assertNotIn("k_per_query", options)
+
+    def test_parse_vector_search_options_ignores_removed_tuning_parameters(self):
+        options = self.server._parse_vector_search_options(
+            {
+                "q": ["work"],
+                "page_size": ["50"],
+                "k_per_query": ["100"],
+            }
+        )
+        self.assertEqual(["work"], options["queries"])
+        self.assertNotIn("page_size", options)
+        self.assertNotIn("k_per_query", options)
 
     def test_parse_regex_search_options_accepts_file_ids_and_exclude_cids(self):
         options = self.server._parse_regex_search_options(

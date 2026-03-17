@@ -1889,6 +1889,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "\"skill_reason\": \"short reason for the decision\", "
             "\"reflection_summary\": \"one short user-facing note: next steps\", "
             "\"next_step_note\": \"optional short alias if reflection_summary is empty\", "
+            "\"continue_deferred_calls\": true|false, "
             "\"user_decision_required\": true|false, "
             "\"decision_question\": \"optional free-text question for the user\", "
             "\"decision_context\": \"optional short reason for the question\", "
@@ -1902,6 +1903,8 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Use as few additional calls as possible and keep them focused.\n"
             "- Re-evaluate skill needs explicitly using skill_decision and skill_reason.\n"
             "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
+            "- If deferred_calls are listed in the reflection prompt, decide explicitly whether they should continue unchanged by setting continue_deferred_calls=true or false.\n"
+            "- If continue_deferred_calls=true, you may keep revised_calls empty to continue the deferred queue unchanged, or provide revised_calls to prepend/adjust the next steps.\n"
             "- If you need additional input, methodological decisions, or confirmation by the user, ask them by setting user_decision_required=true and providing a concise, natural language question in decision_question.\n"
             "- If user_decision_required=true, put the suggested follow-up MCP actions into proposed_next_calls and keep revised_calls empty.\n"
             "- If the user explicitly requested write actions, include revised_calls that execute the remaining write actions whenever this is possible.\n"
@@ -2150,6 +2153,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 "skill_reason": {"type": "string"},
                 "reflection_summary": {"type": "string"},
                 "next_step_note": {"type": "string"},
+                "continue_deferred_calls": {"type": "boolean"},
                 "user_decision_required": {"type": "boolean"},
                 "decision_question": {"type": "string"},
                 "decision_context": {"type": "string"},
@@ -2164,6 +2168,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 "skill_reason",
                 "reflection_summary",
                 "next_step_note",
+                "continue_deferred_calls",
                 "user_decision_required",
                 "decision_question",
                 "decision_context",
@@ -2244,14 +2249,15 @@ data collected. This information will accompany every prompt sent to the AI, res
                     return raw[start:idx + 1].strip()
         return ""
 
-    def _normalize_mcp_calls(self, raw_calls: Any, allowed_methods: set[str], max_calls: int) -> List[Dict[str, Any]]:
+    def _normalize_mcp_calls(self, raw_calls: Any, allowed_methods: set[str],
+                             max_calls: Optional[int] = None) -> List[Dict[str, Any]]:
         """Validate and clamp model-proposed MCP calls."""
 
         normalized: List[Dict[str, Any]] = []
         if not isinstance(raw_calls, list):
             return normalized
         for item in raw_calls:
-            if len(normalized) >= max_calls:
+            if max_calls is not None and max_calls > 0 and len(normalized) >= max_calls:
                 break
             if not isinstance(item, dict):
                 continue
@@ -2266,7 +2272,7 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def _ensure_skill_prompt_call(self, skill_decision: Any, skill_name: Any,
                                   calls: List[Dict[str, Any]], mcp_cache: Dict[str, Dict[str, Any]],
-                                  max_calls: int) -> List[Dict[str, Any]]:
+                                  max_calls: Optional[int] = None) -> List[Dict[str, Any]]:
         """Ensure prompts/get is planned when the model decided to use a skill."""
 
         decision = str(skill_decision if skill_decision is not None else "").strip().lower()
@@ -2306,9 +2312,42 @@ data collected. This information will accompany every prompt sent to the AI, res
                 continue
             seen.add(key)
             merged.append({"method": method, "params": params})
-            if len(merged) >= max_calls:
+            if max_calls is not None and max_calls > 0 and len(merged) >= max_calls:
                 break
         return merged
+
+    def _merge_mcp_call_lists(self, primary_calls: List[Dict[str, Any]],
+                              secondary_calls: List[Dict[str, Any]],
+                              max_calls: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Merge two MCP call lists while preserving order and removing duplicates."""
+
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for call_list in (primary_calls, secondary_calls):
+            for call in call_list:
+                if not isinstance(call, dict):
+                    continue
+                method = str(call.get("method", "")).strip()
+                params = call.get("params", {})
+                if not isinstance(params, dict):
+                    params = {}
+                key = self._mcp_call_key(method, params)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append({"method": method, "params": params})
+                if max_calls is not None and max_calls > 0 and len(merged) >= max_calls:
+                    return merged
+        return merged
+
+    def _split_mcp_call_queue(self, calls: List[Dict[str, Any]], round_limit: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Split queued MCP calls into this round and deferred remainder."""
+
+        if round_limit <= 0:
+            return [], list(calls)
+        current_round = list(calls[:round_limit])
+        deferred = list(calls[round_limit:])
+        return current_round, deferred
 
     def _json_bool(self, value: Any, default: bool) -> bool:
         """Parse relaxed JSON boolean-like values."""
@@ -2732,9 +2771,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             ]
             planner_json_schema = self._mcp_planner_json_schema()
             reflection_json_schema = self._mcp_reflection_json_schema()
-            max_calls_per_round = 4
+            max_calls_per_round = 8
             max_reflection_rounds = 4
-            max_total_tool_calls = 12 + len(bootstrap_calls)
+            max_total_tool_calls = 20 + len(bootstrap_calls)
+            max_queued_calls = 100
             total_tool_calls = 0
             stop_reason = ""
             cacheable_methods = {
@@ -2828,7 +2868,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 response_schema=planner_json_schema,
                 context='mcp_json_planner',
             )
-            planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_calls_per_round)
+            planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_queued_calls)
             proposed_plan_calls = self._normalize_mcp_calls(
                 plan_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
             )
@@ -2837,7 +2877,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 plan_data.get("skill_name", ""),
                 planned_calls,
                 mcp_cache,
-                max_calls_per_round,
+                max_queued_calls,
             )
             proposed_plan_calls = self._ensure_skill_prompt_call(
                 plan_data.get("skill_decision", ""),
@@ -2908,8 +2948,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                     result["canceled"] = True
                     return result
 
+                current_round_calls, deferred_calls = self._split_mcp_call_queue(planned_calls, max_calls_per_round)
                 executed_any_call = False
-                for call in planned_calls:
+                for call in current_round_calls:
                     if self.app.ai.ai_async_is_canceled:
                         result["canceled"] = True
                         return result
@@ -2948,6 +2989,12 @@ data collected. This information will accompany every prompt sent to the AI, res
                 reflection_prompt = "Reflect on sufficiency of the collected evidence and return JSON now."
                 if plan_summary != "":
                     reflection_prompt += "\nInitial plan summary:\n" + plan_summary
+                if len(deferred_calls) > 0:
+                    reflection_prompt += (
+                        "\nDeferred calls from the previous execution queue "
+                        f"(not yet executed because the round limit is {max_calls_per_round}):\n"
+                        + json.dumps(deferred_calls, ensure_ascii=False)
+                    )
                 append_single_instruct_log("reflection", "user", reflection_prompt)
                 reflection_messages.append(HumanMessage(content=reflection_prompt))
                 reflection_data = self._invoke_json_llm(
@@ -2964,8 +3011,12 @@ data collected. This information will accompany every prompt sent to the AI, res
                     final_hint = reflection_brief
                 enough_information = self._json_bool(reflection_data.get("enough_information", False), False)
                 reflection_next_step_note = str(reflection_data.get("next_step_note", "")).strip()
+                continue_deferred_calls = self._json_bool(
+                    reflection_data.get("continue_deferred_calls", False),
+                    False
+                )
                 revised_calls = self._normalize_mcp_calls(
-                    reflection_data.get("revised_calls", []), allowed_methods, max_calls_per_round
+                    reflection_data.get("revised_calls", []), allowed_methods, max_queued_calls
                 )
                 proposed_next_calls = self._normalize_mcp_calls(
                     reflection_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
@@ -2975,8 +3026,10 @@ data collected. This information will accompany every prompt sent to the AI, res
                     reflection_data.get("skill_name", ""),
                     revised_calls,
                     mcp_cache,
-                    max_calls_per_round,
+                    max_queued_calls,
                 )
+                if continue_deferred_calls and len(deferred_calls) > 0:
+                    revised_calls = self._merge_mcp_call_lists(revised_calls, deferred_calls, max_queued_calls)
                 short_reflection_note = self._short_reflection_next_step_note(
                     reflection_summary,
                     reflection_next_step_note,
@@ -2989,6 +3042,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if user_decision_required and decision_question == "":
                     decision_question = short_reflection_note
                 if user_decision_required and decision_question != "":
+                    planned_calls = revised_calls
                     pending_user_decision = {
                         "phase": "reflection",
                         "question": decision_question,
@@ -2999,6 +3053,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                     stop_reason = "awaiting_user_decision"
                     break
                 if enough_information:
+                    planned_calls = revised_calls
                     stop_reason = "enough_information"
                     break
 
@@ -3032,14 +3087,14 @@ data collected. This information will accompany every prompt sent to the AI, res
                         if replan_summary != "":
                             self._emit_mcp_status_text(signals, chat_idx, replan_summary)
                         revised_calls = self._normalize_mcp_calls(
-                            replan_data.get("calls", []), allowed_methods, max_calls_per_round
+                            replan_data.get("calls", []), allowed_methods, max_queued_calls
                         )
                         revised_calls = self._ensure_skill_prompt_call(
                             replan_data.get("skill_decision", ""),
                             replan_data.get("skill_name", ""),
                             revised_calls,
                             mcp_cache,
-                            max_calls_per_round,
+                            max_queued_calls,
                         )
                     if len(revised_calls) == 0:
                         stop_reason = "no_more_valid_calls"
