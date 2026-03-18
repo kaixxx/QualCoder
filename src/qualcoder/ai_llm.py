@@ -1919,7 +1919,9 @@ class AiLLM():
         except Exception as err:
             if run_context.cancel_event.is_set():
                 self._update_run_status(run_context.run_id, 'canceled')
-                return ''
+                res = self.ai_streaming_output
+                self.ai_streaming_output = ''
+                return res
             self._update_run_status(run_context.run_id, 'errored', self._safe_to_text(err))
             self.log_llm_error(req_id, active_llm, err, context='run_stream')
             # Some providers emit malformed trailing streaming events after content is already complete.

@@ -3395,14 +3395,18 @@ data collected. This information will accompany every prompt sent to the AI, res
         """Called if the AI has finished sending its response.
         The streamed resonse is now replaced with the final one.
         """
+        chat_idx = self.current_streaming_chat_idx
+        was_canceled = self._chat_scope_status(chat_idx) == 'canceled'
         self.ai_streaming_output = ''
         if ai_result != '':
-            self.process_message('ai', ai_result, self.current_streaming_chat_idx)
+            self.process_message('ai', ai_result, chat_idx)
+            if was_canceled:
+                self.process_message('info', _('Chat has been canceled by the user. The partial response was kept.'), chat_idx)
         else:
-            if self._chat_scope_status(self.current_streaming_chat_idx) == 'canceled':
-                self.process_message('info', _('Chat has been canceled by the user.'), self.current_streaming_chat_idx)
+            if was_canceled:
+                self.process_message('info', _('Chat has been canceled by the user.'), chat_idx)
             else:
-                self.process_message('info', _('Error: The AI returned an empty result. This may indicate that the AI model is not available at the moment. Try again later or choose a different model.'), self.current_streaming_chat_idx)
+                self.process_message('info', _('Error: The AI returned an empty result. This may indicate that the AI model is not available at the moment. Try again later or choose a different model.'), chat_idx)
             
     def ai_error_callback(self, exception_type, value, tb_obj):
         """Called if the AI returns an error"""
