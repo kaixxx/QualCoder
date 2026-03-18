@@ -448,6 +448,36 @@ class DialogAIChat(QtWidgets.QDialog):
         self.chat_list = cursor.fetchall()
         if self.current_chat_idx >= len(self.chat_list):
             self.current_chat_idx = len(self.chat_list) - 1    
+
+    def _is_agent_chat_type(self, analysis_type: str) -> bool:
+        normalized = str(analysis_type if analysis_type is not None else '').strip().lower()
+        return normalized in ('general chat', 'agent chat')
+
+    def _display_chat_type_label(self, analysis_type: str, preserve_legacy_general: bool = False) -> str:
+        normalized = str(analysis_type if analysis_type is not None else '').strip().lower()
+        raw_value = str(analysis_type if analysis_type is not None else '').strip()
+        if normalized == 'general chat' and preserve_legacy_general:
+            return raw_value or 'general chat'
+        if normalized == 'agent chat':
+            return _('AI Agent Chat')
+        return raw_value
+
+    def _current_ai_profile_name(self) -> str:
+        try:
+            author = str(self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']).strip()
+        except Exception:
+            author = ''
+        return author or 'unknown'
+
+    def _display_ai_agent_author(self, author: str = '') -> str:
+        normalized = str(author if author is not None else '').strip()
+        if normalized == '':
+            return self._current_ai_profile_name()
+        return normalized
+
+    def _ai_agent_heading_html(self, author: str = '') -> str:
+        display_author = self._display_ai_agent_author(author)
+        return f'<b>{_("AI")} {_("Agent")} ({display_author}):</b>'
             
     def fill_chat_list(self):
         self.chat_list_model.clear()
@@ -458,7 +488,7 @@ class DialogAIChat(QtWidgets.QDialog):
             tooltip_text = self._chat_tooltip_text(chat)
 
             # Creating a new QListWidgetItem
-            if analysis_type == 'general chat':
+            if self._is_agent_chat_type(analysis_type):
                 icon = self.app.ai.general_chat_icon()
             elif analysis_type == 'topic chat':
                 icon = self.app.ai.topic_analysis_icon()
@@ -482,9 +512,10 @@ class DialogAIChat(QtWidgets.QDialog):
         """Build tooltip text for a chat list item."""
 
         id_, name, analysis_type, summary, date, analysis_prompt = chat
-        if analysis_type != 'general chat':
-            return f"{name}\nType: {analysis_type}\nSummary: {summary}\nDate: {date}\nPrompt: {analysis_prompt}"
-        return f"{name}\nType: {analysis_type}\nSummary: {summary}\nDate: {date}"
+        display_type = self._display_chat_type_label(analysis_type, preserve_legacy_general=True)
+        if not self._is_agent_chat_type(analysis_type):
+            return f"{name}\nType: {display_type}\nSummary: {summary}\nDate: {date}\nPrompt: {analysis_prompt}"
+        return f"{name}\nType: {display_type}\nSummary: {summary}\nDate: {date}"
 
     def _refresh_chat_name_views(self):
         """Force visible chat-title widgets to repaint after a model update."""
@@ -630,7 +661,7 @@ class DialogAIChat(QtWidgets.QDialog):
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
             return
 
-        self.new_chat(name, 'general chat', summary, '')
+        self.new_chat(name, 'agent chat', summary, '')
         system_prompt = self._general_chat_base_system_prompt()
         self.ai_text_doc_id = None
         self.process_message('system', system_prompt)    
@@ -652,7 +683,7 @@ class DialogAIChat(QtWidgets.QDialog):
             return ""
 
     def _general_chat_base_system_prompt(self) -> str:
-        """Build the base system prompt for general chat from agent.md + project memo."""
+        """Build the base system prompt for the AI agent chat from agent.md + project memo."""
 
         base_prompt = self._load_agent_md_content()
         if base_prompt == "":
@@ -1317,10 +1348,11 @@ data collected. This information will accompany every prompt sent to the AI, res
                 # Show title
                 html += f'<h1 style={self.ai_info_style}>{name}</h1>'
                 summary_br = summary.replace('\n', '<br />')
-                if analysis_type != 'general chat':
-                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {analysis_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /><b>{_('Prompt:')}</b> {analysis_prompt}<br /></p>")
+                display_type = self._display_chat_type_label(analysis_type, preserve_legacy_general=True)
+                if not self._is_agent_chat_type(analysis_type):
+                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {display_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /><b>{_('Prompt:')}</b> {analysis_prompt}<br /></p>")
                 else:
-                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {analysis_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /></p>")
+                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {display_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /></p>")
                 # Show chat messages:
                 agent_status_lines = []
                 agent_status_author = ''
@@ -1329,9 +1361,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                     nonlocal html, agent_status_lines, agent_status_author
                     if len(agent_status_lines) == 0:
                         return
-                    author = agent_status_author if agent_status_author != '' else 'unknown'
                     body = '<br />'.join(agent_status_lines)
-                    block = f'<b>{_("AI")} ({author}) {_("Agent")}:</b><br />{body}'
+                    block = f'{self._ai_agent_heading_html(agent_status_author)}<br />{body}'
                     html += f'<p style={self.ai_status_style}>{block}</p>'
                     agent_status_lines = []
                     agent_status_author = ''
@@ -1367,9 +1398,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         txt = msg[4]
                         txt = txt.replace('\n', '<br />')
                         author = msg[3]
-                        if author is None or author == '':
-                            author = 'unkown'
-                        txt = f'<b>{_("AI")} ({author}):</b><br />{txt}'                        
+                        txt = f'{self._ai_agent_heading_html(author)}<br />{txt}'
                         html += f'<p style={self.ai_response_style}>{txt}</p>'
                     elif msg_type == 'info':
                         txt = msg[4].replace('\n', '<br />')
@@ -1384,10 +1413,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         txt = _('Thinking...')
                     txt = self.replace_references(txt, streaming=True)
                     txt = txt.replace('\n', '<br />')
-                    author = self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']
-                    if author is None or author == '':
-                        author = 'unkown'
-                    txt = f'<b>AI ({author}):</b><br />{txt}'                        
+                    txt = f'{self._ai_agent_heading_html()}<br />{txt}'
                     html += f'<p style={self.ai_response_style}>{txt}</p>'
                 elif not self._chat_scope_active(self.current_chat_idx): # streaming finished, add actions
                     actions_list = []
@@ -1647,6 +1673,9 @@ data collected. This information will accompany every prompt sent to the AI, res
         menu.setToolTipsVisible(True)
 
         # Add actions
+        action_general_chat = menu.addAction(_('New AI Agent Chat'))
+        action_general_chat.setIcon(self.app.ai.general_chat_icon())
+        action_general_chat.setToolTip(_('Analyze your data together with an AI Agent.'))        
         action_topic_analysis = menu.addAction(_('New topic analysis chat'))
         action_topic_analysis.setIcon(self.app.ai.topic_analysis_icon())
         action_topic_analysis.setToolTip(_('Analyzing a free-search topic together with the AI.'))
@@ -1656,9 +1685,6 @@ data collected. This information will accompany every prompt sent to the AI, res
         action_codings_analysis = menu.addAction(_('New code analysis chat'))
         action_codings_analysis.setIcon(self.app.ai.code_analysis_icon())
         action_codings_analysis.setToolTip(_('Analyze the data collected under a certain code together with the AI.'))
-        action_general_chat = menu.addAction(_('New general chat'))
-        action_general_chat.setIcon(self.app.ai.general_chat_icon())
-        action_general_chat.setToolTip(_('Ask the AI anything, not related to your data.'))
 
         # Obtain the bottom-left point of the button in global coordinates
         button_rect = self.ui.pushButton_new_analysis.rect()  # Get the button's rect
@@ -1676,7 +1702,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         elif action == action_topic_analysis:
             self.new_topic_chat()
         elif action == action_general_chat:
-            self.new_general_chat('New general chat', '')
+            self.new_general_chat(_('New AI Agent Chat'), '')
 
     def ai_output_scroll_to_bottom(self, minVal=None, maxVal=None):  # toDO minVal, maxVal unused
         #self._ai_output_scroll_to_bottom()
@@ -1772,6 +1798,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
         if status_text is None or status_text.strip() == '':
             return
+        msg_author = self._display_ai_agent_author(msg_author)
         curr_chat_id = self.chat_list[chat_idx][0]
         cursor = self.chat_history_conn.cursor()
         status_line = status_text.strip()
@@ -1884,7 +1911,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                 analysis_type = ''
                 if 0 <= chat_idx < len(self.chat_list):
                     analysis_type = self.chat_list[chat_idx][2]
-                if analysis_type == 'general chat':
+                if self._is_agent_chat_type(analysis_type):
                     self.app.ai.start_query(self._mcp_general_chat_worker,
                                             self.ai_mcp_message_callback,
                                             messages,
@@ -3275,18 +3302,18 @@ data collected. This information will accompany every prompt sent to the AI, res
             result["stream_messages"] = final_stream_messages
             result["tool_messages"] = tool_messages
         except Exception as err:
-            result["error"] = _('Error during MCP-based general chat: ') + str(err)
+            result["error"] = _('Error during MCP-based AI agent chat: ') + str(err)
         finally:
             if ai_change_set_id != "":
                 self._discard_empty_ai_change_set(ai_change_set_id)
         return result
 
     def ai_mcp_message_callback(self, mcp_result):
-        """Called when the MCP-based general chat worker has finished."""
+        """Called when the MCP-based AI agent chat worker has finished."""
 
         self.ai_streaming_output = ''
         if not isinstance(mcp_result, dict):
-            self.process_message('info', _('Error: Invalid result from MCP general chat worker.'), self.current_streaming_chat_idx)
+            self.process_message('info', _('Error: Invalid result from MCP AI agent chat worker.'), self.current_streaming_chat_idx)
             self._update_undo_button_state()
             return
 
@@ -3337,7 +3364,7 @@ data collected. This information will accompany every prompt sent to the AI, res
 
         stream_messages = mcp_result.get("stream_messages", None)
         if stream_messages is None or not isinstance(stream_messages, list) or len(stream_messages) == 0:
-            self.process_message('info', _('Error: Invalid message stream from MCP general chat worker.'), chat_idx)
+            self.process_message('info', _('Error: Invalid message stream from MCP AI agent chat worker.'), chat_idx)
             self._update_undo_button_state()
             return
 
