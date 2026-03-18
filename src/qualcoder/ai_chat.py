@@ -551,6 +551,59 @@ class DialogAIChat(QtWidgets.QDialog):
             except Exception:
                 pass
 
+    def _chat_scope_active(self, chat_idx=None) -> bool:
+        if chat_idx is None:
+            chat_idx = self.current_chat_idx
+        ai = getattr(self.app, 'ai', None)
+        if ai is None or chat_idx is None or chat_idx < 0:
+            return False
+        if hasattr(ai, 'has_active_runs'):
+            try:
+                return bool(ai.has_active_runs('chat', chat_idx))
+            except Exception:
+                return False
+        return False
+
+    def _chat_scope_status(self, chat_idx=None) -> str:
+        if chat_idx is None:
+            chat_idx = self.current_chat_idx
+        ai = getattr(self.app, 'ai', None)
+        if ai is None or chat_idx is None or chat_idx < 0:
+            return 'idle'
+        if hasattr(ai, 'get_scope_status'):
+            try:
+                return str(ai.get_scope_status('chat', chat_idx)).strip() or 'idle'
+            except Exception:
+                return 'idle'
+        return 'idle'
+
+    def _cancel_chat_scope(self, chat_idx=None, ask: bool = False) -> bool:
+        if chat_idx is None:
+            chat_idx = self.current_chat_idx
+        if chat_idx is None or chat_idx < 0:
+            return True
+        ai = getattr(self.app, 'ai', None)
+        if ai is None:
+            return True
+        if not self._chat_scope_active(chat_idx):
+            return True
+        if ask:
+            msg = _('Do you really want to cancel the AI operation?')
+            msg_box = Message(self.app, 'AI Cancel', msg)
+            msg_box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No)
+            reply = msg_box.exec()
+            if reply == QtWidgets.QMessageBox.StandardButton.No:
+                return False
+        if hasattr(ai, 'cancel_scope'):
+            success = bool(ai.cancel_scope('chat', chat_idx, wait_ms=5000))
+        else:
+            success = bool(ai.cancel(ask=False))
+        if ask and not success:
+            msg = _('The AI operation could not be aborted immediately. It may take a moment for the AI to be ready again.')
+            Message(self.app, 'AI Cancel', msg).exec()
+        self._clear_stream_preview_buffers()
+        return success
+
     def new_chat(self, name, analysis_type, summary, analysis_prompt):
         self._clear_stream_preview_buffers()
         date = datetime.now()
@@ -811,9 +864,15 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.process_message('info', _('Searching for related data...'))
             self.update_chat_window()  
 
-            self.app.ai.retrieve_similar_data(self.new_topic_chat_callback,  
-                                            self.ai_search_code_name, self.ai_search_code_memo,
-                                            self.ai_search_file_ids)
+            chat_idx = self.current_chat_idx
+            self.app.ai.retrieve_similar_data(
+                lambda chunks, chat_idx=chat_idx: self.new_topic_chat_callback(chunks, chat_idx),
+                self.ai_search_code_name,
+                self.ai_search_code_memo,
+                self.ai_search_file_ids,
+                scope_type='chat',
+                scope_id=chat_idx,
+            )
 
     def get_filename(self, id_) -> str:
         """Return the filename for a source id
@@ -832,16 +891,20 @@ data collected. This information will accompany every prompt sent to the AI, res
         else:
             return ''
 
-    def new_topic_chat_callback(self, chunks: List[Document]):
+    def new_topic_chat_callback(self, chunks: List[Document], chat_idx: Optional[int] = None):
         # Analyze the data found
-        if self.app.ai.ai_async_is_canceled:
-            self.process_message('info', _('Chat has been canceled by the user.'))
-            self.update_chat_window()  
+        if chat_idx is None:
+            chat_idx = self.current_chat_idx
+        if self._chat_scope_status(chat_idx) == 'canceled':
+            self.process_message('info', _('Chat has been canceled by the user.'), chat_idx)
+            if chat_idx == self.current_chat_idx:
+                self.update_chat_window()
             return
         if chunks is None or len(chunks) == 0:
             msg = _('Sorry, the AI could could not find any data related to "') + self.ai_search_code_name + '".'
-            self.process_message('info', msg)
-            self.update_chat_window()  
+            self.process_message('info', msg, chat_idx)
+            if chat_idx == self.current_chat_idx:
+                self.update_chat_window()
             return
         
         self.ai_semantic_search_chunks = chunks                
@@ -851,7 +914,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         
         # store the found chunks in the table "topic_chat_embeddings" for later
         cursor = self.chat_history_conn.cursor()
-        chat_id = int(self.chat_list[self.current_chat_idx][0])
+        chat_id = int(self.chat_list[chat_idx][0])
         for i in range(len(chunks)):
             cursor.execute('''
                 INSERT INTO topic_chat_embeddings (chat_id, docstore_id, position, used_flag)
@@ -1091,7 +1154,7 @@ data collected. This information will accompany every prompt sent to the AI, res
     
     def update_ai_busy(self):
         """update question button + progress bar"""
-        if self.app.ai is None or not self.app.ai.is_busy():
+        if self.app.ai is None or not self._chat_scope_active():
             self.ui.pushButton_question.setIcon(qta.icon('mdi6.message-fast-outline', color=self.app.highlight_color()))
             self.ui.pushButton_question.setToolTip(_('Send your question to the AI'))
             self.ui.progressBar_ai.setRange(0, 100)  # Stops the animation
@@ -1326,7 +1389,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         author = 'unkown'
                     txt = f'<b>AI ({author}):</b><br />{txt}'                        
                     html += f'<p style={self.ai_response_style}>{txt}</p>'
-                elif not self.app.ai.is_busy(): # streaming finished, add actions
+                elif not self._chat_scope_active(self.current_chat_idx): # streaming finished, add actions
                     actions_list = []
                     if analysis_type == 'topic chat':
                         actions_list.extend(self.topic_chat_get_actions())                        
@@ -1455,7 +1518,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         self.ui.pushButton_delete.setEnabled(current_row > -1)
         if (not force_update) and (self.current_chat_idx == current_row):
             return
-        if self.app.ai.cancel(True):
+        if self._cancel_chat_scope(self.current_chat_idx, ask=True):
             # AI generation is either finished or canceled, we can change to another chat
             self.current_chat_idx = current_row
             self.ui.pushButton_delete.setEnabled(self.current_chat_idx > -1)
@@ -1732,8 +1795,8 @@ data collected. This information will accompany every prompt sent to the AI, res
         self.history_update_message_list()
     
     def button_question_clicked(self):
-        if self.app.ai.is_busy():
-            self.app.ai.cancel(True)
+        if self._chat_scope_active():
+            self._cancel_chat_scope(ask=True)
         else:
             self.send_user_question()
                     
@@ -1804,14 +1867,14 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.history_add_message(msg_type, '', msg_content, chat_idx)
                 messages = self.history_get_ai_messages()
                 self.current_streaming_chat_idx = self.current_chat_idx
-                self.app.ai.ai_async_stream(self.app.ai.large_llm, 
-                                            messages, 
-                                            result_callback=self.ai_message_callback, 
-                                            progress_callback=None, 
-                                            streaming_callback=self.ai_streaming_callback, 
-                                            error_callback=None,
-                                            scope_type='chat',
-                                            scope_id=chat_idx)
+                self.app.ai.start_stream(messages,
+                                         result_callback=self.ai_message_callback,
+                                         progress_callback=None,
+                                         streaming_callback=self.ai_streaming_callback,
+                                         error_callback=None,
+                                         model_kind='large',
+                                         scope_type='chat',
+                                         scope_id=chat_idx)
         elif msg_type == 'user':
             # user question, shown on screen and send to the AI
             if chat_idx == self.current_chat_idx:
@@ -1822,29 +1885,30 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if 0 <= chat_idx < len(self.chat_list):
                     analysis_type = self.chat_list[chat_idx][2]
                 if analysis_type == 'general chat':
-                    self.app.ai.ai_async_query(self._mcp_general_chat_worker,
-                                               self.ai_mcp_message_callback,
-                                               messages,
-                                               chat_idx,
-                                               progress_callback=self.ai_mcp_progress_callback,
-                                               scope_type='chat',
-                                               scope_id=chat_idx,
-                                               cancel_result={
-                                                   "chat_idx": chat_idx,
-                                                   "stream_messages": [],
-                                                   "tool_messages": [],
-                                                   "canceled": True,
-                                                   "direct_ai_message": "",
-                                               })
+                    self.app.ai.start_query(self._mcp_general_chat_worker,
+                                            self.ai_mcp_message_callback,
+                                            messages,
+                                            chat_idx,
+                                            progress_callback=self.ai_mcp_progress_callback,
+                                            model_kind='large',
+                                            scope_type='chat',
+                                            scope_id=chat_idx,
+                                            cancel_result={
+                                                "chat_idx": chat_idx,
+                                                "stream_messages": [],
+                                                "tool_messages": [],
+                                                "canceled": True,
+                                                "direct_ai_message": "",
+                                            })
                 else:
-                    self.app.ai.ai_async_stream(self.app.ai.large_llm, 
-                                                messages, 
-                                                result_callback=self.ai_message_callback, 
-                                                progress_callback=None, 
-                                                streaming_callback=self.ai_streaming_callback, 
-                                                error_callback=self.ai_error_callback,
-                                                scope_type='chat',
-                                                scope_id=chat_idx)
+                    self.app.ai.start_stream(messages,
+                                             result_callback=self.ai_message_callback,
+                                             progress_callback=None,
+                                             streaming_callback=self.ai_streaming_callback,
+                                             error_callback=self.ai_error_callback,
+                                             model_kind='large',
+                                             scope_type='chat',
+                                             scope_id=chat_idx)
                 self.update_chat_window()
         elif msg_type == 'ai':
             # ai responses.
@@ -2216,11 +2280,11 @@ data collected. This information will accompany every prompt sent to the AI, res
                 response_format = self.app.ai.get_response_format_json_schema(name, response_schema)
 
         llm_response = self.app.ai.invoke_with_logging(
-            self.app.ai.large_llm,
             messages,
             response_format=response_format,
             context=context,
             fallback_without_response_format=True,
+            model_kind='large',
         )
         raw = strip_think_blocks(str(llm_response.content)).strip()
         raw = self._extract_first_json_object(raw)
@@ -2864,7 +2928,7 @@ data collected. This information will accompany every prompt sent to the AI, res
 
             # Ensure baseline environment context exists before planning.
             for method, params in bootstrap_calls:
-                if self.app.ai.ai_async_is_canceled:
+                if self.app.ai.is_current_run_canceled():
                     result["canceled"] = True
                     return result
                 request_params, display_params = _prepare_mcp_request(method, params)
@@ -2969,14 +3033,14 @@ data collected. This information will accompany every prompt sent to the AI, res
                 planned_calls = []
 
             for reflection_round in range(max_reflection_rounds):
-                if self.app.ai.ai_async_is_canceled:
+                if self.app.ai.is_current_run_canceled():
                     result["canceled"] = True
                     return result
 
                 current_round_calls, deferred_calls = self._split_mcp_call_queue(planned_calls, max_calls_per_round)
                 executed_any_call = False
                 for call in current_round_calls:
-                    if self.app.ai.ai_async_is_canceled:
+                    if self.app.ai.is_current_run_canceled():
                         result["canceled"] = True
                         return result
                     if total_tool_calls >= max_total_tool_calls:
@@ -3278,14 +3342,14 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
 
         self.current_streaming_chat_idx = chat_idx
-        self.app.ai.ai_async_stream(self.app.ai.large_llm,
-                                    stream_messages,
-                                    result_callback=self.ai_message_callback,
-                                    progress_callback=None,
-                                    streaming_callback=self.ai_streaming_callback,
-                                    error_callback=self.ai_error_callback,
-                                    scope_type='chat',
-                                    scope_id=chat_idx)
+        self.app.ai.start_stream(stream_messages,
+                                 result_callback=self.ai_message_callback,
+                                 progress_callback=None,
+                                 streaming_callback=self.ai_streaming_callback,
+                                 error_callback=self.ai_error_callback,
+                                 model_kind='large',
+                                 scope_type='chat',
+                                 scope_id=chat_idx)
         self.update_chat_window()
         self._update_undo_button_state()
 
@@ -3322,63 +3386,6 @@ data collected. This information will accompany every prompt sent to the AI, res
     def ai_streaming_callback(self, streamed_text):  # TODO streamed_text unused
         self.update_chat_window()
 
-    def _send_message(self, messages, progress_callback=None):    # TODO progress_callback unused
-        # Callback for async call
-        self.ai_streaming_output = ''
-        self.ai_stream_buffer = ""
-        self.ai_stream_in_ref = False
-        self.current_streaming_chat_idx = self.current_chat_idx
-        req_id = self.app.ai.log_llm_request(self.app.ai.large_llm, messages, context='dialog_send_message')
-        stream_iter = None
-        try:
-            stream_iter = self.app.ai.large_llm.stream(messages)
-            for chunk in stream_iter:
-                if self.app.ai.ai_async_is_canceled:
-                    break  # Cancel the streaming
-                elif self.current_chat_idx != self.current_streaming_chat_idx:
-                    # switched to another chat, cancel also
-                    break
-                else:
-                    # check if we need to process reference:
-                    curr_text = self.ai_streaming_output
-                    new_data = str(chunk.content)
-                    for char in new_data:
-                        if self.ai_stream_in_ref:
-                            if char == "]":
-                                # End of reference reached
-                                ref_replacement = self.ai_stream_process_reference(self.buffer)
-                                curr_text += ref_replacement
-                                self.ai_stream_buffer = ""
-                                self.ai_stream_in_ref = False
-                            else:
-                                self.ai_stream_buffer += char
-                        else:
-                            curr_text += char
-                            # Check for the start of a reference
-                            if curr_text.endswith('{REF:'):
-                                self.ai_stream_in_ref = True
-                                self.ai_stream_buffer = '{REF:'
-                                curr_text = curr_text[:-(len(self.buffer))]
-                    self.ai_streaming_output = curr_text
-                    if not self.is_updating_chat_window:
-                        self.update_chat_window()
-        except Exception as err:
-            self.app.ai.log_llm_error(req_id, self.app.ai.large_llm, err, context='dialog_send_message')
-            raise
-        finally:
-            if stream_iter is not None:
-                close_fn = getattr(stream_iter, "close", None)
-                if callable(close_fn):
-                    try:
-                        close_fn()
-                    except Exception as close_err:
-                        self.app.ai.log_llm_error(
-                            req_id, self.app.ai.large_llm, close_err, context='dialog_send_message_close'
-                        )
-        if not self.app.ai.ai_async_is_canceled and self.current_chat_idx == self.current_streaming_chat_idx:
-            self.app.ai.log_llm_response(req_id, self.app.ai.large_llm, self.ai_streaming_output, context='dialog_send_message')
-        return self.ai_streaming_output
-    
     def ai_stream_process_reference(self, reference):
         '''Replace a reference to the empirical data woth a clicable link'''
         return " {REFERENCE} "
@@ -3392,8 +3399,8 @@ data collected. This information will accompany every prompt sent to the AI, res
         if ai_result != '':
             self.process_message('ai', ai_result, self.current_streaming_chat_idx)
         else:
-            if self.app.ai.ai_async_is_canceled:
-                self.process_message('info', _('Chat has been canceled by the user.'))
+            if self._chat_scope_status(self.current_streaming_chat_idx) == 'canceled':
+                self.process_message('info', _('Chat has been canceled by the user.'), self.current_streaming_chat_idx)
             else:
                 self.process_message('info', _('Error: The AI returned an empty result. This may indicate that the AI model is not available at the moment. Try again later or choose a different model.'), self.current_streaming_chat_idx)
             

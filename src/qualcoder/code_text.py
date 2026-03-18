@@ -333,6 +333,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ai_include_coded_segments = None
         self.ai_search_found = False
         self.ai_search_analysis_counter = 0
+        self.ai_search_session_id = 0
         self.ui.pushButton_ai_search.pressed.connect(self.ai_search_clicked)
         self.ui.listWidget_ai.selectionModel().selectionChanged.connect(self.ai_search_selection_changed)
         self.ai_search_listview_action_label = None
@@ -347,6 +348,35 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ai_search_spinner_index = 0
         self.ai_search_spinner_timer = QtCore.QTimer(self)
         self.ai_search_spinner_timer.timeout.connect(self.ai_search_update_spinner)
+
+    def _ai_search_scope_id(self):
+        return id(self)
+
+    def _ai_search_scope_active(self) -> bool:
+        ai = getattr(self.app, 'ai', None)
+        if ai is None or not hasattr(ai, 'has_active_runs'):
+            return False
+        try:
+            return bool(ai.has_active_runs('ai_search', self._ai_search_scope_id()))
+        except Exception:
+            return False
+
+    def _ai_search_scope_status(self) -> str:
+        ai = getattr(self.app, 'ai', None)
+        if ai is None or not hasattr(ai, 'get_scope_status'):
+            return 'idle'
+        try:
+            return str(ai.get_scope_status('ai_search', self._ai_search_scope_id())).strip() or 'idle'
+        except Exception:
+            return 'idle'
+
+    def _cancel_ai_search_scope(self, wait_ms: int = 5000) -> bool:
+        ai = getattr(self.app, 'ai', None)
+        if ai is None:
+            return True
+        if hasattr(ai, 'cancel_scope'):
+            return bool(ai.cancel_scope('ai_search', self._ai_search_scope_id(), wait_ms=wait_ms))
+        return bool(ai.cancel(ask=False))
 
     def help(self):
         """ Open help for transcribe section in browser. """
@@ -5181,20 +5211,29 @@ class DialogCodeText(QtWidgets.QWidget):
             self.ui.plainTextEdit.setPlainText(_('Searching for related data, please wait...'))
 
             # Phase 1: find similar chunks of data from the vectorstore
-            self.app.ai.ai_async_is_canceled = False
+            self.ai_search_session_id += 1
+            current_session_id = int(self.ai_search_session_id)
             self.ai_search_chunks_pos = 0
-            self.app.ai.retrieve_similar_data(self.ai_search_prepare_analysis,
-                                              self.ai_search_code_name, self.ai_search_code_memo,
-                                              self.ai_search_file_ids)
+            self.app.ai.retrieve_similar_data(
+                lambda chunks, session_id=current_session_id: self.ai_search_prepare_analysis(chunks, session_id),
+                self.ai_search_code_name,
+                self.ai_search_code_memo,
+                self.ai_search_file_ids,
+                scope_type='ai_search',
+                scope_id=self._ai_search_scope_id(),
+                group_id=f'ai-search-{self._ai_search_scope_id()}-{current_session_id}',
+            )
 
-    def ai_search_prepare_analysis(self, chunks):
+    def ai_search_prepare_analysis(self, chunks, session_id=None):
         """ Prepare and start the second step of the AI search. 
         
         This will clean up the list of data found in the first stage of the search and then 
         start step 2, the deeper analysis with the choosen search prompt.
         """
 
-        if self.app.ai.ai_async_is_canceled:
+        if session_id is not None and int(session_id) != int(self.ai_search_session_id):
+            return
+        if self._ai_search_scope_status() == 'canceled':
             self.ai_search_running = False
             self.ui.plainTextEdit.setPlainText('')
             return
@@ -5254,9 +5293,9 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ai_search_chunks_pos = 0  # position of the next chunk to be analyzed
         self.ai_search_analysis_counter = 0  # counter to stop analyzing after ai_search_analysis_max_count
         self.ai_search_found = False  # Becomes True if any new data has been found
-        self.ai_search_analyze_next_chunk()
+        self.ai_search_analyze_next_chunk(session_id=session_id)
 
-    def ai_search_analyze_next_chunk(self):
+    def ai_search_analyze_next_chunk(self, session_id=None):
         """Step 2 of the AI search: 
         Selects the next chunk of data found in step 1 of the search and analyzes it closer, 
         using the selected search prompt.
@@ -5271,11 +5310,17 @@ class DialogCodeText(QtWidgets.QWidget):
             if self.ai_search_analysis_counter < ai_search_analysis_max_count:
                 # ai_search_analysis_max_count not reached
                 self.ai_search_running = True
-                self.app.ai.search_analyze_chunk(self.ai_search_analyze_next_chunk_callback,
-                                                 self.ai_search_similar_chunk_list[self.ai_search_chunks_pos],
-                                                 self.ai_search_code_name,
-                                                 self.ai_search_code_memo,
-                                                 self.ai_search_prompt)
+                current_session_id = int(self.ai_search_session_id if session_id is None else session_id)
+                self.app.ai.search_analyze_chunk(
+                    lambda doc, session_id=current_session_id: self.ai_search_analyze_next_chunk_callback(doc, session_id),
+                    self.ai_search_similar_chunk_list[self.ai_search_chunks_pos],
+                    self.ai_search_code_name,
+                    self.ai_search_code_memo,
+                    self.ai_search_prompt,
+                    scope_type='ai_search',
+                    scope_id=self._ai_search_scope_id(),
+                    group_id=f'ai-search-{self._ai_search_scope_id()}-{current_session_id}',
+                )
             else:  # ai_search_analysis_max_count reached
                 self.ai_search_running = False
                 if len(self.ai_search_results) == 0:  # nothing found
@@ -5297,12 +5342,14 @@ class DialogCodeText(QtWidgets.QWidget):
 
         self.ai_search_update_listview_action()
 
-    def ai_search_analyze_next_chunk_callback(self, doc):
+    def ai_search_analyze_next_chunk_callback(self, doc, session_id=None):
         """Callback for ai_search_analyze_next_chunk: 
         If the AI has finished analyzing the chunk of data, this callback function collects the results, 
         updates the UI and starts the analysis of the next chunk. 
         """
 
+        if session_id is not None and int(session_id) != int(self.ai_search_session_id):
+            return
         if not self.ai_search_running:  # Search has been cancelled
             return
         if doc is not None:
@@ -5322,8 +5369,8 @@ class DialogCodeText(QtWidgets.QWidget):
         # analyze next
         self.ai_search_chunks_pos += 1
         self.ai_search_analysis_counter += 1
-        if not self.app.ai.ai_async_is_canceled:
-            self.ai_search_analyze_next_chunk()
+        if self._ai_search_scope_status() != 'canceled':
+            self.ai_search_analyze_next_chunk(session_id=session_id)
         else:
             self.ai_search_running = False
 
@@ -5362,8 +5409,10 @@ class DialogCodeText(QtWidgets.QWidget):
             self.ai_search_listview_action_label.setText('')
             self.ai_search_listview_action_label.setToolTip('')
             self.ai_search_listview_action_label.setVisible(False)
-            if self.app.ai.ai_async_is_errored:
+            if self._ai_search_scope_status() == 'errored':
                 action_item.setText('(search aborted due to an error)')
+            elif self._ai_search_scope_status() == 'canceled':
+                action_item.setText('(search canceled)')
             else:
                 action_item.setText('(search finished)')
 
@@ -5387,7 +5436,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 msg_box.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Ok)
                 ret = msg_box.exec()
                 if ret == QtWidgets.QMessageBox.StandardButton.Ok:
-                    self.app.ai.ai_async_is_canceled = True
+                    self._cancel_ai_search_scope(wait_ms=5000)
                     self.ai_search_running = False
                     self.ai_search_update_listview_action()
             else:  # 'find more' item or "finished search"
@@ -5495,7 +5544,7 @@ class DialogCodeText(QtWidgets.QWidget):
     def ai_search_update_spinner(self):
         """ Updating the ai_progressBar and the text spinner in the list view to indicate to the user that 
         an AI search is running in the background. """
-        if self.app.ai.ai_async_is_finished or self.app.ai.ai_async_is_errored or self.app.ai.ai_async_is_canceled:
+        if self._ai_search_scope_status() in ('finished', 'errored', 'canceled', 'idle'):
             self.ai_search_running = False
         if self.ai_search_running:
             self.ui.ai_progressBar.setVisible(True)
