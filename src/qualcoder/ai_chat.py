@@ -540,7 +540,19 @@ class DialogAIChat(QtWidgets.QDialog):
         self.update_chat_window()
         return True
 
+    def _clear_stream_preview_buffers(self):
+        """Clear transient streamed-preview text without touching persisted chat history."""
+
+        self.ai_streaming_output = ''
+        ai = getattr(self.app, 'ai', None)
+        if ai is not None:
+            try:
+                ai.ai_streaming_output = ''
+            except Exception:
+                pass
+
     def new_chat(self, name, analysis_type, summary, analysis_prompt):
+        self._clear_stream_preview_buffers()
         date = datetime.now()
         date_text = date.strftime('%Y-%m-%d %H:%M:%S')
         cursor = self.chat_history_conn.cursor()
@@ -1302,7 +1314,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         html += f'<p style={self.ai_info_style}>{txt}</p>'
                 flush_agent_status_block()
                 # add partially streamed ai response if needed
-                if len(self.app.ai.ai_streaming_output) > 0:
+                if self.current_chat_idx == self.current_streaming_chat_idx and len(self.app.ai.ai_streaming_output) > 0:
                     txt = self.app.ai.ai_streaming_output
                     txt = strip_think_blocks(txt)
                     if len(self.app.ai.ai_streaming_output) != len(txt) and len(txt) == 0:
@@ -1797,7 +1809,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                                             result_callback=self.ai_message_callback, 
                                             progress_callback=None, 
                                             streaming_callback=self.ai_streaming_callback, 
-                                            error_callback=None)
+                                            error_callback=None,
+                                            scope_type='chat',
+                                            scope_id=chat_idx)
         elif msg_type == 'user':
             # user question, shown on screen and send to the AI
             if chat_idx == self.current_chat_idx:
@@ -1812,14 +1826,25 @@ data collected. This information will accompany every prompt sent to the AI, res
                                                self.ai_mcp_message_callback,
                                                messages,
                                                chat_idx,
-                                               progress_callback=self.ai_mcp_progress_callback)
+                                               progress_callback=self.ai_mcp_progress_callback,
+                                               scope_type='chat',
+                                               scope_id=chat_idx,
+                                               cancel_result={
+                                                   "chat_idx": chat_idx,
+                                                   "stream_messages": [],
+                                                   "tool_messages": [],
+                                                   "canceled": True,
+                                                   "direct_ai_message": "",
+                                               })
                 else:
                     self.app.ai.ai_async_stream(self.app.ai.large_llm, 
                                                 messages, 
                                                 result_callback=self.ai_message_callback, 
                                                 progress_callback=None, 
                                                 streaming_callback=self.ai_streaming_callback, 
-                                                error_callback=self.ai_error_callback)
+                                                error_callback=self.ai_error_callback,
+                                                scope_type='chat',
+                                                scope_id=chat_idx)
                 self.update_chat_window()
         elif msg_type == 'ai':
             # ai responses.
@@ -3258,7 +3283,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                                     result_callback=self.ai_message_callback,
                                     progress_callback=None,
                                     streaming_callback=self.ai_streaming_callback,
-                                    error_callback=self.ai_error_callback)
+                                    error_callback=self.ai_error_callback,
+                                    scope_type='chat',
+                                    scope_id=chat_idx)
         self.update_chat_window()
         self._update_undo_button_state()
 

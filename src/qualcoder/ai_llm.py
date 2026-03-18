@@ -24,11 +24,16 @@ import os
 import logging
 from logging.handlers import RotatingFileHandler
 import traceback
+from dataclasses import dataclass, field
 from datetime import datetime
+import threading
+import time
+import uuid
 from PyQt6 import QtWidgets
 from PyQt6 import QtCore
 from PyQt6 import QtGui
 import qtawesome as qta
+import httpx
 
 from openai import OpenAI, BadRequestError
 from .ai_prompts import PromptItem
@@ -60,6 +65,38 @@ max_memo_length = 1500  # Maximum length of the memo send to the AI
 path = os.path.abspath(os.path.dirname(__file__))
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+
+class AICancelled(Exception):
+    """Raised when one AI run was canceled cooperatively."""
+
+    def __init__(self, run_id: str = ''):
+        self.run_id = str(run_id).strip()
+        super().__init__(self.run_id if self.run_id != '' else 'AI run canceled')
+
+
+@dataclass
+class AiRunContext:
+    """Execution context for one AI run with isolated transport state."""
+
+    run_id: str
+    model_kind: str
+    purpose: str
+    scope_type: str = ''
+    scope_id: object = None
+    group_id: str = ''
+    parent_run_id: str = ''
+    cancel_result: object = None
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+    http_client: object = None
+    llm: object = None
+    stream_iter: object = None
+    status: str = 'queued'
+    created_at: float = field(default_factory=time.time)
+    finished_at: float = 0.0
+    error_text: str = ''
+    worker_type: str = ''
+    provider: str = ''
         
 
 class MyCustomSyncHandler(BaseCallbackHandler):
@@ -429,7 +466,6 @@ class AiLLM():
     parent_text_edit = None
     main_window = None
     threadpool: QtCore.QThreadPool = None
-    ai_async_is_canceled = False
     ai_async_is_finished = False
     ai_async_is_errored = False
     ai_async_progress_msg = ''
@@ -447,6 +483,7 @@ class AiLLM():
     ai_log_path = ''
     ai_log_seq = 0
     ai_change_history = None
+    _ai_async_is_canceled = False
     
     def __init__(self, app, parent_text_edit):
         self.app = app
@@ -455,6 +492,28 @@ class AiLLM():
         self.threadpool.setMaxThreadCount(1)
         self.sources_vectorstore = AiVectorstore(self.app, self.parent_text_edit, self.sources_collection)
         self.ai_change_history = []  # Session-scoped AI write operations for undo
+        self._runs_lock = threading.RLock()
+        self._runs_by_id = {}
+        self._latest_run_by_scope = {}
+        self._llm_run_local = threading.local()
+        self._last_run_id = ''
+        self._large_llm_params = None
+        self._fast_llm_params = None
+        self._large_llm_factory = None
+        self._fast_llm_factory = None
+        self._large_reasoning_effort = ''
+        self._fast_reasoning_effort = ''
+
+    @property
+    def ai_async_is_canceled(self):
+        return self._ai_async_is_canceled
+
+    @ai_async_is_canceled.setter
+    def ai_async_is_canceled(self, value):
+        normalized = bool(value)
+        self._ai_async_is_canceled = normalized
+        if normalized:
+            self._request_cancel_all_runs()
 
     def _ai_log_target_path(self) -> str:
         """Return the file path for the dedicated AI communication log."""
@@ -614,37 +673,291 @@ class AiLLM():
         line += f' {err.__class__.__name__}: {error_text}'
         self._write_ai_log(line)
 
+    def _next_run_id(self) -> str:
+        return "ai-run-" + uuid.uuid4().hex
+
+    def _scope_key(self, scope_type: str, scope_id: object) -> tuple[str, str]:
+        return str(scope_type).strip(), self._safe_to_text(scope_id)
+
+    def _get_current_run_context(self):
+        return getattr(self._llm_run_local, 'current_run_context', None)
+
+    def _set_current_run_context(self, run_context):
+        self._llm_run_local.current_run_context = run_context
+
+    def _clear_current_run_context(self):
+        if hasattr(self._llm_run_local, 'current_run_context'):
+            self._llm_run_local.current_run_context = None
+
+    def _resolve_model_kind(self, llm) -> str:
+        if llm is self.fast_llm:
+            return 'fast'
+        return 'large'
+
+    def _reasoning_effort_for_kind(self, model_kind: str) -> str:
+        if str(model_kind).strip().lower() == 'fast':
+            return str(self._fast_reasoning_effort).strip().lower()
+        return str(self._large_reasoning_effort).strip().lower()
+
+    def _run_timeout(self, model_kind: str, purpose: str):
+        base_timeout = float(self.app.settings.get('ai_timeout', '30.0'))
+        reasoning = self._reasoning_effort_for_kind(model_kind)
+        connect_timeout = min(10.0, max(3.0, base_timeout / 3.0))
+        write_timeout = min(30.0, max(10.0, base_timeout))
+        pool_timeout = min(15.0, max(5.0, base_timeout / 2.0))
+        if str(purpose).strip() == 'stream':
+            read_timeout = max(base_timeout, 60.0)
+        else:
+            read_timeout = max(base_timeout * 2.0, 90.0)
+        if reasoning in ('low', 'medium', 'high'):
+            factor = ('low', 'medium', 'high').index(reasoning) + 1
+            read_timeout = max(read_timeout, float(factor) * base_timeout * 2.0)
+        return httpx.Timeout(
+            connect=connect_timeout,
+            read=read_timeout,
+            write=write_timeout,
+            pool=pool_timeout,
+        )
+
+    def _create_run_context(self, model_kind: str = 'large', purpose: str = '',
+                            scope_type: str = '', scope_id=None, group_id: str = '',
+                            parent_run_id: str = '', cancel_result=None) -> AiRunContext:
+        normalized_kind = 'fast' if str(model_kind).strip().lower() == 'fast' else 'large'
+        base_params = self._fast_llm_params if normalized_kind == 'fast' else self._large_llm_params
+        factory = self._fast_llm_factory if normalized_kind == 'fast' else self._large_llm_factory
+        if base_params is None or factory is None:
+            raise RuntimeError('AI model configuration is not initialized.')
+
+        timeout_obj = self._run_timeout(normalized_kind, purpose)
+        http_client = httpx.Client(timeout=timeout_obj)
+        llm_params = dict(base_params)
+        llm_params['timeout'] = timeout_obj
+        llm_params['http_client'] = http_client
+        llm = factory(**llm_params)
+
+        return AiRunContext(
+            run_id=self._next_run_id(),
+            model_kind=normalized_kind,
+            purpose=str(purpose).strip(),
+            scope_type=str(scope_type).strip(),
+            scope_id=scope_id,
+            group_id=str(group_id).strip(),
+            parent_run_id=str(parent_run_id).strip(),
+            cancel_result=cancel_result,
+            http_client=http_client,
+            llm=llm,
+            provider=('azure' if factory is AzureChatOpenAI else 'openai'),
+        )
+
+    def _register_run_context(self, run_context: AiRunContext):
+        with self._runs_lock:
+            self._runs_by_id[run_context.run_id] = run_context
+            self._last_run_id = run_context.run_id
+            scope_type = str(run_context.scope_type).strip()
+            if scope_type != '':
+                self._latest_run_by_scope[self._scope_key(scope_type, run_context.scope_id)] = run_context.run_id
+            self._ai_async_is_canceled = False
+            self.ai_async_is_finished = False
+            self.ai_async_is_errored = False
+        return run_context.run_id
+
+    def _update_run_status(self, run_id: str, status: str, error_text: str = ''):
+        with self._runs_lock:
+            run_context = self._runs_by_id.get(str(run_id).strip())
+            if run_context is None:
+                return
+            run_context.status = str(status).strip()
+            if error_text != '':
+                run_context.error_text = str(error_text)
+            if run_context.run_id == self._last_run_id:
+                if run_context.status == 'cancel_requested':
+                    self._ai_async_is_canceled = True
+                elif run_context.status == 'errored':
+                    self.ai_async_is_errored = True
+
+    def _finalize_run_context(self, run_context: AiRunContext, terminal_status: str = ''):
+        if run_context is None:
+            return
+        with self._runs_lock:
+            current = self._runs_by_id.get(run_context.run_id)
+            current = run_context if current is None else current
+            if terminal_status != '':
+                current.status = terminal_status
+            if current.status not in ('finished', 'errored', 'canceled'):
+                current.status = 'canceled' if current.cancel_event.is_set() else 'finished'
+            current.finished_at = time.time()
+            if run_context.run_id in self._runs_by_id:
+                scope_type = str(current.scope_type).strip()
+                if scope_type != '':
+                    scope_key = self._scope_key(scope_type, current.scope_id)
+                    if self._latest_run_by_scope.get(scope_key) == current.run_id:
+                        self._latest_run_by_scope.pop(scope_key, None)
+                self._runs_by_id.pop(current.run_id, None)
+                if current.run_id == self._last_run_id:
+                    self.ai_async_is_finished = current.status == 'finished'
+                    self.ai_async_is_errored = current.status == 'errored'
+                    self._ai_async_is_canceled = current.status == 'canceled'
+
+        stream_iter = getattr(run_context, 'stream_iter', None)
+        if stream_iter is not None:
+            close_fn = getattr(stream_iter, "close", None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+        client = getattr(run_context, 'http_client', None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        run_context.stream_iter = None
+
+    def _active_run_count(self) -> int:
+        with self._runs_lock:
+            return sum(
+                1 for ctx in self._runs_by_id.values()
+                if str(ctx.status).strip() not in ('finished', 'errored', 'canceled')
+            )
+
+    def _request_cancel_run(self, run_context: AiRunContext) -> bool:
+        if run_context is None:
+            return False
+        was_queued = str(run_context.status).strip() == 'queued'
+        run_context.cancel_event.set()
+        self._update_run_status(run_context.run_id, 'cancel_requested')
+        stream_iter = getattr(run_context, 'stream_iter', None)
+        if stream_iter is not None:
+            close_fn = getattr(stream_iter, 'close', None)
+            if callable(close_fn):
+                try:
+                    close_fn()
+                except Exception:
+                    pass
+        client = getattr(run_context, 'http_client', None)
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        if was_queued:
+            self._finalize_run_context(run_context, 'canceled')
+        return True
+
+    def _request_cancel_all_runs(self) -> int:
+        with self._runs_lock:
+            run_contexts = list(self._runs_by_id.values())
+        canceled_count = 0
+        for run_context in run_contexts:
+            if self._request_cancel_run(run_context):
+                canceled_count += 1
+        return canceled_count
+
+    def cancel_run(self, run_id: str, wait_ms: int = 5000) -> bool:
+        normalized = str(run_id).strip()
+        if normalized == '':
+            return True
+        with self._runs_lock:
+            run_context = self._runs_by_id.get(normalized)
+        if run_context is None:
+            return True
+        self._request_cancel_run(run_context)
+        deadline = time.time() + (max(0, int(wait_ms)) / 1000.0)
+        while time.time() < deadline:
+            with self._runs_lock:
+                if normalized not in self._runs_by_id:
+                    return True
+            time.sleep(0.05)
+        return False
+
+    def cancel_scope(self, scope_type: str, scope_id=None, wait_ms: int = 5000) -> bool:
+        scope_key = self._scope_key(scope_type, scope_id)
+        with self._runs_lock:
+            target_ids = [
+                run_id for run_id, ctx in self._runs_by_id.items()
+                if self._scope_key(ctx.scope_type, ctx.scope_id) == scope_key
+            ]
+        ok = True
+        for run_id in target_ids:
+            if not self.cancel_run(run_id, wait_ms=wait_ms):
+                ok = False
+        return ok
+
+    def cancel_all_runs(self, wait_ms: int = 5000) -> bool:
+        self.threadpool.clear()
+        with self._runs_lock:
+            target_ids = list(self._runs_by_id.keys())
+        ok = True
+        for run_id in target_ids:
+            if not self.cancel_run(run_id, wait_ms=wait_ms):
+                ok = False
+        return ok
+
+    def _raise_if_run_canceled(self, run_context=None):
+        ctx = run_context if run_context is not None else self._get_current_run_context()
+        if ctx is not None and ctx.cancel_event.is_set():
+            raise AICancelled(ctx.run_id)
+
     def invoke_with_logging(self, llm, messages, response_format=None, config=None, context: str = '',
                             fallback_without_response_format: bool = False,
-                            fallback_exceptions=(Exception,)):
+                            fallback_exceptions=(Exception,), run_context=None):
         """Invoke an LLM and log request/response in the dedicated AI log."""
 
-        req_id = self.log_llm_request(llm, messages, context=context)
+        temp_context = None
+        current_context = run_context if run_context is not None else self._get_current_run_context()
+        if current_context is None:
+            temp_context = self._create_run_context(
+                self._resolve_model_kind(llm),
+                purpose='invoke',
+            )
+            current_context = temp_context
+        active_llm = current_context.llm if current_context.llm is not None else llm
+
+        req_id = self.log_llm_request(active_llm, messages, context=context)
         try:
+            self._raise_if_run_canceled(current_context)
             invoke_kwargs = {}
             if response_format is not None:
                 invoke_kwargs['response_format'] = response_format
             if config is not None:
                 invoke_kwargs['config'] = config
-            res = llm.invoke(messages, **invoke_kwargs)
+            res = active_llm.invoke(messages, **invoke_kwargs)
+            self._raise_if_run_canceled(current_context)
         except Exception as err:
+            if isinstance(err, AICancelled):
+                raise
+            if current_context.cancel_event.is_set():
+                raise AICancelled(current_context.run_id)
             may_fallback = (
                 fallback_without_response_format
                 and response_format is not None
                 and isinstance(err, fallback_exceptions)
             )
             if not may_fallback:
-                self.log_llm_error(req_id, llm, err, context=context)
+                self.log_llm_error(req_id, active_llm, err, context=context)
                 raise
             try:
+                self._raise_if_run_canceled(current_context)
                 fallback_kwargs = {}
                 if config is not None:
                     fallback_kwargs['config'] = config
-                res = llm.invoke(messages, **fallback_kwargs)
+                res = active_llm.invoke(messages, **fallback_kwargs)
+                self._raise_if_run_canceled(current_context)
             except Exception as err2:
-                self.log_llm_error(req_id, llm, err2, context=context)
+                if isinstance(err2, AICancelled):
+                    raise
+                if current_context.cancel_event.is_set():
+                    raise AICancelled(current_context.run_id)
+                self.log_llm_error(req_id, active_llm, err2, context=context)
                 raise
-        self.log_llm_response(req_id, llm, getattr(res, 'content', ''), context=context)
+        finally:
+            if temp_context is not None:
+                terminal_status = 'canceled' if temp_context.cancel_event.is_set() else (
+                    'errored' if temp_context.error_text != '' else 'finished'
+                )
+                self._finalize_run_context(temp_context, terminal_status)
+        self.log_llm_response(req_id, active_llm, getattr(res, 'content', ''), context=context)
         return res
 
     def _ensure_ai_change_history(self):
@@ -1409,8 +1722,6 @@ class AiLLM():
                     
                 if 'reasoning_effort' in curr_model and curr_model['reasoning_effort'] in ['low', 'medium', 'high']:
                     large_llm_params['reasoning_effort'] = curr_model['reasoning_effort']
-                    # raise the timeout for reasoning models
-                    large_llm_params['timeout'] = (['low', 'medium', 'high'].index(curr_model['reasoning_effort']) + 1) * timeout
                 
                 if large_model.lower().find('claude') != -1:  # Anthropic
                     # omitting top_p, since Antrhopic does not accept temperature and top_p at the same time
@@ -1419,6 +1730,13 @@ class AiLLM():
                         fast_llm_params.pop('top_p')
                     except:
                         pass
+
+                self._large_llm_params = dict(large_llm_params)
+                self._fast_llm_params = dict(fast_llm_params)
+                self._large_llm_factory = AzureChatOpenAI if is_azure else ChatOpenAI
+                self._fast_llm_factory = AzureChatOpenAI if is_azure else ChatOpenAI
+                self._large_reasoning_effort = str(curr_model.get('reasoning_effort', '')).strip().lower()
+                self._fast_reasoning_effort = ''
                 
                 if is_azure:
                     self.large_llm = AzureChatOpenAI(**large_llm_params)
@@ -1451,10 +1769,14 @@ class AiLLM():
         
     def close(self):
         self._status = 'closing'
-        self.cancel(False)
+        self.cancel_all_runs(wait_ms=5000)
         self.sources_vectorstore.close()
         self.large_llm = None
         self.fast_llm = None
+        self._large_llm_params = None
+        self._fast_llm_params = None
+        self._large_llm_factory = None
+        self._fast_llm_factory = None
         self._status = ''
         
     def cancel(self, ask: bool) -> bool:
@@ -1467,15 +1789,12 @@ class AiLLM():
             reply = msg_box.exec()
             if reply == QtWidgets.QMessageBox.StandardButton.No:
                 return False
-        # cancel all waiting threads:
-        self.threadpool.clear()
-        self.ai_async_is_canceled = True
-        self.threadpool.waitForDone(5000)
-        if ask and self.is_busy():
+        success = self.cancel_all_runs(wait_ms=5000)
+        if ask and not success:
             msg = _('The AI operation could not be aborted immediately. It may take a moment for the AI to be ready again.')
             msg_box = Message(self.app, 'AI Cancel', msg)
-            msg_box.exec()            
-        return True
+            msg_box.exec()
+        return success
 
     def get_status(self) -> str:
         """Return the status of the AI system:
@@ -1498,7 +1817,7 @@ class AiLLM():
             return 'reading data'
         elif self.large_llm is None or self.fast_llm is None:
             return 'closed'
-        elif self.threadpool.activeThreadCount() > 0:
+        elif self._active_run_count() > 0 or self.threadpool.activeThreadCount() > 0:
             return 'busy'
         else:
             return 'ready'
@@ -1527,6 +1846,9 @@ class AiLLM():
         
     def _ai_async_error(self, exception_type, value, tb_obj):
         try:
+            if exception_type is AICancelled or isinstance(value, AICancelled):
+                self._ai_async_is_canceled = True
+                return
             self.ai_async_is_errored = True
             value_text = html_to_text(self._safe_to_text(value))
             msg = _('AI Error:\n')
@@ -1542,9 +1864,11 @@ class AiLLM():
         self.ai_async_is_finished = True
     
     def _ai_async_abort_button_clicked(self):
-        self.ai_async_is_canceled = True
+        self.cancel_all_runs(wait_ms=0)
     
-    def ai_async_stream(self, llm, messages, result_callback=None, progress_callback=None, streaming_callback=None, error_callback=None):       
+    def ai_async_stream(self, llm, messages, result_callback=None, progress_callback=None,
+                        streaming_callback=None, error_callback=None, scope_type: str = '',
+                        scope_id=None, group_id: str = '', parent_run_id: str = ''):
         """Calls the LLM in a background thread and streams back the results 
 
         Args:
@@ -1555,12 +1879,22 @@ class AiLLM():
             streaming_callback (optional): Defaults to None.
             error_callback (optional): Defaults to None.
         """
-        # start async worker 
         self.ai_async_is_finished = False
         self.ai_async_is_errored = False
+        self._ai_async_is_canceled = False
         self.ai_async_progress_msg = ''
         self.ai_async_progress_count = -1
-        worker = Worker(self._ai_async_stream, llm=llm, messages=messages)
+        run_context = self._create_run_context(
+            self._resolve_model_kind(llm),
+            purpose='stream',
+            scope_type=scope_type,
+            scope_id=scope_id,
+            group_id=group_id,
+            parent_run_id=parent_run_id,
+        )
+        run_context.worker_type = 'stream'
+        self._register_run_context(run_context)
+        worker = Worker(self._ai_async_stream, run_context=run_context, messages=messages)
         if result_callback is not None: 
             worker.signals.result.connect(result_callback)
         if progress_callback is not None:
@@ -1572,16 +1906,21 @@ class AiLLM():
         else:
             worker.signals.error.connect(self._ai_async_error)
         self.threadpool.start(worker)
+        return run_context.run_id
 
-    def _ai_async_stream(self, signals, llm, messages):
-        self.ai_async_is_canceled = False
+    def _ai_async_stream(self, signals, run_context: AiRunContext, messages):
         self.ai_streaming_output = ''
-        req_id = self.log_llm_request(llm, messages, context='ai_async_stream')
+        self._set_current_run_context(run_context)
+        self._update_run_status(run_context.run_id, 'running')
+        active_llm = run_context.llm if run_context.llm is not None else self.large_llm
+        req_id = self.log_llm_request(active_llm, messages, context='ai_async_stream')
         stream_iter = None
         try:
-            stream_iter = llm.stream(messages)
+            self._raise_if_run_canceled(run_context)
+            stream_iter = active_llm.stream(messages)
+            run_context.stream_iter = stream_iter
             for chunk in stream_iter:
-                if self.ai_async_is_canceled:
+                if run_context.cancel_event.is_set():
                     break  # cancel the streaming
                 else:
                     chunk_text = str(getattr(chunk, 'content', ''))
@@ -1592,32 +1931,46 @@ class AiLLM():
                         if signals.progress is not None:
                             self.ai_async_progress_count += len(chunk_text)
                             signals.progress.emit(str(self.ai_async_progress_count))
+            if run_context.cancel_event.is_set():
+                self._update_run_status(run_context.run_id, 'canceled')
         except Exception as err:
-            self.log_llm_error(req_id, llm, err, context='ai_async_stream')
+            if run_context.cancel_event.is_set():
+                self._update_run_status(run_context.run_id, 'canceled')
+                return ''
+            self._update_run_status(run_context.run_id, 'errored', self._safe_to_text(err))
+            self.log_llm_error(req_id, active_llm, err, context='ai_async_stream')
             # Some providers emit malformed trailing streaming events after content is already complete.
             # Prefer returning the accumulated text instead of failing the whole turn.
             if self.ai_streaming_output != '':
                 res = self.ai_streaming_output
                 self.ai_streaming_output = ''
-                if not self.ai_async_is_canceled:
-                    self.log_llm_response(req_id, llm, res, context='ai_async_stream_partial')
+                if not run_context.cancel_event.is_set():
+                    self.log_llm_response(req_id, active_llm, res, context='ai_async_stream_partial')
                 return res
             raise
         finally:
-            if stream_iter is not None:
+            if stream_iter is not None and not run_context.cancel_event.is_set():
                 close_fn = getattr(stream_iter, "close", None)
                 if callable(close_fn):
                     try:
                         close_fn()
                     except Exception as close_err:
-                        self.log_llm_error(req_id, llm, close_err, context='ai_async_stream_close')
+                        self.log_llm_error(req_id, active_llm, close_err, context='ai_async_stream_close')
+            run_context.stream_iter = None
+            terminal_status = 'canceled' if run_context.cancel_event.is_set() else (
+                'errored' if run_context.error_text != '' else 'finished'
+            )
+            self._finalize_run_context(run_context, terminal_status)
+            self._clear_current_run_context()
         res = self.ai_streaming_output
         self.ai_streaming_output = ''
-        if not self.ai_async_is_canceled:
-            self.log_llm_response(req_id, llm, res, context='ai_async_stream')
+        if not run_context.cancel_event.is_set():
+            self.log_llm_response(req_id, active_llm, res, context='ai_async_stream')
         return res
 
-    def ai_async_query(self, func, result_callback, *args, progress_callback=None, **kwargs):        
+    def ai_async_query(self, func, result_callback, *args, progress_callback=None,
+                       scope_type: str = '', scope_id=None, group_id: str = '',
+                       parent_run_id: str = '', cancel_result=None, **kwargs):
         """Calls an AI related function in a background thread
 
         Args:
@@ -1625,23 +1978,61 @@ class AiLLM():
             result_callback: callback function
             progress_callback: callback function for progress/status updates
         """
-        self.ai_async_is_canceled = False
-        
-        # start async worker
         self.ai_async_is_finished = False
         self.ai_async_is_errored = False
+        self._ai_async_is_canceled = False
         self.ai_async_progress_msg = ''
         self.ai_async_progress_count = -1
-        worker = Worker(func, *args, **kwargs)  # Any other args, kwargs are passed to the run function
+        run_context = self._create_run_context(
+            'large',
+            purpose='query',
+            scope_type=scope_type,
+            scope_id=scope_id,
+            group_id=group_id,
+            parent_run_id=parent_run_id,
+            cancel_result=cancel_result,
+        )
+        run_context.worker_type = 'query'
+        self._register_run_context(run_context)
+        worker = Worker(
+            self._ai_async_query_worker,
+            run_context=run_context,
+            target_func=func,
+            target_args=args,
+            target_kwargs=kwargs,
+        )
         if result_callback is not None: 
             worker.signals.result.connect(result_callback)
-        worker.signals.finished.connect(self._ai_async_finished)
         if progress_callback is not None:
             worker.signals.progress.connect(progress_callback)
         else:
             worker.signals.progress.connect(self._ai_async_progress)
         worker.signals.error.connect(self._ai_async_error)
         self.threadpool.start(worker)
+        return run_context.run_id
+
+    def _ai_async_query_worker(self, signals, run_context: AiRunContext, target_func, target_args, target_kwargs):
+        self._set_current_run_context(run_context)
+        self._update_run_status(run_context.run_id, 'running')
+        try:
+            self._raise_if_run_canceled(run_context)
+            call_kwargs = dict(target_kwargs) if isinstance(target_kwargs, dict) else {}
+            call_kwargs['signals'] = signals
+            result = target_func(*target_args, **call_kwargs)
+            self._raise_if_run_canceled(run_context)
+            return result
+        except AICancelled:
+            self._update_run_status(run_context.run_id, 'canceled')
+            return run_context.cancel_result
+        except Exception as err:
+            self._update_run_status(run_context.run_id, 'errored', self._safe_to_text(err))
+            raise
+        finally:
+            terminal_status = 'canceled' if run_context.cancel_event.is_set() else (
+                'errored' if run_context.error_text != '' else 'finished'
+            )
+            self._finalize_run_context(run_context, terminal_status)
+            self._clear_current_run_context()
                         
     def get_curr_language(self):
         """Determine the current language of the UI and/or the project. 
@@ -1753,15 +2144,18 @@ class AiLLM():
         self.ai_async_progress_max = round(1000 / 4)  # estimated token count of the result (1000 chars)
 
         response_format = self._get_response_format_json_schema("code_descriptions", response_schema)
-        res = self.invoke_with_logging(
-            self.large_llm,
-            code_descriptions_prompt,
-            response_format=response_format,
-            config=config,
-            context='generate_code_descriptions',
-            fallback_without_response_format=True,
-            fallback_exceptions=(BadRequestError, ValidationError),
-        )
+        try:
+            res = self.invoke_with_logging(
+                self.large_llm,
+                code_descriptions_prompt,
+                response_format=response_format,
+                config=config,
+                context='generate_code_descriptions',
+                fallback_without_response_format=True,
+                fallback_exceptions=(BadRequestError, ValidationError),
+            )
+        except AICancelled:
+            return []
         logger.debug(str(res.content))
         res.content = strip_think_blocks(res.content)
         code_descriptions = list(json_repair.loads(str(res.content))['descriptions'])
@@ -1781,7 +2175,14 @@ class AiLLM():
             code_memo (optional): Defaults to ''.
             doc_ids (list, optional): Filter. If not None, only results from these documents will be returned. Defaults to [].
         """
-        self.ai_async_query(self._retrieve_similar_data, result_callback, code_name, code_memo, doc_ids)
+        self.ai_async_query(
+            self._retrieve_similar_data,
+            result_callback,
+            code_name,
+            code_memo,
+            doc_ids,
+            cancel_result=[],
+        )
 
     def _retrieve_similar_data(self, code_name, code_memo='', doc_ids=None, progress_callback=None, signals=None) -> list:
         # Get a list of code descriptions from the llm
@@ -1810,6 +2211,7 @@ class AiLLM():
         search_kwargs = {'score_threshold': threshold, 'k': top_k}
         chunks_meta_list = []
         for _str in search_strings:
+            self._raise_if_run_canceled()
             res = self.sources_vectorstore.faiss_db.similarity_search_with_relevance_scores(_str, **search_kwargs)
             if doc_ids is not None and len(doc_ids) > 0:
                 # filter results by document ids
@@ -1838,6 +2240,7 @@ class AiLLM():
         chunk_count_list = {}  # contains the chunk count
         chunk_master_list = []  # contains all chunks from all lists but no doubles
         for lst in chunks_meta_list:
+            self._raise_if_run_canceled()
             for chunk in lst:            
                 chunk_doc = chunk[0]
                 chunk_score = chunk[1]
@@ -1874,7 +2277,15 @@ class AiLLM():
             code_memo: str
             search_prompt (PromptItem): the prompt used for the analysis
         """
-        self.ai_async_query(self._search_analyze_chunk, result_callback, chunk, code_name, code_memo, search_prompt)
+        self.ai_async_query(
+            self._search_analyze_chunk,
+            result_callback,
+            chunk,
+            code_name,
+            code_memo,
+            search_prompt,
+            cancel_result=None,
+        )
         
     def _search_analyze_chunk(self, chunk, code_name, code_memo, search_prompt: PromptItem, progress_callback=None, signals=None):                
         if progress_callback is not None:
@@ -1933,15 +2344,18 @@ class AiLLM():
         
         # send the query to the llm 
         response_format = self._get_response_format_json_schema("search_analyze_chunk", response_schema)
-        res = self.invoke_with_logging(
-            self.large_llm,
-            prompt,
-            response_format=response_format,
-            config=config,
-            context='search_analyze_chunk',
-            fallback_without_response_format=True,
-            fallback_exceptions=(BadRequestError, ValidationError),
-        )
+        try:
+            res = self.invoke_with_logging(
+                self.large_llm,
+                prompt,
+                response_format=response_format,
+                config=config,
+                context='search_analyze_chunk',
+                fallback_without_response_format=True,
+                fallback_exceptions=(BadRequestError, ValidationError),
+            )
+        except AICancelled:
+            return None
         res.content = strip_think_blocks(res.content)
         res_json = json_repair.loads(str(res.content))
         
