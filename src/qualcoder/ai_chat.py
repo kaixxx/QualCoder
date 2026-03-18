@@ -88,6 +88,8 @@ class DialogAIChat(QtWidgets.QDialog):
         QtWidgets.QDialog.__init__(self)
         self.ui = Ui_Dialog_ai_chat()
         self.ui.setupUi(self)
+        self.ui.comboBox_ai_permissions.currentIndexChanged.connect(self.ai_permissions_changed)
+        self.load_ai_permissions()
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
         # self.ui.scrollArea_ai_output.verticalScrollBar().rangeChanged.connect(self.ai_output_scroll_to_bottom)
         self.ui.plainTextEdit_question.installEventFilter(self)
@@ -175,6 +177,7 @@ class DialogAIChat(QtWidgets.QDialog):
     def init_styles(self):
         """Set up the stylesheets for the ui and the chat entries
         """
+        self.load_ai_permissions()
         font_css = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         dialog_bg = self.ui.pushButton_question.palette().color(QPalette.ColorRole.Button).name()
 
@@ -246,11 +249,34 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.ai_output.setStyleSheet(f'background-color: {default_bg_color.name()};')
         self.ui.scrollArea_ai_output.setStyleSheet(f'background-color: {default_bg_color.name()};')
         self.update_chat_window()
+
+    def load_ai_permissions(self):
+        ai_permissions = self.app.settings.get('ai_permissions', 1)
+        if ai_permissions not in (0, 1, 2):
+            ai_permissions = 1
+            self.app.settings['ai_permissions'] = ai_permissions
+        with QtCore.QSignalBlocker(self.ui.comboBox_ai_permissions):
+            self.ui.comboBox_ai_permissions.setCurrentIndex(ai_permissions)
+
+    def ai_permissions_changed(self, index=None):
+        combo_index = self.ui.comboBox_ai_permissions.currentIndex()
+        if combo_index not in (0, 1, 2):
+            ai_permissions = 1
+        else:
+            ai_permissions = combo_index
+        if self.app.settings.get('ai_permissions') == ai_permissions:
+            return
+        self.app.settings['ai_permissions'] = ai_permissions
+        try:
+            self.app.write_config_ini(self.app.settings, self.app.ai_models)
+        except Exception as e_:
+            logger.debug(f"Could not persist ai permissions setting: {e_}")
         
     def init_ai_chat(self, app=None):
         if app is not None:
             self.app = app
             self.ai_mcp_server = AiMcpServer(self.app)
+            self.load_ai_permissions()
         # init chat history
         self.chat_history_folder = self.app.project_path + '/ai_data'
         if not os.path.exists(self.chat_history_folder):
@@ -363,17 +389,17 @@ class DialogAIChat(QtWidgets.QDialog):
         except Exception as e_:
             logger.debug(f"Could not persist ai output splitter setting: {e_}")
 
-    def _move_left_buttons_to_chat(self):
-        """Place left action buttons at the bottom of the chat area (sidebar mode)."""
+    def _move_left_controls_to_chat(self):
+        """Place the left controls widget at the bottom of the chat area."""
 
         self.ui.verticalLayout_2.removeWidget(self.ui.widget_left_buttons)
         self.ui.verticalLayout_4.addWidget(self.ui.widget_left_buttons)
 
-    def _move_left_buttons_to_left(self):
-        """Place left action buttons back under the tree view (main mode)."""
+    def _move_left_controls_to_left(self):
+        """Restore the left controls widget under the tree view."""
 
         self.ui.verticalLayout_4.removeWidget(self.ui.widget_left_buttons)
-        self.ui.verticalLayout_2.addWidget(self.ui.widget_left_buttons)
+        self.ui.verticalLayout_2.insertWidget(1, self.ui.widget_left_buttons)
 
     def _move_chat_widget_to_sidebar(self):
         """Use full width below the top bar in sidebar mode."""
@@ -405,7 +431,7 @@ class DialogAIChat(QtWidgets.QDialog):
         if enabled:
             self.ui.gridLayout.setContentsMargins(0, 0, 0, 0)
             self._move_chat_widget_to_sidebar()
-            self._move_left_buttons_to_chat()
+            self._move_left_controls_to_chat()
             self._detach_widget_left_from_grid()
             self.setMinimumWidth(0)
             self.ui.widget_chat.setMinimumWidth(0)
@@ -419,7 +445,7 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ui.gridLayout.setContentsMargins(6, 6, 6, 6)
             self._move_chat_widget_to_main()
             self._attach_widget_left_to_grid()
-            self._move_left_buttons_to_left()
+            self._move_left_controls_to_left()
             self.ui.widget_left.setMaximumWidth(16777215)
             self.ui.widget_left.setVisible(True)
             self.ui.widget_top.setVisible(False)

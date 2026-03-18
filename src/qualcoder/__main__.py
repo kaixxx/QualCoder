@@ -701,6 +701,8 @@ class App(object):
             result['backup_num'] = default.getint('backup_num')
         if 'codetext_chunksize' in default:
             result['codetext_chunksize'] = default.getint('codetext_chunksize')
+        if 'ai_permissions' in default:
+            result['ai_permissions'] = default.getint('ai_permissions')
         if 'showids' in default:
             if default['showids'] == "False":
                 result['showids'] = False
@@ -743,6 +745,7 @@ class App(object):
         """
 
         dict_len = len(settings_data)
+        settings_updated = False
         keys = ['mainwindow_geometry',
                 'dialogcasefilemanager_w', 'dialogcasefilemanager_h',
                 'dialogcodetext_splitter0', 'dialogcodetext_splitter1',
@@ -773,11 +776,12 @@ class App(object):
                 'stylesheet', 'backup_num', 'codetext_chunksize',
                 'report_text_context_characters', 'report_text_context_style',
                 'ai_enable', 'ai_first_startup', 'ai_model_index', 'ai_chat_sidebar',
-                'ai_chat_sidebar_width', 'ai_chat_splitter_output_bottom'
+                'ai_permissions', 'ai_chat_sidebar_width', 'ai_chat_splitter_output_bottom'
                 ]
         for key in keys:
             if key not in settings_data:
                 settings_data[key] = 0
+                settings_updated = True
                 if key == "mainwindow_geometry":
                     settings_data[key] = ""
                 if key == "timestampformat":
@@ -800,19 +804,26 @@ class App(object):
                     settings_data[key] = 'True' 
                 if key == 'ai_model_index':
                     settings_data[key] = '0'
+                if key == 'ai_permissions':
+                    settings_data[key] = 1
                 if key == 'ai_chat_sidebar':
                     settings_data[key] = 'False'
                 if key == 'ai_chat_sidebar_width':
                     settings_data[key] = 320
                 if key == 'ai_chat_splitter_output_bottom':
                     settings_data[key] = 80
-                    
+
+        ai_permissions = settings_data.get('ai_permissions', 1)
+        if ai_permissions not in (0, 1, 2):
+            settings_data['ai_permissions'] = 1
+            settings_updated = True
+
         # Check AI models
         if len(ai_models) == 0:  # No models loaded, create default
             ai_models = get_default_ai_models()
 
         # Write out new ini file, if needed
-        if len(settings_data) > dict_len:
+        if settings_updated or len(settings_data) > dict_len:
             self.write_config_ini(settings_data, ai_models)
         return settings_data, ai_models
     
@@ -1111,6 +1122,7 @@ class App(object):
             'ai_enable': 'False',
             'ai_first_startup': 'True',
             'ai_model_index': -1,
+            'ai_permissions': 1,
             'ai_chat_sidebar': 'False',
             'ai_chat_sidebar_width': 320,
             'ai_chat_splitter_output_bottom': 80
@@ -1829,6 +1841,13 @@ Click "Yes" to start now.')
             msg += _("AI integration is enabled") + "\n"
         else:
             msg += _("AI integration is disabled") + "\n"
+        ai_permissions = self.app.settings.get('ai_permissions', 1)
+        ai_permissions_labels = {
+            0: 'Read-only',
+            1: 'Sandboxed',
+            2: 'Full access'
+        }
+        msg += _("AI permissions") + f": {ai_permissions_labels.get(ai_permissions, ai_permissions)}\n"
         msg += _("Style") + f"; {self.app.settings['stylesheet']}"
         self.ui.textEdit.append(msg)
         if platform.system() == "Windows":
