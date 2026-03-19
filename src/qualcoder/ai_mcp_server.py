@@ -46,6 +46,14 @@ class AiMcpServer:
     max_regex_context_chars = 1000
     max_regex_hits = 20000
     AI_AGENT_OWNER = "AI Agent"
+    AI_PERMISSION_READ_ONLY = 0
+    AI_PERMISSION_SANDBOXED = 1
+    AI_PERMISSION_FULL_ACCESS = 2
+    WRITE_TOOL_NAMES = (
+        "codes/create_category",
+        "codes/create_code",
+        "codes/create_text_coding",
+    )
 
     def __init__(self, app):
         self.app = app
@@ -70,6 +78,60 @@ class AiMcpServer:
             "(qualcoder://search/regex?pattern=...) with optional filters file_ids and exclude_cids. "
             "Available write tools: create category, create code, and create text coding. "
             "Available prompts represent QualCoder skills from system, user, and project scope."
+        )
+
+    def _current_ai_permissions(self) -> int:
+        """Return the normalized AI permissions level."""
+
+        ai_permissions = self.app.settings.get("ai_permissions", self.AI_PERMISSION_SANDBOXED)
+        if ai_permissions not in (
+            self.AI_PERMISSION_READ_ONLY,
+            self.AI_PERMISSION_SANDBOXED,
+            self.AI_PERMISSION_FULL_ACCESS,
+        ):
+            return self.AI_PERMISSION_SANDBOXED
+        return ai_permissions
+
+    def _current_ai_permissions_label(self) -> str:
+        """Return the current AI permissions label."""
+
+        labels = {
+            self.AI_PERMISSION_READ_ONLY: "Read-only",
+            self.AI_PERMISSION_SANDBOXED: "Sandboxed",
+            self.AI_PERMISSION_FULL_ACCESS: "Full access",
+        }
+        return labels.get(self._current_ai_permissions(), "Sandboxed")
+
+    def _tool_result_payload(self, payload: Dict[str, Any], is_error: bool = False) -> Dict[str, Any]:
+        """Wrap structured tool content in an MCP tool result."""
+
+        return {
+            "isError": is_error,
+            "structuredContent": payload,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(payload, ensure_ascii=False),
+                }
+            ],
+        }
+
+    def _write_tool_permission_error(self, tool_name: str) -> Dict[str, Any]:
+        """Return a standardized permission error for write tools."""
+
+        message = (
+            f'Tool "{tool_name}" requires AI Permissions set to "Sandboxed" '
+            f'or "Full access". Current level: "{self._current_ai_permissions_label()}".'
+        )
+        return self._tool_result_payload(
+            {
+                "tool": tool_name,
+                "error": {
+                    "code": "ai_permissions_denied",
+                    "message": message,
+                },
+            },
+            is_error=True,
         )
 
     def new_request_id(self) -> int:
@@ -510,6 +572,11 @@ class AiMcpServer:
         tool_name = str(name).strip()
         if tool_name == "":
             raise ValueError("Missing tool name.")
+        if (
+            tool_name in self.WRITE_TOOL_NAMES
+            and self._current_ai_permissions() == self.AI_PERMISSION_READ_ONLY
+        ):
+            return self._write_tool_permission_error(tool_name)
 
         if tool_name == "codes/create_category":
             payload = self._tool_create_category(arguments, change_set_id)
@@ -520,16 +587,7 @@ class AiMcpServer:
         else:
             raise ValueError(f"Unknown tool name: {tool_name}")
 
-        return {
-            "isError": False,
-            "structuredContent": payload,
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(payload, ensure_ascii=False),
-                }
-            ],
-        }
+        return self._tool_result_payload(payload)
 
     def _tool_create_category(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
         name = " ".join(str(arguments.get("name", "")).split()).strip()

@@ -196,6 +196,37 @@ class TestAiMcpServer(TestCase):
         self.assertEqual("AI Agent", payload["coding"]["owner"])
         self.assertEqual("bcd", payload["coding"]["quote"])
 
+    def test_write_tools_return_error_when_ai_permissions_are_read_only(self):
+        self.app.settings["ai_permissions"] = 0
+
+        for tool_name, arguments in (
+            ("codes/create_category", {"name": "cat blocked"}),
+            ("codes/create_code", {"name": "code blocked"}),
+            ("codes/create_text_coding", {"cid": 1, "fid": 1, "quote": "bcd"}),
+        ):
+            with self.subTest(tool_name=tool_name):
+                req = {
+                    "jsonrpc": "2.0",
+                    "id": 40,
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": arguments,
+                        "_ai_change_set_id": "blocked-run",
+                    },
+                }
+                res = self.server.handle_request(req)
+                self.assertIn("result", res)
+                self.assertTrue(res["result"]["isError"])
+                payload = res["result"]["structuredContent"]
+                self.assertEqual(tool_name, payload["tool"])
+                self.assertEqual("ai_permissions_denied", payload["error"]["code"])
+                self.assertIn("Sandboxed", payload["error"]["message"])
+                self.assertIn("Full access", payload["error"]["message"])
+                self.assertIn("Read-only", payload["error"]["message"])
+
+        self.assertEqual([], self.ai_recorded_changes)
+
     def test_codes_tree_contains_structure_rules_and_speaker_convention(self):
         req = {"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {"uri": "qualcoder://codes/tree"}}
         res = self.server.handle_request(req)
