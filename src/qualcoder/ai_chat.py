@@ -65,6 +65,27 @@ class AIChatSignalEmitter(QObject):
 ai_chat_signal_emitter = AIChatSignalEmitter()  # Create a global instance of the signal emitter
 
 
+class PrefixedComboBox(QtWidgets.QComboBox):
+    """Draw a prefix in the closed combobox without changing the popup item texts."""
+
+    def __init__(self, prefix: str = "", parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self._display_prefix = prefix
+
+    def set_display_prefix(self, prefix: str):
+        self._display_prefix = prefix
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QtWidgets.QStylePainter(self)
+        option = QtWidgets.QStyleOptionComboBox()
+        self.initStyleOption(option)
+        if self._display_prefix:
+            option.currentText = self._display_prefix if not option.currentText else f"{self._display_prefix} {option.currentText}"
+        painter.drawComplexControl(QtWidgets.QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QtWidgets.QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+
 class DialogAIChat(QtWidgets.QDialog):
     """ AI chat window
     """    
@@ -90,7 +111,6 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.setupUi(self)
         self.setup_ai_permissions_combobox()
         self.ui.comboBox_ai_permissions.currentIndexChanged.connect(self.ai_permissions_changed)
-        self.ui.comboBox_ai_permissions.activated.connect(self.ai_permissions_changed)
         self.load_ai_permissions()
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
         # self.ui.scrollArea_ai_output.verticalScrollBar().rangeChanged.connect(self.ai_output_scroll_to_bottom)
@@ -260,41 +280,34 @@ class DialogAIChat(QtWidgets.QDialog):
             QComboBox {{
                 background-color: {default_panel_color.name()};
             }}
-            QComboBox:editable {{
-                background-color: {default_panel_color.name()};
-            }}
-            QComboBox QLineEdit {{
-                background: transparent;
-                border: none;
-                selection-background-color: palette(highlight);
-            }}
         """)
         self.update_chat_window()
 
     def setup_ai_permissions_combobox(self):
-        """Show a prefixed label only in the closed combobox display."""
+        """Replace the Designer combobox with a prefixed, non-editable combobox."""
 
-        self.ui.comboBox_ai_permissions.setEditable(True)
-        self.ui.comboBox_ai_permissions.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
-        self._ai_permissions_popup_was_visible = False
-        self._ai_permissions_toggle_on_release = False
-        self.ui.comboBox_ai_permissions.installEventFilter(self)
-        line_edit = self.ui.comboBox_ai_permissions.lineEdit()
-        line_edit.setReadOnly(True)
-        line_edit.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
-        line_edit.installEventFilter(self)
-
-    def update_ai_permissions_display(self, index=None):
-        """Prefix the current permission text without changing dropdown entries."""
-
-        combo_index = self.ui.comboBox_ai_permissions.currentIndex()
-        if combo_index not in (0, 1, 2):
-            display_text = _("AI Permissions:")
-        else:
-            display_text = _("AI Permissions:") + " " + self.ui.comboBox_ai_permissions.itemText(combo_index)
-        line_edit = self.ui.comboBox_ai_permissions.lineEdit()
-        if line_edit is not None:
-            line_edit.setText(display_text)
+        old_combo = self.ui.comboBox_ai_permissions
+        new_combo = PrefixedComboBox(_("AI Permissions:"), old_combo.parentWidget())
+        new_combo.setObjectName(old_combo.objectName())
+        new_combo.setEnabled(old_combo.isEnabled())
+        new_combo.setToolTip(old_combo.toolTip())
+        new_combo.setStatusTip(old_combo.statusTip())
+        new_combo.setWhatsThis(old_combo.whatsThis())
+        new_combo.setAccessibleName(old_combo.accessibleName())
+        new_combo.setAccessibleDescription(old_combo.accessibleDescription())
+        new_combo.setSizePolicy(old_combo.sizePolicy())
+        new_combo.setMinimumSize(old_combo.minimumSize())
+        new_combo.setMaximumSize(old_combo.maximumSize())
+        new_combo.setMinimumContentsLength(old_combo.minimumContentsLength())
+        new_combo.setSizeAdjustPolicy(old_combo.sizeAdjustPolicy())
+        new_combo.setFont(old_combo.font())
+        for i in range(old_combo.count()):
+            new_combo.addItem(old_combo.itemIcon(i), old_combo.itemText(i), old_combo.itemData(i))
+        new_combo.setCurrentIndex(old_combo.currentIndex())
+        layout = old_combo.parentWidget().layout()
+        layout.replaceWidget(old_combo, new_combo)
+        old_combo.deleteLater()
+        self.ui.comboBox_ai_permissions = new_combo
 
     def load_ai_permissions(self):
         ai_permissions = self.app.settings.get('ai_permissions', 1)
@@ -303,7 +316,6 @@ class DialogAIChat(QtWidgets.QDialog):
             self.app.settings['ai_permissions'] = ai_permissions
         with QtCore.QSignalBlocker(self.ui.comboBox_ai_permissions):
             self.ui.comboBox_ai_permissions.setCurrentIndex(ai_permissions)
-        self.update_ai_permissions_display(ai_permissions)
 
     def ai_permissions_changed(self, index=None):
         combo_index = self.ui.comboBox_ai_permissions.currentIndex()
@@ -311,7 +323,6 @@ class DialogAIChat(QtWidgets.QDialog):
             ai_permissions = 1
         else:
             ai_permissions = combo_index
-        self.update_ai_permissions_display(ai_permissions)
         if self.app.settings.get('ai_permissions') == ai_permissions:
             return
         self.app.settings['ai_permissions'] = ai_permissions
@@ -3541,19 +3552,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.process_message('info', fallback, self.current_streaming_chat_idx)
     
     def eventFilter(self, source, event):
-        combo = self.ui.comboBox_ai_permissions
-        line_edit = self.ui.comboBox_ai_permissions.lineEdit()
-        if source in (combo, line_edit) and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
-            self._ai_permissions_popup_was_visible = combo.view().isVisible()
-            self._ai_permissions_toggle_on_release = True
-            return True
-        if source in (combo, line_edit) and event.type() == QEvent.Type.MouseButtonRelease and self._ai_permissions_toggle_on_release:
-            self._ai_permissions_toggle_on_release = False
-            if self._ai_permissions_popup_was_visible:
-                combo.hidePopup()
-            else:
-                combo.showPopup()
-            return True
         # Check if the event is a KeyPress, source is the lineEdit, and the key is Enter
         if (event.type() == QEvent.Type.KeyPress and source is self.ui.plainTextEdit_question and
             (event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter)):
