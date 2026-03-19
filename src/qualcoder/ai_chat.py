@@ -88,7 +88,9 @@ class DialogAIChat(QtWidgets.QDialog):
         QtWidgets.QDialog.__init__(self)
         self.ui = Ui_Dialog_ai_chat()
         self.ui.setupUi(self)
+        self.setup_ai_permissions_combobox()
         self.ui.comboBox_ai_permissions.currentIndexChanged.connect(self.ai_permissions_changed)
+        self.ui.comboBox_ai_permissions.activated.connect(self.ai_permissions_changed)
         self.load_ai_permissions()
         self.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
         # self.ui.scrollArea_ai_output.verticalScrollBar().rangeChanged.connect(self.ai_output_scroll_to_bottom)
@@ -180,13 +182,6 @@ class DialogAIChat(QtWidgets.QDialog):
         self.load_ai_permissions()
         font_css = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         dialog_bg = self.ui.pushButton_question.palette().color(QPalette.ColorRole.Button).name()
-
-#        self.setStyleSheet(f"""
-#            QDialog#Dialog_ai_chat {{
-#                {font_css}
-#                background-color: {dialog_bg};
-#            }}
-#        """)        
         
         self.font = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         self.setStyleSheet(self.font)
@@ -243,12 +238,63 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ai_status_style = f'"{doc_font} color: #808080;"'
         self.ui.plainTextEdit_question.setStyleSheet(self.ai_user_style[1:-1])
         default_bg_color = self.ui.plainTextEdit_question.palette().color(self.ui.plainTextEdit_question.viewport().backgroundRole())
-        self.ui.ai_output.setStyleSheet(doc_font)
         self.ui.ai_output.setAutoFillBackground(True)
-        self.ui.ai_output.setStyleSheet('QWidget:focus {border: none;}')
-        self.ui.ai_output.setStyleSheet(f'background-color: {default_bg_color.name()};')
+        self.ui.ai_output.setStyleSheet(f"""
+            QLabel#ai_output {{
+                {doc_font}
+                background-color: {default_bg_color.name()};
+                border: none;
+            }}
+            QLabel#ai_output:focus {{
+                border: none;
+            }}
+        """)
         self.ui.scrollArea_ai_output.setStyleSheet(f'background-color: {default_bg_color.name()};')
+        default_panel_color = self.ui.widget_chat.palette().color(self.ui.widget_chat.backgroundRole())
+        self.ui.comboBox_ai_chats.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {default_panel_color.name()};
+            }}
+        """)
+        self.ui.comboBox_ai_permissions.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {default_panel_color.name()};
+            }}
+            QComboBox:editable {{
+                background-color: {default_panel_color.name()};
+            }}
+            QComboBox QLineEdit {{
+                background: transparent;
+                border: none;
+                selection-background-color: palette(highlight);
+            }}
+        """)
         self.update_chat_window()
+
+    def setup_ai_permissions_combobox(self):
+        """Show a prefixed label only in the closed combobox display."""
+
+        self.ui.comboBox_ai_permissions.setEditable(True)
+        self.ui.comboBox_ai_permissions.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        self._ai_permissions_popup_was_visible = False
+        self._ai_permissions_toggle_on_release = False
+        self.ui.comboBox_ai_permissions.installEventFilter(self)
+        line_edit = self.ui.comboBox_ai_permissions.lineEdit()
+        line_edit.setReadOnly(True)
+        line_edit.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+        line_edit.installEventFilter(self)
+
+    def update_ai_permissions_display(self, index=None):
+        """Prefix the current permission text without changing dropdown entries."""
+
+        combo_index = self.ui.comboBox_ai_permissions.currentIndex()
+        if combo_index not in (0, 1, 2):
+            display_text = _("AI Permissions:")
+        else:
+            display_text = _("AI Permissions:") + " " + self.ui.comboBox_ai_permissions.itemText(combo_index)
+        line_edit = self.ui.comboBox_ai_permissions.lineEdit()
+        if line_edit is not None:
+            line_edit.setText(display_text)
 
     def load_ai_permissions(self):
         ai_permissions = self.app.settings.get('ai_permissions', 1)
@@ -257,6 +303,7 @@ class DialogAIChat(QtWidgets.QDialog):
             self.app.settings['ai_permissions'] = ai_permissions
         with QtCore.QSignalBlocker(self.ui.comboBox_ai_permissions):
             self.ui.comboBox_ai_permissions.setCurrentIndex(ai_permissions)
+        self.update_ai_permissions_display(ai_permissions)
 
     def ai_permissions_changed(self, index=None):
         combo_index = self.ui.comboBox_ai_permissions.currentIndex()
@@ -264,6 +311,7 @@ class DialogAIChat(QtWidgets.QDialog):
             ai_permissions = 1
         else:
             ai_permissions = combo_index
+        self.update_ai_permissions_display(ai_permissions)
         if self.app.settings.get('ai_permissions') == ai_permissions:
             return
         self.app.settings['ai_permissions'] = ai_permissions
@@ -3493,6 +3541,19 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.process_message('info', fallback, self.current_streaming_chat_idx)
     
     def eventFilter(self, source, event):
+        combo = self.ui.comboBox_ai_permissions
+        line_edit = self.ui.comboBox_ai_permissions.lineEdit()
+        if source in (combo, line_edit) and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            self._ai_permissions_popup_was_visible = combo.view().isVisible()
+            self._ai_permissions_toggle_on_release = True
+            return True
+        if source in (combo, line_edit) and event.type() == QEvent.Type.MouseButtonRelease and self._ai_permissions_toggle_on_release:
+            self._ai_permissions_toggle_on_release = False
+            if self._ai_permissions_popup_was_visible:
+                combo.hidePopup()
+            else:
+                combo.showPopup()
+            return True
         # Check if the event is a KeyPress, source is the lineEdit, and the key is Enter
         if (event.type() == QEvent.Type.KeyPress and source is self.ui.plainTextEdit_question and
             (event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter)):

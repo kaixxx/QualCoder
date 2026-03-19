@@ -148,23 +148,16 @@
            </property>
           </widget>
          </item>
-         <item row="1" column="0">
-          <widget class="QLabel" name="label_2">
-           <property name="text">
-            <string>AI Permissions:</string>
-           </property>
-           <property name="alignment">
-            <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-           </property>
-          </widget>
-         </item>
-         <item row="1" column="1" colspan="3">
+         <item row="1" column="0" colspan="4">
           <widget class="QComboBox" name="comboBox_ai_permissions">
            <property name="toolTip">
             <string>Define what the AI agent is allowed to do in your project:
 - Read-only: The AI agent cannot make any changes.
 - Sandboxed (default): The AI agent cannot make changes to your codes and memos, but it can create its own.
 - Full access: The AI agent can change everything, but will usually ask for confirmation first.</string>
+           </property>
+           <property name="styleSheet">
+            <string notr="true">background-color: palette(window);</string>
            </property>
            <property name="currentIndex">
             <number>1</number>
@@ -234,7 +227,11 @@
        </widget>
       </item>
       <item row="1" column="0" colspan="2">
-       <widget class="QComboBox" name="comboBox_ai_chats"/>
+       <widget class="QComboBox" name="comboBox_ai_chats">
+        <property name="styleSheet">
+         <string notr="true">background-color: palette(window);</string>
+        </property>
+       </widget>
       </item>
       <item row="1" column="2">
        <widget class="QToolButton" name="toolButton_edit_title">
