@@ -755,6 +755,34 @@ class DialogAIChat(QtWidgets.QDialog):
     def _agent_md_path(self) -> str:
         return os.path.join(os.path.dirname(__file__), "ai_skills", "agent.md")
 
+    def _ai_permissions_label(self) -> str:
+        """Return the current AI permissions label used in agent instructions."""
+
+        ai_permissions = self.app.settings.get('ai_permissions', 1)
+        labels = {
+            0: 'Read-only',
+            1: 'Sandboxed',
+            2: 'Full access',
+        }
+        return labels.get(ai_permissions, 'Sandboxed')
+
+    def _render_agent_md_content(self, content: str) -> str:
+        """Replace supported runtime placeholders in agent.md."""
+
+        if content == "":
+            return ""
+
+        template_context = {
+            "CURRENT_DATE": datetime.now().date().isoformat(),
+            "AI_PERMISSIONS": self._ai_permissions_label(),
+        }
+
+        def replace_placeholder(match: re.Match) -> str:
+            key = match.group(1)
+            return template_context.get(key, match.group(0))
+
+        return re.sub(r"\{\{([A-Z0-9_]+)\}\}", replace_placeholder, content)
+
     def _load_agent_md_content(self) -> str:
         """Load global agent instructions from agent.md if present."""
 
@@ -763,7 +791,7 @@ class DialogAIChat(QtWidgets.QDialog):
             return ""
         try:
             with open(agent_md_path, "r", encoding="utf-8") as handle:
-                return handle.read().strip()
+                return self._render_agent_md_content(handle.read().strip())
         except OSError:
             return ""
 
@@ -1955,10 +1983,14 @@ data collected. This information will accompany every prompt sent to the AI, res
             if chat_idx == self.current_chat_idx:
                 self.update_chat_window()
         elif msg_type == 'system':
-            # system messages are only added to the chat history. They are never shown on screen. 
-            # The system message will be not be send to the AI immediately,
-            # but together with the next user message (as part of the chat history).
-            self.history_add_message(msg_type, '', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+            # System messages are hidden from the chat window.
+            # Agent chats rebuild their system prompt fresh on every turn, so persisting it is unnecessary.
+            # Other chat types still replay the stored system prompt from history.
+            analysis_type = ''
+            if 0 <= chat_idx < len(self.chat_list):
+                analysis_type = self.chat_list[chat_idx][2]
+            if not self._is_agent_chat_type(analysis_type):
+                self.history_add_message(msg_type, '', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'tool_call':
             # tool messages are persisted for multi-turn MCP context, but not rendered in the chat window
             self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
