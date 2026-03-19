@@ -49,16 +49,40 @@ class AiMcpServer:
     AI_PERMISSION_READ_ONLY = 0
     AI_PERMISSION_SANDBOXED = 1
     AI_PERMISSION_FULL_ACCESS = 2
-    WRITE_TOOL_NAMES = (
+    SANDBOX_WRITE_TOOL_NAMES = (
         "codes/create_category",
         "codes/create_code",
         "codes/create_text_coding",
+    )
+    FULL_ACCESS_WRITE_TOOL_NAMES = (
+        "codes/rename_category",
+        "codes/rename_code",
+        "codes/move_category",
+        "codes/move_code",
+        "codes/delete_category",
+        "codes/delete_code",
+        "codes/move_text_coding",
+        "codes/delete_text_coding",
+    )
+    PREVIEW_TOOL_NAMES = (
+        "codes/preview_move_category",
+        "codes/preview_delete_category",
+        "codes/preview_move_code",
+        "codes/preview_delete_code",
+    )
+    WRITE_TOOL_NAMES = SANDBOX_WRITE_TOOL_NAMES + FULL_ACCESS_WRITE_TOOL_NAMES
+    PREVIEW_REQUIRED_EXECUTE_TOOLS = (
+        "codes/move_category",
+        "codes/delete_category",
+        "codes/move_code",
+        "codes/delete_code",
     )
 
     def __init__(self, app):
         self.app = app
         self.skills_catalog = AiSkillsCatalog(app)
         self._request_seq = 1
+        self._preview_tokens: Dict[str, Dict[str, Any]] = {}
         self._sdk_server = Server(
             self.server_name,
             version=self.server_version,
@@ -76,7 +100,8 @@ class AiMcpServer:
             "(qualcoder://vector/search?q=...) with optional filters file_ids and exclude_cids, "
             "and regular-expression search "
             "(qualcoder://search/regex?pattern=...) with optional filters file_ids and exclude_cids. "
-            "Available write tools: create category, create code, and create text coding. "
+            "Available tools include preview and write operations for categories, codes, and text codings. "
+            "High-impact move/delete actions on categories or codes should be previewed before execution. "
             "Available prompts represent QualCoder skills from system, user, and project scope."
         )
 
@@ -116,12 +141,25 @@ class AiMcpServer:
             ],
         }
 
-    def _write_tool_permission_error(self, tool_name: str) -> Dict[str, Any]:
-        """Return a standardized permission error for write tools."""
+    def _tool_required_permission(self, tool_name: str) -> int:
+        """Return the required AI permissions level for one tool."""
 
+        if tool_name in self.SANDBOX_WRITE_TOOL_NAMES:
+            return self.AI_PERMISSION_SANDBOXED
+        if tool_name in self.FULL_ACCESS_WRITE_TOOL_NAMES:
+            return self.AI_PERMISSION_FULL_ACCESS
+        return self.AI_PERMISSION_READ_ONLY
+
+    def _tool_permission_error(self, tool_name: str, required_permission: int) -> Dict[str, Any]:
+        """Return a standardized permission error for tools with insufficient access."""
+
+        if required_permission == self.AI_PERMISSION_FULL_ACCESS:
+            required_label = '"Full access"'
+        else:
+            required_label = '"Sandboxed" or "Full access"'
         message = (
-            f'Tool "{tool_name}" requires AI Permissions set to "Sandboxed" '
-            f'or "Full access". Current level: "{self._current_ai_permissions_label()}".'
+            f'Tool "{tool_name}" requires AI Permissions set to {required_label}. '
+            f'Current level: "{self._current_ai_permissions_label()}".'
         )
         return self._tool_result_payload(
             {
@@ -133,6 +171,35 @@ class AiMcpServer:
             },
             is_error=True,
         )
+
+    def _issue_preview_token(self, execute_tool: str, signature_payload: Dict[str, Any]) -> str:
+        """Create one transient preview token for a later execute call."""
+
+        signature_text = json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
+        now = datetime.now().astimezone().isoformat()
+        token = hashlib.sha1(f"{execute_tool}|{signature_text}|{now}|{random.random()}".encode("utf-8")).hexdigest()
+        self._preview_tokens[token] = {
+            "execute_tool": execute_tool,
+            "signature": signature_text,
+            "created_at": now,
+        }
+        return token
+
+    def _consume_preview_token(self, execute_tool: str, signature_payload: Dict[str, Any], token: str) -> None:
+        """Validate and consume one preview token."""
+
+        preview_token = str(token if token is not None else "").strip()
+        if preview_token == "":
+            raise ValueError(f'{execute_tool} requires a preview_token from the corresponding preview tool.')
+        token_data = self._preview_tokens.get(preview_token)
+        if not isinstance(token_data, dict):
+            raise ValueError("preview_token is invalid or expired.")
+        expected_signature = json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
+        if str(token_data.get("execute_tool", "")) != execute_tool:
+            raise ValueError("preview_token does not match this tool.")
+        if str(token_data.get("signature", "")) != expected_signature:
+            raise ValueError("preview_token does not match the requested object or target.")
+        del self._preview_tokens[preview_token]
 
     def new_request_id(self) -> int:
         req_id = self._request_seq
@@ -242,6 +309,48 @@ class AiMcpServer:
                     code=str(code_name),
                     document=str(doc_name),
                 )
+            if tool_name in ("codes/preview_move_category", "codes/delete_category", "codes/move_category", "codes/preview_delete_category"):
+                catid = self._to_int(tool_args.get("catid"), -1)
+                category_name = self._fetch_category_name(catid) if catid > 0 else None
+                if category_name is None or str(category_name).strip() == "":
+                    category_name = _("Category") + (f" #{catid}" if catid > 0 else "")
+                if tool_name == "codes/preview_move_category":
+                    return _('Reviewing impact of moving category "{name}"...').format(name=str(category_name))
+                if tool_name == "codes/preview_delete_category":
+                    return _('Reviewing impact of deleting category "{name}"...').format(name=str(category_name))
+                if tool_name == "codes/move_category":
+                    return _('Moving category "{name}"...').format(name=str(category_name))
+                return _('Deleting category "{name}"...').format(name=str(category_name))
+            if tool_name in ("codes/preview_move_code", "codes/delete_code", "codes/move_code", "codes/preview_delete_code"):
+                cid = self._to_int(tool_args.get("cid"), -1)
+                code_name = self._fetch_code_name(cid) if cid > 0 else None
+                if code_name is None or str(code_name).strip() == "":
+                    code_name = _("Code") + (f" #{cid}" if cid > 0 else "")
+                if tool_name == "codes/preview_move_code":
+                    return _('Reviewing impact of moving code "{name}"...').format(name=str(code_name))
+                if tool_name == "codes/preview_delete_code":
+                    return _('Reviewing impact of deleting code "{name}"...').format(name=str(code_name))
+                if tool_name == "codes/move_code":
+                    return _('Moving code "{name}"...').format(name=str(code_name))
+                return _('Deleting code "{name}"...').format(name=str(code_name))
+            if tool_name == "codes/rename_category":
+                catid = self._to_int(tool_args.get("catid"), -1)
+                category_name = self._fetch_category_name(catid) if catid > 0 else None
+                if category_name is None or str(category_name).strip() == "":
+                    category_name = _("Category") + (f" #{catid}" if catid > 0 else "")
+                return _('Renaming category "{name}"...').format(name=str(category_name))
+            if tool_name == "codes/rename_code":
+                cid = self._to_int(tool_args.get("cid"), -1)
+                code_name = self._fetch_code_name(cid) if cid > 0 else None
+                if code_name is None or str(code_name).strip() == "":
+                    code_name = _("Code") + (f" #{cid}" if cid > 0 else "")
+                return _('Renaming code "{name}"...').format(name=str(code_name))
+            if tool_name == "codes/move_text_coding":
+                ctid = self._to_int(tool_args.get("ctid"), -1)
+                return _('Moving text coding #{ctid}...').format(ctid=ctid if ctid > 0 else "?")
+            if tool_name == "codes/delete_text_coding":
+                ctid = self._to_int(tool_args.get("ctid"), -1)
+                return _('Deleting text coding #{ctid}...').format(ctid=ctid if ctid > 0 else "?")
             return _('Executing tool "{name}"...').format(name=tool_name)
         if method != "resources/read":
             return ""
@@ -534,6 +643,185 @@ class AiMcpServer:
                         "additionalProperties": False,
                     },
                 },
+                {
+                    "name": "codes/preview_move_category",
+                    "description": (
+                        "Preview the impact of moving a category under another category. "
+                        "Returns subtree counts, warnings, and a preview_token for execution."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "catid": {"type": "integer"},
+                            "new_supercatid": {"type": ["integer", "null"]},
+                        },
+                        "required": ["catid"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/preview_delete_category",
+                    "description": (
+                        "Preview the impact of deleting a category tree recursively. "
+                        "Returns affected subtree counts, warnings, and a preview_token for execution."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "catid": {"type": "integer"},
+                        },
+                        "required": ["catid"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/preview_move_code",
+                    "description": (
+                        "Preview the impact of moving a code to another category or to top-level. "
+                        "Returns counts and a preview_token for execution."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cid": {"type": "integer"},
+                            "new_catid": {"type": ["integer", "null"]},
+                        },
+                        "required": ["cid"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/preview_delete_code",
+                    "description": (
+                        "Preview the impact of deleting a code and all its codings. "
+                        "Returns affected coding counts, warnings, and a preview_token for execution."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cid": {"type": "integer"},
+                        },
+                        "required": ["cid"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/rename_category",
+                    "description": "Rename an existing category. Requires Full access.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "catid": {"type": "integer"},
+                            "new_name": {"type": "string"},
+                        },
+                        "required": ["catid", "new_name"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/rename_code",
+                    "description": "Rename an existing code. Requires Full access.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cid": {"type": "integer"},
+                            "new_name": {"type": "string"},
+                        },
+                        "required": ["cid", "new_name"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/move_category",
+                    "description": (
+                        "Move a category tree under another category or to top-level. "
+                        "Requires Full access and a preview_token from codes/preview_move_category."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "catid": {"type": "integer"},
+                            "new_supercatid": {"type": ["integer", "null"]},
+                            "preview_token": {"type": "string"},
+                        },
+                        "required": ["catid", "preview_token"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/move_code",
+                    "description": (
+                        "Move a code to another category or to top-level. "
+                        "Requires Full access and a preview_token from codes/preview_move_code."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cid": {"type": "integer"},
+                            "new_catid": {"type": ["integer", "null"]},
+                            "preview_token": {"type": "string"},
+                        },
+                        "required": ["cid", "preview_token"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/delete_category",
+                    "description": (
+                        "Delete a category tree recursively, including descendant categories, codes, and codings. "
+                        "Requires Full access and a preview_token from codes/preview_delete_category."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "catid": {"type": "integer"},
+                            "preview_token": {"type": "string"},
+                        },
+                        "required": ["catid", "preview_token"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/delete_code",
+                    "description": (
+                        "Delete a code and all related codings. "
+                        "Requires Full access and a preview_token from codes/preview_delete_code."
+                    ),
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "cid": {"type": "integer"},
+                            "preview_token": {"type": "string"},
+                        },
+                        "required": ["cid", "preview_token"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/move_text_coding",
+                    "description": "Move one text coding to a different code. Requires Full access.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "ctid": {"type": "integer"},
+                            "new_cid": {"type": "integer"},
+                        },
+                        "required": ["ctid", "new_cid"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
+                    "name": "codes/delete_text_coding",
+                    "description": "Delete one text coding. Requires Full access.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "ctid": {"type": "integer"},
+                        },
+                        "required": ["ctid"],
+                        "additionalProperties": False,
+                    },
+                },
             ]
         }
 
@@ -572,11 +860,9 @@ class AiMcpServer:
         tool_name = str(name).strip()
         if tool_name == "":
             raise ValueError("Missing tool name.")
-        if (
-            tool_name in self.WRITE_TOOL_NAMES
-            and self._current_ai_permissions() == self.AI_PERMISSION_READ_ONLY
-        ):
-            return self._write_tool_permission_error(tool_name)
+        required_permission = self._tool_required_permission(tool_name)
+        if self._current_ai_permissions() < required_permission:
+            return self._tool_permission_error(tool_name, required_permission)
 
         if tool_name == "codes/create_category":
             payload = self._tool_create_category(arguments, change_set_id)
@@ -584,6 +870,30 @@ class AiMcpServer:
             payload = self._tool_create_code(arguments, change_set_id)
         elif tool_name == "codes/create_text_coding":
             payload = self._tool_create_text_coding(arguments, change_set_id)
+        elif tool_name == "codes/preview_move_category":
+            payload = self._tool_preview_move_category(arguments)
+        elif tool_name == "codes/preview_delete_category":
+            payload = self._tool_preview_delete_category(arguments)
+        elif tool_name == "codes/preview_move_code":
+            payload = self._tool_preview_move_code(arguments)
+        elif tool_name == "codes/preview_delete_code":
+            payload = self._tool_preview_delete_code(arguments)
+        elif tool_name == "codes/rename_category":
+            payload = self._tool_rename_category(arguments, change_set_id)
+        elif tool_name == "codes/rename_code":
+            payload = self._tool_rename_code(arguments, change_set_id)
+        elif tool_name == "codes/move_category":
+            payload = self._tool_move_category(arguments, change_set_id)
+        elif tool_name == "codes/move_code":
+            payload = self._tool_move_code(arguments, change_set_id)
+        elif tool_name == "codes/delete_category":
+            payload = self._tool_delete_category(arguments, change_set_id)
+        elif tool_name == "codes/delete_code":
+            payload = self._tool_delete_code(arguments, change_set_id)
+        elif tool_name == "codes/move_text_coding":
+            payload = self._tool_move_text_coding(arguments, change_set_id)
+        elif tool_name == "codes/delete_text_coding":
+            payload = self._tool_delete_text_coding(arguments, change_set_id)
         else:
             raise ValueError(f"Unknown tool name: {tool_name}")
 
@@ -851,6 +1161,786 @@ class AiMcpServer:
         finally:
             conn.close()
 
+    def _tool_preview_move_category(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        catid = self._to_int(arguments.get("catid"), -1)
+        new_supercatid_raw = arguments.get("new_supercatid", None)
+        new_supercatid = None
+        if new_supercatid_raw is not None:
+            new_supercatid = self._to_int(new_supercatid_raw, -1)
+            if new_supercatid <= 0:
+                raise ValueError("new_supercatid must be a positive integer or null.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            category = self._fetch_category_row_cur(cur, catid)
+            if category is None:
+                raise ValueError(f"Category id {catid} not found.")
+            target = None
+            if new_supercatid is not None:
+                target = self._fetch_category_row_cur(cur, new_supercatid)
+                if target is None:
+                    raise ValueError(f"Target category id {new_supercatid} not found.")
+            subtree = self._collect_category_subtree(cur, catid)
+            subtree_ids = [int(item["catid"]) for item in subtree["categories"]]
+            if new_supercatid is not None and new_supercatid in subtree_ids:
+                raise ValueError("A category cannot be moved into its own subtree.")
+
+            impact = self._build_category_tree_impact(cur, subtree)
+            signature = {"tool": "codes/move_category", "catid": catid, "new_supercatid": new_supercatid}
+            preview_token = self._issue_preview_token("codes/move_category", signature)
+            warnings = [
+                _("Moving this category also moves its full subtree, including descendant categories and codes.")
+            ]
+            if impact["counts"]["categories"] > 5 or impact["counts"]["codes"] > 10:
+                warnings.append(_("This is a large subtree. Review the affected items carefully before executing."))
+            return {
+                "tool": "codes/preview_move_category",
+                "execute_tool": "codes/move_category",
+                "preview_token": preview_token,
+                "requires_confirmation": True,
+                "risk_level": "high",
+                "category": self._category_ref(category),
+                "current_parent": self._category_ref(
+                    self._fetch_category_row_cur(cur, category.get("supercatid", None))
+                ),
+                "new_parent": self._category_ref(target),
+                "impact": impact,
+                "warnings": warnings,
+            }
+        finally:
+            conn.close()
+
+    def _tool_preview_delete_category(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        catid = self._to_int(arguments.get("catid"), -1)
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            category = self._fetch_category_row_cur(cur, catid)
+            if category is None:
+                raise ValueError(f"Category id {catid} not found.")
+            subtree = self._collect_category_subtree(cur, catid)
+            impact = self._build_category_tree_impact(cur, subtree)
+            signature = {"tool": "codes/delete_category", "catid": catid}
+            preview_token = self._issue_preview_token("codes/delete_category", signature)
+            warnings = [
+                _("Deleting this category removes the full subtree, including descendant categories, codes, and codings.")
+            ]
+            non_ai = int(impact["counts"].get("non_ai_codings", 0))
+            if non_ai > 0:
+                warnings.append(
+                    _("Warning: {count} affected coding(s) are not owned by 'AI Agent'.").format(count=non_ai)
+                )
+            return {
+                "tool": "codes/preview_delete_category",
+                "execute_tool": "codes/delete_category",
+                "preview_token": preview_token,
+                "requires_confirmation": True,
+                "risk_level": "high",
+                "category": self._category_ref(category),
+                "impact": impact,
+                "warnings": warnings,
+            }
+        finally:
+            conn.close()
+
+    def _tool_preview_move_code(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        cid = self._to_int(arguments.get("cid"), -1)
+        new_catid_raw = arguments.get("new_catid", None)
+        new_catid = None
+        if new_catid_raw is not None:
+            new_catid = self._to_int(new_catid_raw, -1)
+            if new_catid <= 0:
+                raise ValueError("new_catid must be a positive integer or null.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            code = self._fetch_code_row_cur(cur, cid)
+            if code is None:
+                raise ValueError(f"Code id {cid} not found.")
+            target = None
+            if new_catid is not None:
+                target = self._fetch_category_row_cur(cur, new_catid)
+                if target is None:
+                    raise ValueError(f"Target category id {new_catid} not found.")
+            impact = self._build_code_impact(cur, code)
+            signature = {"tool": "codes/move_code", "cid": cid, "new_catid": new_catid}
+            preview_token = self._issue_preview_token("codes/move_code", signature)
+            return {
+                "tool": "codes/preview_move_code",
+                "execute_tool": "codes/move_code",
+                "preview_token": preview_token,
+                "requires_confirmation": True,
+                "risk_level": "medium",
+                "code": self._code_ref(code),
+                "current_category": self._category_ref(
+                    self._fetch_category_row_cur(cur, code.get("catid", None))
+                ),
+                "new_category": self._category_ref(target),
+                "impact": impact,
+                "warnings": [],
+            }
+        finally:
+            conn.close()
+
+    def _tool_preview_delete_code(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        cid = self._to_int(arguments.get("cid"), -1)
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            code = self._fetch_code_row_cur(cur, cid)
+            if code is None:
+                raise ValueError(f"Code id {cid} not found.")
+            impact = self._build_code_impact(cur, code)
+            signature = {"tool": "codes/delete_code", "cid": cid}
+            preview_token = self._issue_preview_token("codes/delete_code", signature)
+            warnings = [_("Deleting this code also removes all codings that use it.")]
+            non_ai = int(impact["counts"].get("non_ai_codings", 0))
+            if non_ai > 0:
+                warnings.append(
+                    _("Warning: {count} affected coding(s) are not owned by 'AI Agent'.").format(count=non_ai)
+                )
+            return {
+                "tool": "codes/preview_delete_code",
+                "execute_tool": "codes/delete_code",
+                "preview_token": preview_token,
+                "requires_confirmation": True,
+                "risk_level": "high",
+                "code": self._code_ref(code),
+                "category": self._category_ref(
+                    self._fetch_category_row_cur(cur, code.get("catid", None))
+                ),
+                "impact": impact,
+                "warnings": warnings,
+            }
+        finally:
+            conn.close()
+
+    def _tool_rename_category(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        catid = self._to_int(arguments.get("catid"), -1)
+        new_name = " ".join(str(arguments.get("new_name", "")).split()).strip()
+        if catid <= 0:
+            raise ValueError("catid must be a positive integer.")
+        if new_name == "":
+            raise ValueError("new_name must not be empty.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            category = self._fetch_category_row_cur(cur, catid)
+            if category is None:
+                raise ValueError(f"Category id {catid} not found.")
+            old_name = str(category.get("name", ""))
+            if old_name == new_name:
+                return {
+                    "tool": "codes/rename_category",
+                    "renamed": False,
+                    "reason": "unchanged",
+                    "category": self._category_ref(category),
+                }
+            existing = cur.execute(
+                "SELECT catid FROM code_cat WHERE lower(name)=lower(?) AND catid != ?",
+                (new_name, catid),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError(f'Another category already uses the name "{new_name}".')
+
+            cur.execute("UPDATE code_cat SET name=? WHERE catid=?", (new_name, catid))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "rename_category",
+                    "catid": catid,
+                    "old_name": old_name,
+                    "new_name": new_name,
+                },
+            )
+            return {
+                "tool": "codes/rename_category",
+                "renamed": True,
+                "category": {"catid": catid, "old_name": old_name, "new_name": new_name},
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_rename_code(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        cid = self._to_int(arguments.get("cid"), -1)
+        new_name = " ".join(str(arguments.get("new_name", "")).split()).strip()
+        if cid <= 0:
+            raise ValueError("cid must be a positive integer.")
+        if new_name == "":
+            raise ValueError("new_name must not be empty.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            code = self._fetch_code_row_cur(cur, cid)
+            if code is None:
+                raise ValueError(f"Code id {cid} not found.")
+            old_name = str(code.get("name", ""))
+            if old_name == new_name:
+                return {
+                    "tool": "codes/rename_code",
+                    "renamed": False,
+                    "reason": "unchanged",
+                    "code": self._code_ref(code),
+                }
+            existing = cur.execute(
+                "SELECT cid FROM code_name WHERE lower(name)=lower(?) AND cid != ?",
+                (new_name, cid),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError(f'Another code already uses the name "{new_name}".')
+
+            cur.execute("UPDATE code_name SET name=? WHERE cid=?", (new_name, cid))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "rename_code",
+                    "cid": cid,
+                    "old_name": old_name,
+                    "new_name": new_name,
+                },
+            )
+            return {
+                "tool": "codes/rename_code",
+                "renamed": True,
+                "code": {"cid": cid, "old_name": old_name, "new_name": new_name},
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_move_category(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        catid = self._to_int(arguments.get("catid"), -1)
+        new_supercatid_raw = arguments.get("new_supercatid", None)
+        new_supercatid = None
+        if new_supercatid_raw is not None:
+            new_supercatid = self._to_int(new_supercatid_raw, -1)
+            if new_supercatid <= 0:
+                raise ValueError("new_supercatid must be a positive integer or null.")
+        signature = {"tool": "codes/move_category", "catid": catid, "new_supercatid": new_supercatid}
+        self._consume_preview_token("codes/move_category", signature, arguments.get("preview_token", ""))
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            category = self._fetch_category_row_cur(cur, catid)
+            if category is None:
+                raise ValueError(f"Category id {catid} not found.")
+            if new_supercatid is not None and self._fetch_category_row_cur(cur, new_supercatid) is None:
+                raise ValueError(f"Target category id {new_supercatid} not found.")
+            subtree = self._collect_category_subtree(cur, catid)
+            subtree_ids = [int(item["catid"]) for item in subtree["categories"]]
+            if new_supercatid is not None and new_supercatid in subtree_ids:
+                raise ValueError("A category cannot be moved into its own subtree.")
+            old_supercatid = category.get("supercatid", None)
+            if old_supercatid == new_supercatid:
+                return {
+                    "tool": "codes/move_category",
+                    "moved": False,
+                    "reason": "unchanged",
+                    "category": self._category_ref(category),
+                }
+            cur.execute("UPDATE code_cat SET supercatid=? WHERE catid=?", (new_supercatid, catid))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            impact = self._build_category_tree_impact(cur, subtree)
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "move_category_tree",
+                    "root_catid": catid,
+                    "name": str(category.get("name", "")),
+                    "before": {"supercatid": old_supercatid},
+                    "after": {"supercatid": new_supercatid},
+                    "impact": impact,
+                },
+            )
+            return {
+                "tool": "codes/move_category",
+                "moved": True,
+                "category": self._category_ref(category),
+                "old_supercatid": old_supercatid,
+                "new_supercatid": new_supercatid,
+                "impact": impact,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_move_code(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        cid = self._to_int(arguments.get("cid"), -1)
+        new_catid_raw = arguments.get("new_catid", None)
+        new_catid = None
+        if new_catid_raw is not None:
+            new_catid = self._to_int(new_catid_raw, -1)
+            if new_catid <= 0:
+                raise ValueError("new_catid must be a positive integer or null.")
+        signature = {"tool": "codes/move_code", "cid": cid, "new_catid": new_catid}
+        self._consume_preview_token("codes/move_code", signature, arguments.get("preview_token", ""))
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            code = self._fetch_code_row_cur(cur, cid)
+            if code is None:
+                raise ValueError(f"Code id {cid} not found.")
+            if new_catid is not None and self._fetch_category_row_cur(cur, new_catid) is None:
+                raise ValueError(f"Target category id {new_catid} not found.")
+            old_catid = code.get("catid", None)
+            if old_catid == new_catid:
+                return {
+                    "tool": "codes/move_code",
+                    "moved": False,
+                    "reason": "unchanged",
+                    "code": self._code_ref(code),
+                }
+            cur.execute("UPDATE code_name SET catid=? WHERE cid=?", (new_catid, cid))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            impact = self._build_code_impact(cur, code)
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "move_code",
+                    "cid": cid,
+                    "name": str(code.get("name", "")),
+                    "before": {"catid": old_catid},
+                    "after": {"catid": new_catid},
+                    "impact": impact,
+                },
+            )
+            return {
+                "tool": "codes/move_code",
+                "moved": True,
+                "code": self._code_ref(code),
+                "old_catid": old_catid,
+                "new_catid": new_catid,
+                "impact": impact,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_delete_category(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        catid = self._to_int(arguments.get("catid"), -1)
+        signature = {"tool": "codes/delete_category", "catid": catid}
+        self._consume_preview_token("codes/delete_category", signature, arguments.get("preview_token", ""))
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            category = self._fetch_category_row_cur(cur, catid)
+            if category is None:
+                raise ValueError(f"Category id {catid} not found.")
+            subtree = self._collect_category_subtree(cur, catid)
+            impact = self._build_category_tree_impact(cur, subtree)
+            snapshot = self._build_category_tree_snapshot(cur, subtree)
+            code_ids = [int(item["cid"]) for item in subtree["codes"]]
+            category_ids = [int(item["catid"]) for item in subtree["categories"]]
+            self._delete_codings_for_code_ids(cur, code_ids)
+            if len(code_ids) > 0:
+                cur.execute(
+                    "DELETE FROM code_name WHERE cid IN (" + ",".join(["?"] * len(code_ids)) + ")",
+                    tuple(code_ids),
+                )
+            if len(category_ids) > 0:
+                cur.execute(
+                    "DELETE FROM code_cat WHERE catid IN (" + ",".join(["?"] * len(category_ids)) + ")",
+                    tuple(category_ids),
+                )
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "delete_category_tree",
+                    "root_catid": catid,
+                    "name": str(category.get("name", "")),
+                    "snapshot": snapshot,
+                    "impact": impact,
+                },
+            )
+            return {
+                "tool": "codes/delete_category",
+                "deleted": True,
+                "category": self._category_ref(category),
+                "impact": impact,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_delete_code(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        cid = self._to_int(arguments.get("cid"), -1)
+        signature = {"tool": "codes/delete_code", "cid": cid}
+        self._consume_preview_token("codes/delete_code", signature, arguments.get("preview_token", ""))
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            code = self._fetch_code_row_cur(cur, cid)
+            if code is None:
+                raise ValueError(f"Code id {cid} not found.")
+            impact = self._build_code_impact(cur, code)
+            snapshot = self._build_code_snapshot(cur, cid)
+            self._delete_codings_for_code_ids(cur, [cid])
+            cur.execute("DELETE FROM code_name WHERE cid=?", (cid,))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "delete_code",
+                    "cid": cid,
+                    "name": str(code.get("name", "")),
+                    "snapshot": snapshot,
+                    "impact": impact,
+                },
+            )
+            return {
+                "tool": "codes/delete_code",
+                "deleted": True,
+                "code": self._code_ref(code),
+                "impact": impact,
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_move_text_coding(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        ctid = self._to_int(arguments.get("ctid"), -1)
+        new_cid = self._to_int(arguments.get("new_cid"), -1)
+        if ctid <= 0:
+            raise ValueError("ctid must be a positive integer.")
+        if new_cid <= 0:
+            raise ValueError("new_cid must be a positive integer.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            coding = self._fetch_text_coding_row_cur(cur, ctid)
+            if coding is None:
+                raise ValueError(f"Text coding id {ctid} not found.")
+            old_cid = int(coding.get("cid", -1))
+            if self._fetch_code_row_cur(cur, new_cid) is None:
+                raise ValueError(f"Target code id {new_cid} not found.")
+            if old_cid == new_cid:
+                return {
+                    "tool": "codes/move_text_coding",
+                    "moved": False,
+                    "reason": "unchanged",
+                    "coding": {"ctid": ctid, "cid": old_cid},
+                }
+            cur.execute("UPDATE code_text SET cid=? WHERE ctid=?", (new_cid, ctid))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "move_coding_text",
+                    "ctid": ctid,
+                    "before": {"cid": old_cid},
+                    "after": {"cid": new_cid},
+                },
+            )
+            return {
+                "tool": "codes/move_text_coding",
+                "moved": True,
+                "coding": {"ctid": ctid, "old_cid": old_cid, "new_cid": new_cid},
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _tool_delete_text_coding(self, arguments: Dict[str, Any], change_set_id: str) -> Dict[str, Any]:
+        ctid = self._to_int(arguments.get("ctid"), -1)
+        if ctid <= 0:
+            raise ValueError("ctid must be a positive integer.")
+
+        conn = self._connect()
+        try:
+            cur = conn.cursor()
+            coding = self._fetch_text_coding_row_cur(cur, ctid)
+            if coding is None:
+                raise ValueError(f"Text coding id {ctid} not found.")
+            snapshot = {"tables": {"code_text": [dict(coding)]}}
+            cur.execute("DELETE FROM code_text WHERE ctid=?", (ctid,))
+            conn.commit()
+            if hasattr(self.app, "delete_backup"):
+                self.app.delete_backup = False
+            self._record_ai_change(
+                change_set_id,
+                {
+                    "type": "delete_coding_text",
+                    "ctid": ctid,
+                    "snapshot": snapshot,
+                },
+            )
+            return {
+                "tool": "codes/delete_text_coding",
+                "deleted": True,
+                "coding": {
+                    "ctid": ctid,
+                    "cid": int(coding.get("cid", -1)),
+                    "fid": int(coding.get("fid", -1)),
+                },
+            }
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _category_ref(self, category: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(category, dict):
+            return None
+        return {
+            "catid": category.get("catid", None),
+            "name": str(category.get("name", "")),
+        }
+
+    def _code_ref(self, code: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not isinstance(code, dict):
+            return None
+        return {
+            "cid": code.get("cid", None),
+            "name": str(code.get("name", "")),
+        }
+
+    def _table_exists_cur(self, cur: sqlite3.Cursor, table_name: str) -> bool:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        return cur.fetchone() is not None
+
+    def _fetchone_dict_cur(self, cur: sqlite3.Cursor, sql: str,
+                           params: Tuple[Any, ...] = ()) -> Optional[Dict[str, Any]]:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        if row is None:
+            return None
+        columns = [str(item[0]) for item in (cur.description or [])]
+        return {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+
+    def _fetchall_dict_cur(self, cur: sqlite3.Cursor, sql: str,
+                           params: Tuple[Any, ...] = ()) -> List[Dict[str, Any]]:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+        columns = [str(item[0]) for item in (cur.description or [])]
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            result.append({columns[i]: row[i] for i in range(min(len(columns), len(row)))})
+        return result
+
+    def _fetch_category_row_cur(self, cur: sqlite3.Cursor, catid: Any) -> Optional[Dict[str, Any]]:
+        catid_i = self._to_int(catid, -1)
+        if catid_i <= 0:
+            return None
+        return self._fetchone_dict_cur(
+            cur,
+            "SELECT catid, name, ifnull(memo,'') as memo, owner, date, supercatid FROM code_cat WHERE catid=?",
+            (catid_i,),
+        )
+
+    def _fetch_code_row_cur(self, cur: sqlite3.Cursor, cid: Any) -> Optional[Dict[str, Any]]:
+        cid_i = self._to_int(cid, -1)
+        if cid_i <= 0:
+            return None
+        return self._fetchone_dict_cur(
+            cur,
+            "SELECT cid, name, ifnull(memo,'') as memo, catid, color, owner, date FROM code_name WHERE cid=?",
+            (cid_i,),
+        )
+
+    def _fetch_text_coding_row_cur(self, cur: sqlite3.Cursor, ctid: Any) -> Optional[Dict[str, Any]]:
+        ctid_i = self._to_int(ctid, -1)
+        if ctid_i <= 0:
+            return None
+        return self._fetchone_dict_cur(
+            cur,
+            "SELECT ctid, cid, fid, seltext, pos0, pos1, owner, date, memo, avid, important "
+            "FROM code_text WHERE ctid=?",
+            (ctid_i,),
+        )
+
+    def _collect_category_subtree(self, cur: sqlite3.Cursor, root_catid: int) -> Dict[str, Any]:
+        categories = self._fetchall_dict_cur(
+            cur,
+            "SELECT catid, name, ifnull(memo,'') as memo, owner, date, supercatid FROM code_cat ORDER BY catid",
+        )
+        by_parent: Dict[Any, List[Dict[str, Any]]] = {}
+        root_category = None
+        for category in categories:
+            if int(category.get("catid", -1)) == root_catid:
+                root_category = category
+            by_parent.setdefault(category.get("supercatid", None), []).append(category)
+        if root_category is None:
+            raise ValueError(f"Category id {root_catid} not found.")
+
+        subtree_categories: List[Dict[str, Any]] = []
+        queue: List[Dict[str, Any]] = [root_category]
+        seen = set()
+        while len(queue) > 0:
+            category = queue.pop(0)
+            catid = int(category.get("catid", -1))
+            if catid in seen or catid <= 0:
+                continue
+            seen.add(catid)
+            subtree_categories.append(category)
+            for child in by_parent.get(catid, []):
+                queue.append(child)
+
+        category_ids = [int(item["catid"]) for item in subtree_categories]
+        codes: List[Dict[str, Any]] = []
+        if len(category_ids) > 0:
+            placeholders = ",".join(["?"] * len(category_ids))
+            codes = self._fetchall_dict_cur(
+                cur,
+                "SELECT cid, name, ifnull(memo,'') as memo, catid, color, owner, date "
+                f"FROM code_name WHERE catid IN ({placeholders}) ORDER BY cid",
+                tuple(category_ids),
+            )
+        return {
+            "root_category": root_category,
+            "categories": subtree_categories,
+            "codes": codes,
+        }
+
+    def _collect_table_rows_by_cids(self, cur: sqlite3.Cursor, table_name: str,
+                                    cid_values: List[int]) -> List[Dict[str, Any]]:
+        if len(cid_values) == 0 or not self._table_exists_cur(cur, table_name):
+            return []
+        placeholders = ",".join(["?"] * len(cid_values))
+        return self._fetchall_dict_cur(
+            cur,
+            f"SELECT * FROM {table_name} WHERE cid IN ({placeholders}) ORDER BY 1",
+            tuple(cid_values),
+        )
+
+    def _count_codings_for_code_ids(self, cur: sqlite3.Cursor, cid_values: List[int]) -> Dict[str, int]:
+        counts = {"code_text": 0, "code_av": 0, "code_image": 0, "total": 0, "non_ai_codings": 0}
+        if len(cid_values) == 0:
+            return counts
+        placeholders = ",".join(["?"] * len(cid_values))
+        params = tuple(cid_values)
+        for table_name in ("code_text", "code_av", "code_image"):
+            if not self._table_exists_cur(cur, table_name):
+                continue
+            cur.execute(
+                f"SELECT count(*), sum(case when owner != ? then 1 else 0 end) "
+                f"FROM {table_name} WHERE cid IN ({placeholders})",
+                tuple([self.AI_AGENT_OWNER, *params]),
+            )
+            row = cur.fetchone()
+            table_count = int((row or [0])[0] or 0)
+            table_non_ai = int((row or [0, 0])[1] or 0)
+            counts[table_name] = table_count
+            counts["total"] += table_count
+            counts["non_ai_codings"] += table_non_ai
+        return counts
+
+    def _build_category_tree_impact(self, cur: sqlite3.Cursor, subtree: Dict[str, Any]) -> Dict[str, Any]:
+        categories = subtree.get("categories", [])
+        codes = subtree.get("codes", [])
+        code_ids = [int(item.get("cid", -1)) for item in codes if int(item.get("cid", -1)) > 0]
+        coding_counts = self._count_codings_for_code_ids(cur, code_ids)
+        return {
+            "counts": {
+                "categories": len(categories),
+                "codes": len(codes),
+                "text_codings": int(coding_counts.get("code_text", 0)),
+                "av_codings": int(coding_counts.get("code_av", 0)),
+                "image_codings": int(coding_counts.get("code_image", 0)),
+                "total_codings": int(coding_counts.get("total", 0)),
+                "non_ai_codings": int(coding_counts.get("non_ai_codings", 0)),
+            },
+            "examples": {
+                "categories": [str(item.get("name", "")) for item in categories[:5]],
+                "codes": [str(item.get("name", "")) for item in codes[:5]],
+            },
+        }
+
+    def _build_code_impact(self, cur: sqlite3.Cursor, code: Dict[str, Any]) -> Dict[str, Any]:
+        cid = int(code.get("cid", -1))
+        coding_counts = self._count_codings_for_code_ids(cur, [cid] if cid > 0 else [])
+        return {
+            "counts": {
+                "codes": 1,
+                "text_codings": int(coding_counts.get("code_text", 0)),
+                "av_codings": int(coding_counts.get("code_av", 0)),
+                "image_codings": int(coding_counts.get("code_image", 0)),
+                "total_codings": int(coding_counts.get("total", 0)),
+                "non_ai_codings": int(coding_counts.get("non_ai_codings", 0)),
+            },
+            "examples": {
+                "codes": [str(code.get("name", ""))],
+            },
+        }
+
+    def _build_code_snapshot(self, cur: sqlite3.Cursor, cid: int) -> Dict[str, Any]:
+        code = self._fetch_code_row_cur(cur, cid)
+        if code is None:
+            raise ValueError(f"Code id {cid} not found.")
+        return {
+            "tables": {
+                "code_name": [dict(code)],
+                "code_text": self._collect_table_rows_by_cids(cur, "code_text", [cid]),
+                "code_av": self._collect_table_rows_by_cids(cur, "code_av", [cid]),
+                "code_image": self._collect_table_rows_by_cids(cur, "code_image", [cid]),
+            }
+        }
+
+    def _build_category_tree_snapshot(self, cur: sqlite3.Cursor, subtree: Dict[str, Any]) -> Dict[str, Any]:
+        categories = [dict(item) for item in subtree.get("categories", [])]
+        codes = [dict(item) for item in subtree.get("codes", [])]
+        code_ids = [int(item.get("cid", -1)) for item in codes if int(item.get("cid", -1)) > 0]
+        return {
+            "tables": {
+                "code_cat": categories,
+                "code_name": codes,
+                "code_text": self._collect_table_rows_by_cids(cur, "code_text", code_ids),
+                "code_av": self._collect_table_rows_by_cids(cur, "code_av", code_ids),
+                "code_image": self._collect_table_rows_by_cids(cur, "code_image", code_ids),
+            }
+        }
+
+    def _delete_codings_for_code_ids(self, cur: sqlite3.Cursor, code_ids: List[int]) -> None:
+        if len(code_ids) == 0:
+            return
+        placeholders = ",".join(["?"] * len(code_ids))
+        params = tuple(code_ids)
+        for table_name in ("code_text", "code_av", "code_image"):
+            if not self._table_exists_cur(cur, table_name):
+                continue
+            cur.execute(f"DELETE FROM {table_name} WHERE cid IN ({placeholders})", params)
+
     def _normalize_hex_color(self, value: Any) -> str:
         if value is None:
             return ""
@@ -960,6 +2050,12 @@ class AiMcpServer:
 
     def _fetch_source_name(self, doc_id: int) -> Optional[str]:
         row = self._fetchone("SELECT name FROM source WHERE id=?", (doc_id,))
+        if row is None:
+            return None
+        return row[0]
+
+    def _fetch_category_name(self, catid: int) -> Optional[str]:
+        row = self._fetchone("SELECT name FROM code_cat WHERE catid=?", (catid,))
         if row is None:
             return None
         return row[0]

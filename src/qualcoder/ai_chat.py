@@ -323,13 +323,15 @@ class DialogAIChat(QtWidgets.QDialog):
             ai_permissions = 1
         else:
             ai_permissions = combo_index
-        if self.app.settings.get('ai_permissions') == ai_permissions:
+        previous_permissions = self.app.settings.get('ai_permissions', 1)
+        if previous_permissions == ai_permissions:
             return
         self.app.settings['ai_permissions'] = ai_permissions
         try:
             self.app.write_config_ini(self.app.settings, self.app.ai_models)
         except Exception as e_:
             logger.debug(f"Could not persist ai permissions setting: {e_}")
+        self._log_ai_permissions_env_update(previous_permissions, ai_permissions)
         
     def init_ai_chat(self, app=None):
         if app is not None:
@@ -759,12 +761,35 @@ class DialogAIChat(QtWidgets.QDialog):
         """Return the current AI permissions label used in agent instructions."""
 
         ai_permissions = self.app.settings.get('ai_permissions', 1)
+        return self._ai_permissions_label_for_value(ai_permissions)
+
+    def _ai_permissions_label_for_value(self, ai_permissions: int) -> str:
+        """Return the display label for one AI permissions value."""
+
         labels = {
             0: 'Read-only',
             1: 'Sandboxed',
             2: 'Full access',
         }
         return labels.get(ai_permissions, 'Sandboxed')
+
+    def _log_ai_permissions_env_update(self, old_value: int, new_value: int) -> None:
+        """Persist one hidden synthetic chat event for an AI permissions change."""
+
+        if self.current_chat_idx < 0 or self.current_chat_idx >= len(self.chat_list):
+            return
+        analysis_type = str(self.chat_list[self.current_chat_idx][2])
+        if not self._is_agent_chat_type(analysis_type):
+            return
+        old_label = self._ai_permissions_label_for_value(old_value)
+        new_label = self._ai_permissions_label_for_value(new_value)
+        if old_label == new_label:
+            return
+        content = _('System event: AI Permissions changed from "{old}" to "{new}".').format(
+            old=old_label,
+            new=new_label,
+        )
+        self.process_message('env_update', content, self.current_chat_idx)
 
     def _render_agent_md_content(self, content: str) -> str:
         """Replace supported runtime placeholders in agent.md."""
@@ -1862,6 +1887,8 @@ data collected. This information will accompany every prompt sent to the AI, res
                 messages.append(SystemMessage(content=msg[4]))
             elif msg[2] == 'instruct' or msg[2] == 'user':
                 messages.append(HumanMessage(content=msg[4]))
+            elif msg[2] == 'env_update':
+                messages.append(HumanMessage(content=msg[4]))
             elif msg[2] == 'ai':
                 messages.append(AIMessage(content=msg[4]))
             elif msg[2] == 'tool_call':
@@ -2004,6 +2031,9 @@ data collected. This information will accompany every prompt sent to the AI, res
         elif msg_type == 'agent_state':
             # compact state memory for future turns (persisted, not rendered)
             self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+        elif msg_type == 'env_update':
+            # synthetic environment events are persisted for later turns, but not rendered
+            self.history_add_message(msg_type, 'system_event', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'instruct':
             # instruct messages are only send to the AI, but not shown on screen
             # Other than system messages, instruct messages are send immediatly and will produce an answer that is shown on screen
@@ -2101,6 +2131,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Execute the plan directly unless required inputs are missing, the scope is genuinely ambiguous, or the user must decide on a methodological choice first.\n"
             "- Reading: Prefer specific reads over broad reads. Reading full empirical documents can be costly. Do this only when it is really needed.\n"
             "- For write actions, call tools/list before the first tools/call in this turn to verify available tool names and expected arguments.\n"
+            "- For high-impact category/code move or delete actions, do not execute the write tool immediately. "
+            "First call the matching preview tool, review the impact, and then ask the user for confirmation.\n"
+            "- After a high-impact preview, keep the actual execute tool call in proposed_next_calls until the user confirms. "
+            "When executing, include the preview_token returned by the preview tool.\n"
             "- If the conversation contains an Agent state snapshot with pending_user_decision and the latest user message confirms it, execute pending_user_decision.proposed_next_calls now.\n"
             "- If the user explicitly asks to create or change project data now, prioritize execution: set needs_mcp=true and include concrete tools/call write actions in calls.\n"
             # "- For explicit execution requests, set user_decision_required=false by default. Use true only when required inputs are missing or the scope is ambiguous.\n"
@@ -2141,6 +2175,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- If you need additional input, methodological decisions, or confirmation by the user, ask them by setting user_decision_required=true and providing a concise, natural language question in decision_question.\n"
             "- If user_decision_required=true, put the suggested follow-up MCP actions into proposed_next_calls and keep revised_calls empty.\n"
             "- If the user explicitly requested write actions, include revised_calls that execute the remaining write actions whenever this is possible.\n"
+            "- For category/code move or delete actions, use preview before execute: after a preview, summarize the impact, ask for confirmation, and place the execute tool with the returned preview_token into proposed_next_calls.\n"
             "- Do not stop with explanations only if executable write actions are still pending.\n"
             "- If the task was about collecting information and you now have enough evidence for a final answer, set enough_information=true and revised_calls=[].\n"
             "- If more information or actions are still needed, set enough_information=false and propose only the necessary revised_calls.\n"
@@ -2247,6 +2282,18 @@ data collected. This information will accompany every prompt sent to the AI, res
                         "codes/create_category",
                         "codes/create_code",
                         "codes/create_text_coding",
+                        "codes/preview_move_category",
+                        "codes/preview_delete_category",
+                        "codes/preview_move_code",
+                        "codes/preview_delete_code",
+                        "codes/rename_category",
+                        "codes/rename_code",
+                        "codes/move_category",
+                        "codes/move_code",
+                        "codes/delete_category",
+                        "codes/delete_code",
+                        "codes/move_text_coding",
+                        "codes/delete_text_coding",
                     ],
                 },
                 "arguments": {
@@ -3458,7 +3505,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         continue
                     msg_type = str(item.get("msg_type", "")).strip()
                     msg_content = str(item.get("msg_content", ""))
-                    if msg_type in ("tool_call", "tool_result", "single_instruct", "agent_state"):
+                    if msg_type in ("tool_call", "tool_result", "single_instruct", "agent_state", "env_update"):
                         self.process_message(
                             msg_type,
                             msg_content,
@@ -3507,7 +3554,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         if isinstance(payload, dict):
             chat_idx = int(payload.get("chat_idx", self.current_chat_idx))
             msg_type = str(payload.get("msg_type", "")).strip()
-            if msg_type in ("tool_call", "tool_result", "single_instruct", "agent_state"):
+            if msg_type in ("tool_call", "tool_result", "single_instruct", "agent_state", "env_update"):
                 msg_content = str(payload.get("msg_content", ""))
                 if msg_content != "":
                     self.process_message(

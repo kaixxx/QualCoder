@@ -1038,6 +1038,19 @@ class AiLLM():
         except Exception:
             return ""
 
+    def _lookup_category_name(self, catid: int) -> str:
+        if catid <= 0:
+            return ""
+        try:
+            cur = self.app.conn.cursor()
+            cur.execute("SELECT name FROM code_cat WHERE catid=?", (catid,))
+            row = cur.fetchone()
+            if row is None:
+                return ""
+            return str(row[0] if row[0] is not None else "").strip()
+        except Exception:
+            return ""
+
     def _lookup_source_name(self, fid: int) -> str:
         if fid <= 0:
             return ""
@@ -1063,6 +1076,148 @@ class AiLLM():
         if remaining > 0:
             line += _(" (+{0} more)").format(remaining)
         return line
+
+    def _format_ai_change_scope(self, categories: int = 0, codes: int = 0, codings: int = 0) -> str:
+        """Return one compact scope summary for AI change descriptions."""
+
+        parts = []
+        if int(categories) > 0:
+            parts.append(str(int(categories)) + " " + _("category(ies)"))
+        if int(codes) > 0:
+            parts.append(str(int(codes)) + " " + _("code(s)"))
+        if int(codings) > 0:
+            parts.append(str(int(codings)) + " " + _("coding(s)"))
+        return ", ".join(parts)
+
+    def _ai_change_operation_summary(self, op: dict, allow_db_lookup: bool = False) -> str:
+        """Build one user-facing summary line for an AI change operation."""
+
+        if not isinstance(op, dict):
+            return ""
+        op_type = str(op.get("type", "")).strip()
+
+        if op_type == "create_category":
+            name = self._short_change_label(op.get("name", ""))
+            return (_("Created category: ") + name) if name != "" else ""
+
+        if op_type == "create_code":
+            name = self._short_change_label(op.get("name", ""))
+            return (_("Created code: ") + name) if name != "" else ""
+
+        if op_type == "create_coding_text":
+            cid = int(op.get("cid", -1))
+            fid = int(op.get("fid", -1))
+            code_name = self._short_change_label(op.get("code_name", ""))
+            source_name = self._short_change_label(op.get("source_name", ""))
+            if allow_db_lookup and code_name == "":
+                code_name = self._short_change_label(self._lookup_code_name(cid))
+            if allow_db_lookup and source_name == "":
+                source_name = self._short_change_label(self._lookup_source_name(fid))
+            label = " @ ".join([item for item in (code_name, source_name) if item != ""])
+            if label == "":
+                label = _("Text coding")
+            return _("Created text coding: ") + label
+
+        if op_type == "rename_category":
+            old_name = self._short_change_label(op.get("old_name", ""))
+            new_name = self._short_change_label(op.get("new_name", ""))
+            if old_name == "" and allow_db_lookup:
+                old_name = self._short_change_label(self._lookup_category_name(int(op.get("catid", -1))))
+            if old_name == "" or new_name == "":
+                return ""
+            return _("Renamed category: ") + old_name + " -> " + new_name
+
+        if op_type == "rename_code":
+            old_name = self._short_change_label(op.get("old_name", ""))
+            new_name = self._short_change_label(op.get("new_name", ""))
+            if old_name == "" and allow_db_lookup:
+                old_name = self._short_change_label(self._lookup_code_name(int(op.get("cid", -1))))
+            if old_name == "" or new_name == "":
+                return ""
+            return _("Renamed code: ") + old_name + " -> " + new_name
+
+        if op_type == "move_category_tree":
+            name = self._short_change_label(op.get("name", ""))
+            if name == "" and allow_db_lookup:
+                name = self._short_change_label(self._lookup_category_name(int(op.get("root_catid", -1))))
+            impact = op.get("impact", {})
+            counts = impact.get("counts", {}) if isinstance(impact, dict) else {}
+            scope = self._format_ai_change_scope(
+                categories=int(counts.get("categories", 0)),
+                codes=int(counts.get("codes", 0)),
+                codings=int(counts.get("total_codings", 0)),
+            )
+            if name == "":
+                return ""
+            if scope != "":
+                return _("Moved category tree: ") + name + " (" + scope + ")"
+            return _("Moved category tree: ") + name
+
+        if op_type == "move_code":
+            name = self._short_change_label(op.get("name", ""))
+            if name == "" and allow_db_lookup:
+                name = self._short_change_label(self._lookup_code_name(int(op.get("cid", -1))))
+            if name == "":
+                return ""
+            return _("Moved code: ") + name
+
+        if op_type == "move_coding_text":
+            old_cid = int(op.get("before", {}).get("cid", -1))
+            new_cid = int(op.get("after", {}).get("cid", -1))
+            old_name = self._short_change_label(self._lookup_code_name(old_cid)) if allow_db_lookup else ""
+            new_name = self._short_change_label(self._lookup_code_name(new_cid)) if allow_db_lookup else ""
+            if old_name != "" and new_name != "":
+                return _("Moved text coding: ") + old_name + " -> " + new_name
+            return _("Moved text coding")
+
+        if op_type == "delete_category_tree":
+            name = self._short_change_label(op.get("name", ""))
+            counts = self._snapshot_counts(op)
+            scope = self._format_ai_change_scope(
+                categories=int(counts.get("categories", 0)),
+                codes=int(counts.get("codes", 0)),
+                codings=(
+                    int(counts.get("text_codings", 0)) +
+                    int(counts.get("av_codings", 0)) +
+                    int(counts.get("image_codings", 0))
+                ),
+            )
+            if name == "":
+                return ""
+            if scope != "":
+                return _("Deleted category tree: ") + name + " (" + scope + ")"
+            return _("Deleted category tree: ") + name
+
+        if op_type == "delete_code":
+            name = self._short_change_label(op.get("name", ""))
+            counts = self._snapshot_counts(op)
+            codings = (
+                int(counts.get("text_codings", 0)) +
+                int(counts.get("av_codings", 0)) +
+                int(counts.get("image_codings", 0))
+            )
+            if name == "" and allow_db_lookup:
+                name = self._short_change_label(self._lookup_code_name(int(op.get("cid", -1))))
+            if name == "":
+                return ""
+            if codings > 0:
+                return _("Deleted code: ") + name + " (" + str(codings) + " " + _("coding(s)") + ")"
+            return _("Deleted code: ") + name
+
+        if op_type == "delete_coding_text":
+            snapshot = self._snapshot_tables(op)
+            code_rows = snapshot.get("code_text", [])
+            if isinstance(code_rows, list) and len(code_rows) > 0 and isinstance(code_rows[0], dict):
+                cid = int(code_rows[0].get("cid", -1))
+                fid = int(code_rows[0].get("fid", -1))
+                code_name = self._short_change_label(self._lookup_code_name(cid)) if allow_db_lookup else ""
+                source_name = self._short_change_label(self._lookup_source_name(fid)) if allow_db_lookup else ""
+                label = " @ ".join([item for item in (code_name, source_name) if item != ""])
+                if label != "":
+                    return _("Deleted text coding: ") + label
+            return _("Deleted text coding")
+
+        return ""
 
     def _format_ai_change_age(self, created_at: str) -> str:
         """Return a relative age label for one stored AI change set."""
@@ -1136,50 +1291,23 @@ class AiLLM():
         category_count = 0
         code_count = 0
         coding_count = 0
-        category_names = []
-        code_names = []
-        coding_targets = {}
-        seen_category_names = set()
-        seen_code_names = set()
+        operation_summaries = []
+        seen_operation_summaries = set()
 
         for op in operations:
             if not isinstance(op, dict):
                 continue
             op_type = str(op.get("type", "")).strip()
-            if op_type == "create_category":
+            if op_type in ("create_category", "rename_category", "move_category_tree", "delete_category_tree"):
                 category_count += 1
-                cat_name = self._short_change_label(op.get("name", ""))
-                if cat_name != "" and cat_name not in seen_category_names:
-                    seen_category_names.add(cat_name)
-                    category_names.append(cat_name)
-            elif op_type == "create_code":
+            elif op_type in ("create_code", "rename_code", "move_code", "delete_code"):
                 code_count += 1
-                code_name = self._short_change_label(op.get("name", ""))
-                if code_name != "" and code_name not in seen_code_names:
-                    seen_code_names.add(code_name)
-                    code_names.append(code_name)
-            elif op_type == "create_coding_text":
+            elif op_type in ("create_coding_text", "move_coding_text", "delete_coding_text"):
                 coding_count += 1
-                cid = int(op.get("cid", -1))
-                fid = int(op.get("fid", -1))
-                code_name = self._short_change_label(op.get("code_name", ""))
-                source_name = self._short_change_label(op.get("source_name", ""))
-                if allow_db_lookup and code_name == "":
-                    code_name = self._short_change_label(self._lookup_code_name(cid))
-                if allow_db_lookup and source_name == "":
-                    source_name = self._short_change_label(self._lookup_source_name(fid))
-                if code_name == "":
-                    if cid > 0:
-                        code_name = _("Code") + " #" + str(cid)
-                    else:
-                        code_name = _("Code")
-                if source_name == "":
-                    if fid > 0:
-                        source_name = _("Document") + " #" + str(fid)
-                    else:
-                        source_name = _("Document")
-                key = code_name + " @ " + source_name
-                coding_targets[key] = int(coding_targets.get(key, 0)) + 1
+            summary = self._ai_change_operation_summary(op, allow_db_lookup=allow_db_lookup)
+            if summary != "" and summary not in seen_operation_summaries:
+                seen_operation_summaries.add(summary)
+                operation_summaries.append(summary)
 
         parts = []
         if category_count > 0:
@@ -1208,22 +1336,12 @@ class AiLLM():
                 title += "[" + time_label + "]"
         first_line = title if title != "" else ", ".join(parts)
         lines = [first_line]
-        categories_line = self._format_name_line(_("Categories: "), category_names)
-        if categories_line != "":
-            lines.append(categories_line)
-        codes_line = self._format_name_line(_("Codes: "), code_names)
-        if codes_line != "":
-            lines.append(codes_line)
-        if len(coding_targets) > 0:
-            shown_targets = []
-            for label, count in coding_targets.items():
-                if int(count) > 1:
-                    shown_targets.append(label + " (" + str(int(count)) + ")")
-                else:
-                    shown_targets.append(label)
-            codings_line = self._format_name_line(_("Codings: "), shown_targets)
-            if codings_line != "":
-                lines.append(codings_line)
+        shown_summaries = operation_summaries[:4]
+        for summary in shown_summaries:
+            lines.append(summary)
+        remaining = len(operation_summaries) - len(shown_summaries)
+        if remaining > 0:
+            lines.append(_("Additional actions: ") + str(remaining))
         change_set["name"] = "\n".join(lines)
 
     def discard_empty_ai_change_set(self, set_id: str) -> None:
@@ -1326,6 +1444,136 @@ class AiLLM():
             return False, "changed", row
         return True, "ok", row
 
+    def _can_undo_rename_category(self, cur, op):
+        catid = int(op.get("catid", -1))
+        if catid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT catid, name FROM code_cat WHERE catid=?", (catid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_name = str(op.get("new_name", "")).strip()
+        if expected_name != "" and str(row[1]) != expected_name:
+            return False, "changed", row
+        return True, "ok", row
+
+    def _can_undo_rename_code(self, cur, op):
+        cid = int(op.get("cid", -1))
+        if cid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT cid, name FROM code_name WHERE cid=?", (cid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_name = str(op.get("new_name", "")).strip()
+        if expected_name != "" and str(row[1]) != expected_name:
+            return False, "changed", row
+        return True, "ok", row
+
+    def _can_undo_move_category_tree(self, cur, op):
+        catid = int(op.get("root_catid", op.get("catid", -1)))
+        if catid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT catid, supercatid FROM code_cat WHERE catid=?", (catid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_supercatid = op.get("after", {}).get("supercatid", None)
+        if row[1] != expected_supercatid:
+            return False, "changed", row
+        return True, "ok", row
+
+    def _can_undo_move_code(self, cur, op):
+        cid = int(op.get("cid", -1))
+        if cid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT cid, catid FROM code_name WHERE cid=?", (cid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_catid = op.get("after", {}).get("catid", None)
+        if row[1] != expected_catid:
+            return False, "changed", row
+        return True, "ok", row
+
+    def _can_undo_move_coding_text(self, cur, op):
+        ctid = int(op.get("ctid", -1))
+        if ctid <= 0:
+            return False, "invalid", None
+        cur.execute("SELECT ctid, cid FROM code_text WHERE ctid=?", (ctid,))
+        row = cur.fetchone()
+        if row is None:
+            return False, "missing", None
+        expected_cid = int(op.get("after", {}).get("cid", -1))
+        if expected_cid > 0 and row[1] != expected_cid:
+            return False, "changed", row
+        return True, "ok", row
+
+    def _snapshot_tables(self, op):
+        snapshot = op.get("snapshot", {})
+        if not isinstance(snapshot, dict):
+            return {}
+        tables = snapshot.get("tables", {})
+        if not isinstance(tables, dict):
+            return {}
+        return tables
+
+    def _can_restore_snapshot(self, cur, op):
+        tables = self._snapshot_tables(op)
+        if len(tables) == 0:
+            return False, "invalid"
+        primary_keys = {
+            "code_cat": "catid",
+            "code_name": "cid",
+            "code_text": "ctid",
+            "code_av": "avid",
+            "code_image": "imid",
+        }
+        for table_name, pk_name in primary_keys.items():
+            rows = tables.get(table_name, [])
+            if not isinstance(rows, list):
+                continue
+            if len(rows) == 0:
+                continue
+            if not self._table_exists(table_name):
+                return False, "invalid"
+            for row in rows:
+                if not isinstance(row, dict):
+                    return False, "invalid"
+                pk_value = row.get(pk_name, None)
+                if pk_value is None:
+                    return False, "invalid"
+                cur.execute(f"SELECT 1 FROM {table_name} WHERE {pk_name}=?", (pk_value,))
+                if cur.fetchone() is not None:
+                    return False, "changed"
+        return True, "ok"
+
+    def _restore_snapshot(self, cur, op):
+        tables = self._snapshot_tables(op)
+        restore_order = ("code_cat", "code_name", "code_text", "code_av", "code_image")
+        for table_name in restore_order:
+            rows = tables.get(table_name, [])
+            if not isinstance(rows, list) or len(rows) == 0:
+                continue
+            for row in rows:
+                if not isinstance(row, dict) or len(row) == 0:
+                    continue
+                columns = list(row.keys())
+                placeholders = ",".join(["?"] * len(columns))
+                sql = f"INSERT INTO {table_name} ({','.join(columns)}) VALUES ({placeholders})"
+                values = [row.get(column, None) for column in columns]
+                cur.execute(sql, values)
+
+    def _snapshot_counts(self, op):
+        tables = self._snapshot_tables(op)
+        return {
+            "categories": len(tables.get("code_cat", [])) if isinstance(tables.get("code_cat", []), list) else 0,
+            "codes": len(tables.get("code_name", [])) if isinstance(tables.get("code_name", []), list) else 0,
+            "text_codings": len(tables.get("code_text", [])) if isinstance(tables.get("code_text", []), list) else 0,
+            "av_codings": len(tables.get("code_av", [])) if isinstance(tables.get("code_av", []), list) else 0,
+            "image_codings": len(tables.get("code_image", [])) if isinstance(tables.get("code_image", []), list) else 0,
+        }
+
     def _count_code_codings(self, cur, cid: int) -> tuple[int, int]:
         total = 0
         non_ai = 0
@@ -1354,6 +1602,14 @@ class AiLLM():
         coding_ctids = set()
         skipped_changed = 0
         skipped_missing = 0
+        restore_categories = 0
+        restore_codes = 0
+        restore_codings = 0
+        revert_renamed_categories = 0
+        revert_renamed_codes = 0
+        revert_moved_categories = 0
+        revert_moved_codes = 0
+        revert_moved_codings = 0
 
         for op in operations:
             if not isinstance(op, dict):
@@ -1382,6 +1638,61 @@ class AiLLM():
                     cid = int(op.get("cid", -1))
                     if ctid > 0 and cid not in code_ids:
                         coding_ctids.add(ctid)
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "rename_category":
+                ok, reason, row_data = self._can_undo_rename_category(cur, op)
+                if ok:
+                    revert_renamed_categories += 1
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "rename_code":
+                ok, reason, row_data = self._can_undo_rename_code(cur, op)
+                if ok:
+                    revert_renamed_codes += 1
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "move_category_tree":
+                ok, reason, row_data = self._can_undo_move_category_tree(cur, op)
+                if ok:
+                    revert_moved_categories += 1
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "move_code":
+                ok, reason, row_data = self._can_undo_move_code(cur, op)
+                if ok:
+                    revert_moved_codes += 1
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type == "move_coding_text":
+                ok, reason, row_data = self._can_undo_move_coding_text(cur, op)
+                if ok:
+                    revert_moved_codings += 1
+                elif reason == "changed":
+                    skipped_changed += 1
+                elif reason == "missing":
+                    skipped_missing += 1
+            elif op_type in ("delete_category_tree", "delete_code", "delete_coding_text"):
+                ok, reason = self._can_restore_snapshot(cur, op)
+                if ok:
+                    counts = self._snapshot_counts(op)
+                    restore_categories += int(counts.get("categories", 0))
+                    restore_codes += int(counts.get("codes", 0))
+                    restore_codings += (
+                        int(counts.get("text_codings", 0)) +
+                        int(counts.get("av_codings", 0)) +
+                        int(counts.get("image_codings", 0))
+                    )
                 elif reason == "changed":
                     skipped_changed += 1
                 elif reason == "missing":
@@ -1439,6 +1750,25 @@ class AiLLM():
                     _("Warning: ") + str(standalone_codings_non_ai) +
                     _(" standalone coding(s) are not owned by 'AI Agent'.")
                 )
+        if restore_categories > 0 or restore_codes > 0 or restore_codings > 0:
+            parts = []
+            if restore_categories > 0:
+                parts.append(str(restore_categories) + _(" category(ies)"))
+            if restore_codes > 0:
+                parts.append(str(restore_codes) + _(" code(s)"))
+            if restore_codings > 0:
+                parts.append(str(restore_codings) + _(" coding(s)"))
+            lines.append(_("Undo will restore ") + ", ".join(parts) + ".")
+        if revert_renamed_categories > 0:
+            lines.append(str(revert_renamed_categories) + _(" renamed category(ies) would be restored to their old names."))
+        if revert_renamed_codes > 0:
+            lines.append(str(revert_renamed_codes) + _(" renamed code(s) would be restored to their old names."))
+        if revert_moved_categories > 0:
+            lines.append(str(revert_moved_categories) + _(" moved category tree(s) would be moved back to their previous parent."))
+        if revert_moved_codes > 0:
+            lines.append(str(revert_moved_codes) + _(" moved code(s) would be moved back to their previous category."))
+        if revert_moved_codings > 0:
+            lines.append(str(revert_moved_codings) + _(" moved text coding(s) would be moved back to their previous code."))
         if skipped_changed > 0:
             lines.append(
                 str(skipped_changed) + _(" operation(s) appear changed since creation and may be skipped.")
@@ -1525,6 +1855,108 @@ class AiLLM():
                     cur.execute("DELETE FROM code_cat WHERE catid=?", (catid,))
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                    continue
+
+                if op_type == "rename_category":
+                    ok, reason, row = self._can_undo_rename_category(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cur.execute(
+                        "UPDATE code_cat SET name=? WHERE catid=?",
+                        (str(op.get("old_name", "")), int(row[0])),
+                    )
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type == "rename_code":
+                    ok, reason, row = self._can_undo_rename_code(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cur.execute(
+                        "UPDATE code_name SET name=? WHERE cid=?",
+                        (str(op.get("old_name", "")), int(row[0])),
+                    )
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type == "move_category_tree":
+                    ok, reason, row = self._can_undo_move_category_tree(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cur.execute(
+                        "UPDATE code_cat SET supercatid=? WHERE catid=?",
+                        (op.get("before", {}).get("supercatid", None), int(row[0])),
+                    )
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type == "move_code":
+                    ok, reason, row = self._can_undo_move_code(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cur.execute(
+                        "UPDATE code_name SET catid=? WHERE cid=?",
+                        (op.get("before", {}).get("catid", None), int(row[0])),
+                    )
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type == "move_coding_text":
+                    ok, reason, row = self._can_undo_move_coding_text(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        elif reason == "missing":
+                            stats["skipped_missing"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    cur.execute(
+                        "UPDATE code_text SET cid=? WHERE ctid=?",
+                        (int(op.get("before", {}).get("cid", -1)), int(row[0])),
+                    )
+                    if cur.rowcount > 0:
+                        stats["undone"] += 1
+                    continue
+
+                if op_type in ("delete_category_tree", "delete_code", "delete_coding_text"):
+                    ok, reason = self._can_restore_snapshot(cur, op)
+                    if not ok:
+                        if reason == "changed":
+                            stats["skipped_changed"] += 1
+                        else:
+                            stats["skipped_invalid"] += 1
+                        continue
+                    self._restore_snapshot(cur, op)
+                    stats["undone"] += 1
                     continue
 
                 stats["skipped_invalid"] += 1

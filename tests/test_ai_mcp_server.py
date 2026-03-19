@@ -73,8 +73,16 @@ class TestAiMcpServer(TestCase):
             (2, "\U0001F4CC Speakers", "default", "2026-02-13", "speaker memo", None),
         )
         cur.execute(
+            "INSERT INTO code_cat (catid, name, owner, date, memo, supercatid) VALUES (?,?,?,?,?,?)",
+            (3, "cat child", "default", "2026-02-13", "child memo", 1),
+        )
+        cur.execute(
             "INSERT INTO code_name (cid, name, memo, catid, owner, date, color) VALUES (?,?,?,?,?,?,?)",
             (1, "code one", "code memo", 1, "default", "2026-02-13", "#AAAAAA"),
+        )
+        cur.execute(
+            "INSERT INTO code_name (cid, name, memo, catid, owner, date, color) VALUES (?,?,?,?,?,?,?)",
+            (2, "code child", "child code memo", 3, "default", "2026-02-13", "#BBBBBB"),
         )
         cur.execute(
             "INSERT INTO journal (jid, name, jentry, date, owner) VALUES (?,?,?,?,?)",
@@ -97,6 +105,7 @@ class TestAiMcpServer(TestCase):
                 (4, 1, 1, "delta", 6, 11, "default", "2026-02-13", "", None, 0),
                 (5, 1, 2, "epsilon", 11, 18, "default", "2026-02-09", "", None, 0),
                 (6, 1, 2, "hidden quote", 20, 31, "hidden_user", "2026-02-14", "", None, 0),
+                (7, 2, 1, "cde", 2, 5, "default", "2026-02-15", "", None, 0),
             ],
         )
         cur.execute(
@@ -140,6 +149,9 @@ class TestAiMcpServer(TestCase):
         self.assertIn("codes/create_category", names)
         self.assertIn("codes/create_code", names)
         self.assertIn("codes/create_text_coding", names)
+        self.assertIn("codes/preview_delete_category", names)
+        self.assertIn("codes/rename_code", names)
+        self.assertIn("codes/delete_text_coding", names)
 
     def test_tool_create_category(self):
         req = {
@@ -226,6 +238,108 @@ class TestAiMcpServer(TestCase):
                 self.assertIn("Read-only", payload["error"]["message"])
 
         self.assertEqual([], self.ai_recorded_changes)
+
+    def test_full_access_tools_return_error_when_ai_permissions_are_sandboxed(self):
+        self.app.settings["ai_permissions"] = 1
+        req = {
+            "jsonrpc": "2.0",
+            "id": 41,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/rename_code",
+                "arguments": {"cid": 1, "new_name": "code renamed"},
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        self.assertTrue(res["result"]["isError"])
+        payload = res["result"]["structuredContent"]
+        self.assertEqual("ai_permissions_denied", payload["error"]["code"])
+        self.assertIn("Full access", payload["error"]["message"])
+
+    def test_full_access_rename_code(self):
+        self.app.settings["ai_permissions"] = 2
+        req = {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/rename_code",
+                "arguments": {"cid": 1, "new_name": "code renamed"},
+                "_ai_change_set_id": "run-rename",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["renamed"])
+        self.assertEqual("code renamed", payload["code"]["new_name"])
+        self.assertEqual("rename_code", self.ai_recorded_changes[-1][1]["type"])
+
+    def test_preview_and_delete_category_tree(self):
+        self.app.settings["ai_permissions"] = 2
+        preview_req = {
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/preview_delete_category",
+                "arguments": {"catid": 1},
+            },
+        }
+        preview_res = self.server.handle_request(preview_req)
+        self.assertIn("result", preview_res)
+        preview_payload = preview_res["result"]["structuredContent"]
+        self.assertEqual(2, preview_payload["impact"]["counts"]["categories"])
+        self.assertEqual(2, preview_payload["impact"]["counts"]["codes"])
+        self.assertEqual(7, preview_payload["impact"]["counts"]["total_codings"])
+        preview_token = preview_payload["preview_token"]
+        self.assertTrue(isinstance(preview_token, str))
+        self.assertTrue(len(preview_token) > 10)
+
+        delete_req = {
+            "jsonrpc": "2.0",
+            "id": 44,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/delete_category",
+                "arguments": {"catid": 1, "preview_token": preview_token},
+                "_ai_change_set_id": "run-delete-tree",
+            },
+        }
+        delete_res = self.server.handle_request(delete_req)
+        self.assertIn("result", delete_res)
+        delete_payload = delete_res["result"]["structuredContent"]
+        self.assertTrue(delete_payload["deleted"])
+        cur = self.conn.cursor()
+        cur.execute("SELECT count(*) FROM code_cat WHERE catid IN (1,3)")
+        self.assertEqual(0, cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM code_name WHERE cid IN (1,2)")
+        self.assertEqual(0, cur.fetchone()[0])
+        cur.execute("SELECT count(*) FROM code_text WHERE cid IN (1,2)")
+        self.assertEqual(0, cur.fetchone()[0])
+        self.assertEqual("delete_category_tree", self.ai_recorded_changes[-1][1]["type"])
+
+    def test_full_access_move_text_coding(self):
+        self.app.settings["ai_permissions"] = 2
+        req = {
+            "jsonrpc": "2.0",
+            "id": 45,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/move_text_coding",
+                "arguments": {"ctid": 1, "new_cid": 2},
+                "_ai_change_set_id": "run-move-coding",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["moved"])
+        cur = self.conn.cursor()
+        cur.execute("SELECT cid FROM code_text WHERE ctid=1")
+        self.assertEqual(2, cur.fetchone()[0])
+        self.assertEqual("move_coding_text", self.ai_recorded_changes[-1][1]["type"])
 
     def test_codes_tree_contains_structure_rules_and_speaker_convention(self):
         req = {"jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": {"uri": "qualcoder://codes/tree"}}
