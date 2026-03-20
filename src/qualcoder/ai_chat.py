@@ -2551,7 +2551,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         return normalized
 
     def _ensure_skill_prompt_call(self, skill_decision: Any, skill_name: Any,
-                                  calls: List[Dict[str, Any]], mcp_cache: Dict[str, Dict[str, Any]],
+                                  calls: List[Dict[str, Any]],
                                   max_calls: Optional[int] = None) -> List[Dict[str, Any]]:
         """Ensure prompts/get is planned when the model decided to use a skill."""
 
@@ -2564,9 +2564,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             return calls
 
         wanted_params = {"name": resolved_name}
-        wanted_key = self._mcp_call_key("prompts/get", wanted_params)
-        if wanted_key in mcp_cache:
-            return calls
 
         for call in calls:
             if not isinstance(call, dict):
@@ -2644,73 +2641,12 @@ data collected. This information will accompany every prompt sent to the AI, res
                 return False
         return default
 
-    def _parse_mcp_agent_action(self, raw_text: str) -> Dict[str, Any]:
-        """Interpret one structured control message from the model."""
-
-        try:
-            data = json.loads(raw_text)
-        except Exception:
-            return {"action": "done"}
-        if not isinstance(data, dict):
-            return {"action": "done"}
-
-        action = str(data.get("action", "")).strip().lower()
-        if action in ("done", "finish", "finished"):
-            return {"action": "done"}
-
-        if action in ("mcp_call", "call_mcp", "call"):
-            method = str(data.get("method", "")).strip()
-            params = data.get("params", {})
-            if not isinstance(params, dict):
-                params = {}
-            return {"action": "mcp_call", "method": method, "params": params}
-
-        # fallback shape: {"method": "...", "params": {...}}
-        if "method" in data:
-            method = str(data.get("method", "")).strip()
-            params = data.get("params", {})
-            if not isinstance(params, dict):
-                params = {}
-            return {"action": "mcp_call", "method": method, "params": params}
-        return {"action": "done"}
-
     def _mcp_call_key(self, method: str, params: Dict[str, Any]) -> str:
         try:
             params_key = json.dumps(params, sort_keys=True, ensure_ascii=False)
         except Exception:
             params_key = str(params)
         return method + "|" + params_key
-
-    def _extract_mcp_response_cache(self, messages: List[Any]) -> Dict[str, Dict[str, Any]]:
-        cache: Dict[str, Dict[str, Any]] = {}
-        pending_key: Optional[str] = None
-        prefix = "MCP response:\n"
-        for msg in messages:
-            if isinstance(msg, AIMessage):
-                action = self._parse_mcp_agent_action(str(msg.content))
-                if action.get("action") == "mcp_call":
-                    method = str(action.get("method", "")).strip()
-                    params = action.get("params", {})
-                    if not isinstance(params, dict):
-                        params = {}
-                    pending_key = self._mcp_call_key(method, params)
-                else:
-                    pending_key = None
-                continue
-
-            if isinstance(msg, HumanMessage) and pending_key is not None:
-                raw = str(msg.content)
-                if raw.startswith(prefix):
-                    try:
-                        response = json.loads(raw[len(prefix):])
-                        if isinstance(response, dict):
-                            cache[pending_key] = response
-                    except Exception:
-                        pass
-                pending_key = None
-            else:
-                pending_key = None
-        return cache
 
     def _emit_mcp_status(self, signals, chat_idx: int, status_text: str):
         status_msg = self._normalize_progress_note(status_text)
@@ -3042,7 +2978,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             final_hint = ''
             tool_messages: List[Dict[str, str]] = []
             tool_messages_streamed = signals is not None and getattr(signals, "progress", None) is not None
-            mcp_cache = self._extract_mcp_response_cache(history_messages)
             bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
                 ("initialize", {}),
                 ("resources/list", {}),
@@ -3057,16 +2992,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             max_queued_calls = 100
             total_tool_calls = 0
             stop_reason = ""
-            cacheable_methods = {
-                "initialize",
-                "resources/list",
-                "resources/templates/list",
-                "resources/read",
-                "prompts/list",
-                "prompts/get",
-                "tools/list",
-            }
-
             def _prepare_mcp_request(method_name: str, raw_params: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 request_params = dict(raw_params) if isinstance(raw_params, dict) else {}
                 display_params = dict(request_params)
@@ -3123,14 +3048,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                     result["canceled"] = True
                     return result
                 request_params, display_params = _prepare_mcp_request(method, params)
-                call_key = self._mcp_call_key(method, request_params)
-                if method in cacheable_methods and call_key in mcp_cache:
-                    continue
                 status_text = self.ai_mcp_server.describe_status_event(method, request_params)
                 self._emit_mcp_status(signals, chat_idx, status_text)
                 _request, response = self._run_mcp_request(method, request_params)
-                if method in cacheable_methods:
-                    mcp_cache[call_key] = response
                 total_tool_calls += 1
                 append_tool_exchange(method, display_params, response)
 
@@ -3156,14 +3076,12 @@ data collected. This information will accompany every prompt sent to the AI, res
                 plan_data.get("skill_decision", ""),
                 plan_data.get("skill_name", ""),
                 planned_calls,
-                mcp_cache,
                 max_queued_calls,
             )
             proposed_plan_calls = self._ensure_skill_prompt_call(
                 plan_data.get("skill_decision", ""),
                 plan_data.get("skill_name", ""),
                 proposed_plan_calls,
-                mcp_cache,
                 max_calls_per_round,
             )
             needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
@@ -3249,16 +3167,10 @@ data collected. This information will accompany every prompt sent to the AI, res
                         }
                     else:
                         request_params, display_params = _prepare_mcp_request(method, params)
-                        call_key = self._mcp_call_key(method, request_params)
-                        if method in cacheable_methods and call_key in mcp_cache:
-                            response = mcp_cache[call_key]
-                        else:
-                            status_text = self.ai_mcp_server.describe_status_event(method, request_params)
-                            self._emit_mcp_status(signals, chat_idx, status_text)
-                            _request, response = self._run_mcp_request(method, request_params)
-                            if method in cacheable_methods:
-                                mcp_cache[call_key] = response
-                            total_tool_calls += 1
+                        status_text = self.ai_mcp_server.describe_status_event(method, request_params)
+                        self._emit_mcp_status(signals, chat_idx, status_text)
+                        _request, response = self._run_mcp_request(method, request_params)
+                        total_tool_calls += 1
                         executed_any_call = True
                     append_tool_exchange(method, display_params if method in allowed_methods else params, response)
 
@@ -3305,7 +3217,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                     reflection_data.get("skill_decision", ""),
                     reflection_data.get("skill_name", ""),
                     revised_calls,
-                    mcp_cache,
                     max_queued_calls,
                 )
                 if continue_deferred_calls and len(deferred_calls) > 0:
@@ -3373,7 +3284,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                             replan_data.get("skill_decision", ""),
                             replan_data.get("skill_name", ""),
                             revised_calls,
-                            mcp_cache,
                             max_queued_calls,
                         )
                     if len(revised_calls) == 0:
