@@ -2932,7 +2932,7 @@ class DialogCodeText(QtWidgets.QWidget):
                     c.fill_tree()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local code tree when project events touch codes or categories."""
+        """Refresh the local code tree or text codings when project events touch them."""
 
         if not isinstance(event, dict):
             return
@@ -2940,6 +2940,24 @@ class DialogCodeText(QtWidgets.QWidget):
         if not isinstance(tables, dict):
             return
         if "code_cat" not in tables and "code_name" not in tables:
+            if "code_text" not in tables:
+                return
+            code_text_change = tables.get("code_text", {})
+            if not isinstance(code_text_change, dict):
+                return
+            affected_file_ids = code_text_change.get("affected_file_ids", [])
+            if not isinstance(affected_file_ids, list):
+                affected_file_ids = []
+            ai_assisted_coding = self.ui.tabWidget.currentIndex() == 1
+            current_file_matches = (
+                self.file_ is not None and (
+                    len(affected_file_ids) == 0 or int(self.file_['id']) in affected_file_ids
+                )
+            )
+            if current_file_matches:
+                self.get_coded_text_update_eventfilter_tooltips()
+            if current_file_matches or ai_assisted_coding:
+                self.fill_code_counts_in_tree()
             return
         self.update_dialog_codes_and_categories()
 

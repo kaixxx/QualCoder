@@ -1594,7 +1594,7 @@ class AiLLM():
         project_events.emit_table_changes(tables, source=source)
 
     def _merge_project_table_change(self, aggregated, table_name: str, ops=None,
-                                    affected_ids=None, affected_code_ids=None,
+                                    affected_ids=None, affected_file_ids=None, affected_code_ids=None,
                                     affected_cat_ids=None, changed_columns=None) -> None:
         """Merge one table change into an aggregated undo event payload."""
 
@@ -1608,6 +1608,7 @@ class AiLLM():
             entry = {
                 "ops": set(),
                 "affected_ids": set(),
+                "affected_file_ids": set(),
                 "affected_code_ids": set(),
                 "affected_cat_ids": set(),
                 "changed_columns": set(),
@@ -1616,6 +1617,7 @@ class AiLLM():
         values_map = {
             "ops": ops,
             "affected_ids": affected_ids,
+            "affected_file_ids": affected_file_ids,
             "affected_code_ids": affected_code_ids,
             "affected_cat_ids": affected_cat_ids,
             "changed_columns": changed_columns,
@@ -1646,7 +1648,7 @@ class AiLLM():
             if not isinstance(entry, dict):
                 continue
             normalized_entry = {}
-            for key in ("ops", "affected_ids", "affected_code_ids", "affected_cat_ids", "changed_columns"):
+            for key in ("ops", "affected_ids", "affected_file_ids", "affected_code_ids", "affected_cat_ids", "changed_columns"):
                 values = entry.get(key, set())
                 if isinstance(values, set):
                     normalized_entry[key] = sorted(values)
@@ -1689,6 +1691,21 @@ class AiLLM():
                     affected_ids=[cid],
                     affected_code_ids=[cid],
                     affected_cat_ids=[catid] if catid is not None else [],
+                )
+            return
+
+        if op_type == "create_coding_text":
+            ctid = int(op.get("ctid", -1))
+            cid = int(op.get("cid", -1))
+            fid = int(op.get("fid", -1))
+            if ctid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_text",
+                    ops=["delete"],
+                    affected_ids=[ctid],
+                    affected_file_ids=[fid] if fid > 0 else [],
+                    affected_code_ids=[cid] if cid > 0 else [],
                 )
             return
 
@@ -1751,6 +1768,23 @@ class AiLLM():
                 )
             return
 
+        if op_type == "move_coding_text":
+            ctid = int(op.get("ctid", -1))
+            fid = int(op.get("fid", -1))
+            old_cid = op.get("before", {}).get("cid", None)
+            new_cid = op.get("after", {}).get("cid", None)
+            if ctid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_text",
+                    ops=["update"],
+                    affected_ids=[ctid],
+                    affected_file_ids=[fid] if fid > 0 else [],
+                    affected_code_ids=[value for value in (old_cid, new_cid) if value is not None],
+                    changed_columns=["cid"],
+                )
+            return
+
         if op_type == "delete_category_tree":
             snapshot_tables = self._snapshot_tables(op)
             cat_rows = snapshot_tables.get("code_cat", [])
@@ -1788,6 +1822,21 @@ class AiLLM():
                     affected_code_ids=[row.get("cid", None) for row in code_rows if isinstance(row, dict)],
                     affected_cat_ids=[row.get("catid", None) for row in code_rows if isinstance(row, dict)],
                     changed_columns=["name", "memo", "catid", "owner", "date", "color"],
+                )
+            return
+
+        if op_type == "delete_coding_text":
+            snapshot_tables = self._snapshot_tables(op)
+            coding_rows = snapshot_tables.get("code_text", [])
+            if isinstance(coding_rows, list) and len(coding_rows) > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_text",
+                    ops=["insert"],
+                    affected_ids=[row.get("ctid", None) for row in coding_rows if isinstance(row, dict)],
+                    affected_file_ids=[row.get("fid", None) for row in coding_rows if isinstance(row, dict)],
+                    affected_code_ids=[row.get("cid", None) for row in coding_rows if isinstance(row, dict)],
+                    changed_columns=["cid", "fid", "seltext", "pos0", "pos1", "owner", "date", "memo", "avid", "important"],
                 )
 
     def _count_code_codings(self, cur, cid: int) -> tuple[int, int]:
@@ -2029,6 +2078,7 @@ class AiLLM():
                     cur.execute("DELETE FROM code_text WHERE ctid=?", (int(row[0]),))
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "create_code":
@@ -2168,6 +2218,7 @@ class AiLLM():
                     )
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type in ("delete_category_tree", "delete_code", "delete_coding_text"):

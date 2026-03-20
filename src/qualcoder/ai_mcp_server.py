@@ -1124,6 +1124,17 @@ class AiMcpServer:
                     "created_at": now,
                 },
             )
+            self._emit_project_table_changes(
+                {
+                    "code_text": {
+                        "ops": ["insert"],
+                        "affected_ids": [ctid],
+                        "affected_file_ids": [fid],
+                        "affected_code_ids": [cid],
+                        "changed_columns": ["cid", "fid", "seltext", "pos0", "pos1", "owner", "date", "memo"],
+                    }
+                }
+            )
             return {
                 "tool": "codes/create_text_coding",
                 "created": True,
@@ -1622,9 +1633,21 @@ class AiMcpServer:
                 {
                     "type": "move_coding_text",
                     "ctid": ctid,
+                    "fid": int(coding.get("fid", -1)),
                     "before": {"cid": old_cid},
                     "after": {"cid": new_cid},
                 },
+            )
+            self._emit_project_table_changes(
+                {
+                    "code_text": {
+                        "ops": ["update"],
+                        "affected_ids": [ctid],
+                        "affected_file_ids": [int(coding.get("fid", -1))] if int(coding.get("fid", -1)) > 0 else [],
+                        "affected_code_ids": [old_cid, new_cid],
+                        "changed_columns": ["cid"],
+                    }
+                }
             )
             return {
                 "tool": "codes/move_text_coding",
@@ -1660,6 +1683,17 @@ class AiMcpServer:
                     "ctid": ctid,
                     "snapshot": snapshot,
                 },
+            )
+            self._emit_project_table_changes(
+                {
+                    "code_text": {
+                        "ops": ["delete"],
+                        "affected_ids": [ctid],
+                        "affected_file_ids": [int(coding.get("fid", -1))] if int(coding.get("fid", -1)) > 0 else [],
+                        "affected_code_ids": [int(coding.get("cid", -1))] if int(coding.get("cid", -1)) > 0 else [],
+                        "changed_columns": [],
+                    }
+                }
             )
             return {
                 "tool": "codes/delete_text_coding",
