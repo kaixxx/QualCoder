@@ -1585,6 +1585,211 @@ class AiLLM():
             "image_codings": len(tables.get("code_image", [])) if isinstance(tables.get("code_image", []), list) else 0,
         }
 
+    def _emit_project_table_changes(self, tables, source="ai_agent_undo") -> None:
+        """Emit one app-level project data change event if the event bus exists."""
+
+        project_events = getattr(self.app, "project_events", None)
+        if project_events is None or not hasattr(project_events, "emit_table_changes"):
+            return
+        project_events.emit_table_changes(tables, source=source)
+
+    def _merge_project_table_change(self, aggregated, table_name: str, ops=None,
+                                    affected_ids=None, affected_code_ids=None,
+                                    affected_cat_ids=None, changed_columns=None) -> None:
+        """Merge one table change into an aggregated undo event payload."""
+
+        if not isinstance(aggregated, dict):
+            return
+        name = str(table_name if table_name is not None else "").strip()
+        if name == "":
+            return
+        entry = aggregated.get(name)
+        if not isinstance(entry, dict):
+            entry = {
+                "ops": set(),
+                "affected_ids": set(),
+                "affected_code_ids": set(),
+                "affected_cat_ids": set(),
+                "changed_columns": set(),
+            }
+            aggregated[name] = entry
+        values_map = {
+            "ops": ops,
+            "affected_ids": affected_ids,
+            "affected_code_ids": affected_code_ids,
+            "affected_cat_ids": affected_cat_ids,
+            "changed_columns": changed_columns,
+        }
+        for key, values in values_map.items():
+            if values is None:
+                continue
+            if isinstance(values, (list, tuple, set)):
+                iterable = values
+            else:
+                iterable = [values]
+            for value in iterable:
+                if value is None:
+                    continue
+                if key in ("ops", "changed_columns"):
+                    value = str(value).strip()
+                    if value == "":
+                        continue
+                entry[key].add(value)
+
+    def _normalize_project_table_changes(self, aggregated):
+        """Convert aggregated set-based change payloads into serializable lists."""
+
+        if not isinstance(aggregated, dict):
+            return {}
+        normalized = {}
+        for table_name, entry in aggregated.items():
+            if not isinstance(entry, dict):
+                continue
+            normalized_entry = {}
+            for key in ("ops", "affected_ids", "affected_code_ids", "affected_cat_ids", "changed_columns"):
+                values = entry.get(key, set())
+                if isinstance(values, set):
+                    normalized_entry[key] = sorted(values)
+                elif isinstance(values, (list, tuple)):
+                    normalized_entry[key] = sorted(set(values))
+                elif values is None:
+                    normalized_entry[key] = []
+                else:
+                    normalized_entry[key] = [values]
+            normalized[table_name] = normalized_entry
+        return normalized
+
+    def _collect_tree_undo_project_table_changes(self, op, row_data, aggregated) -> None:
+        """Collect code/category tree table changes caused by undoing one AI operation."""
+
+        if not isinstance(op, dict):
+            return
+        op_type = str(op.get("type", "")).strip()
+
+        if op_type == "create_category":
+            catid = int(op.get("catid", -1))
+            if catid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_cat",
+                    ops=["delete"],
+                    affected_ids=[catid],
+                    affected_cat_ids=[catid],
+                )
+            return
+
+        if op_type == "create_code":
+            cid = int(op.get("cid", -1))
+            catid = op.get("catid", None)
+            if cid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_name",
+                    ops=["delete"],
+                    affected_ids=[cid],
+                    affected_code_ids=[cid],
+                    affected_cat_ids=[catid] if catid is not None else [],
+                )
+            return
+
+        if op_type == "rename_category":
+            catid = int(op.get("catid", -1))
+            if catid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_cat",
+                    ops=["update"],
+                    affected_ids=[catid],
+                    affected_cat_ids=[catid],
+                    changed_columns=["name"],
+                )
+            return
+
+        if op_type == "rename_code":
+            cid = int(op.get("cid", -1))
+            if cid > 0:
+                catid = None
+                if isinstance(row_data, (list, tuple)) and len(row_data) > 1:
+                    catid = row_data[1]
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_name",
+                    ops=["update"],
+                    affected_ids=[cid],
+                    affected_code_ids=[cid],
+                    affected_cat_ids=[catid] if catid is not None else [],
+                    changed_columns=["name"],
+                )
+            return
+
+        if op_type == "move_category_tree":
+            catid = int(op.get("root_catid", op.get("catid", -1)))
+            if catid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_cat",
+                    ops=["update"],
+                    affected_ids=[catid],
+                    affected_cat_ids=[catid],
+                    changed_columns=["supercatid"],
+                )
+            return
+
+        if op_type == "move_code":
+            cid = int(op.get("cid", -1))
+            old_catid = op.get("before", {}).get("catid", None)
+            new_catid = op.get("after", {}).get("catid", None)
+            if cid > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_name",
+                    ops=["update"],
+                    affected_ids=[cid],
+                    affected_code_ids=[cid],
+                    affected_cat_ids=[value for value in (old_catid, new_catid) if value is not None],
+                    changed_columns=["catid"],
+                )
+            return
+
+        if op_type == "delete_category_tree":
+            snapshot_tables = self._snapshot_tables(op)
+            cat_rows = snapshot_tables.get("code_cat", [])
+            code_rows = snapshot_tables.get("code_name", [])
+            if isinstance(cat_rows, list) and len(cat_rows) > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_cat",
+                    ops=["insert"],
+                    affected_ids=[row.get("catid", None) for row in cat_rows if isinstance(row, dict)],
+                    affected_cat_ids=[row.get("catid", None) for row in cat_rows if isinstance(row, dict)],
+                    changed_columns=["name", "memo", "owner", "date", "supercatid"],
+                )
+            if isinstance(code_rows, list) and len(code_rows) > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_name",
+                    ops=["insert"],
+                    affected_ids=[row.get("cid", None) for row in code_rows if isinstance(row, dict)],
+                    affected_code_ids=[row.get("cid", None) for row in code_rows if isinstance(row, dict)],
+                    affected_cat_ids=[row.get("catid", None) for row in code_rows if isinstance(row, dict)],
+                    changed_columns=["name", "memo", "catid", "owner", "date", "color"],
+                )
+            return
+
+        if op_type == "delete_code":
+            snapshot_tables = self._snapshot_tables(op)
+            code_rows = snapshot_tables.get("code_name", [])
+            if isinstance(code_rows, list) and len(code_rows) > 0:
+                self._merge_project_table_change(
+                    aggregated,
+                    "code_name",
+                    ops=["insert"],
+                    affected_ids=[row.get("cid", None) for row in code_rows if isinstance(row, dict)],
+                    affected_code_ids=[row.get("cid", None) for row in code_rows if isinstance(row, dict)],
+                    affected_cat_ids=[row.get("catid", None) for row in code_rows if isinstance(row, dict)],
+                    changed_columns=["name", "memo", "catid", "owner", "date", "color"],
+                )
+
     def _count_code_codings(self, cur, cid: int) -> tuple[int, int]:
         total = 0
         non_ai = 0
@@ -1802,6 +2007,7 @@ class AiLLM():
             "deleted_code_codings": 0,
             "deleted_code_codings_non_ai": 0,
         }
+        project_table_changes = {}
         cur = self.app.conn.cursor()
         try:
             for op in reversed(operations):
@@ -1848,6 +2054,7 @@ class AiLLM():
                     cur.execute("DELETE FROM code_name WHERE cid=?", (cid,))
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "create_category":
@@ -1866,6 +2073,7 @@ class AiLLM():
                     cur.execute("DELETE FROM code_cat WHERE catid=?", (catid,))
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "rename_category":
@@ -1884,6 +2092,7 @@ class AiLLM():
                     )
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "rename_code":
@@ -1902,6 +2111,7 @@ class AiLLM():
                     )
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "move_category_tree":
@@ -1920,6 +2130,7 @@ class AiLLM():
                     )
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "move_code":
@@ -1938,6 +2149,7 @@ class AiLLM():
                     )
                     if cur.rowcount > 0:
                         stats["undone"] += 1
+                        self._collect_tree_undo_project_table_changes(op, row, project_table_changes)
                     continue
 
                 if op_type == "move_coding_text":
@@ -1968,12 +2180,16 @@ class AiLLM():
                         continue
                     self._restore_snapshot(cur, op)
                     stats["undone"] += 1
+                    self._collect_tree_undo_project_table_changes(op, None, project_table_changes)
                     continue
 
                 stats["skipped_invalid"] += 1
 
             self.app.conn.commit()
             self.app.delete_backup = False
+            normalized_changes = self._normalize_project_table_changes(project_table_changes)
+            if len(normalized_changes) > 0:
+                self._emit_project_table_changes(normalized_changes, source="ai_agent_undo")
         except Exception:
             self.app.conn.rollback()
             raise

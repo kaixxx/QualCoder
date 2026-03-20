@@ -137,6 +137,14 @@ class AiMcpServer:
             ],
         }
 
+    def _emit_project_table_changes(self, tables: Dict[str, Any], source: str = "ai_agent") -> None:
+        """Emit one app-level project data change event if the event bus exists."""
+
+        project_events = getattr(self.app, "project_events", None)
+        if project_events is None or not hasattr(project_events, "emit_table_changes"):
+            return
+        project_events.emit_table_changes(tables, source=source)
+
     def _tool_required_permission(self, tool_name: str) -> int:
         """Return the required AI permissions level for one tool."""
 
@@ -913,6 +921,16 @@ class AiMcpServer:
                     "created_at": now,
                 },
             )
+            self._emit_project_table_changes(
+                {
+                    "code_cat": {
+                        "ops": ["insert"],
+                        "affected_ids": [catid],
+                        "affected_cat_ids": [catid],
+                        "changed_columns": ["name", "memo", "owner", "date", "supercatid"],
+                    }
+                }
+            )
             return {
                 "tool": "codes/create_category",
                 "created": True,
@@ -995,6 +1013,17 @@ class AiMcpServer:
                     "owner": self.AI_AGENT_OWNER,
                     "created_at": now,
                 },
+            )
+            self._emit_project_table_changes(
+                {
+                    "code_name": {
+                        "ops": ["insert"],
+                        "affected_ids": [cid],
+                        "affected_code_ids": [cid],
+                        "affected_cat_ids": [catid] if catid is not None else [],
+                        "changed_columns": ["name", "memo", "catid", "owner", "date", "color"],
+                    }
+                }
             )
             return {
                 "tool": "codes/create_code",
@@ -1223,6 +1252,16 @@ class AiMcpServer:
                     "new_name": new_name,
                 },
             )
+            self._emit_project_table_changes(
+                {
+                    "code_cat": {
+                        "ops": ["update"],
+                        "affected_ids": [catid],
+                        "affected_cat_ids": [catid],
+                        "changed_columns": ["name"],
+                    }
+                }
+            )
             return {
                 "tool": "codes/rename_category",
                 "renamed": True,
@@ -1275,6 +1314,17 @@ class AiMcpServer:
                     "old_name": old_name,
                     "new_name": new_name,
                 },
+            )
+            self._emit_project_table_changes(
+                {
+                    "code_name": {
+                        "ops": ["update"],
+                        "affected_ids": [cid],
+                        "affected_code_ids": [cid],
+                        "affected_cat_ids": [code.get("catid", None)] if code.get("catid", None) is not None else [],
+                        "changed_columns": ["name"],
+                    }
+                }
             )
             return {
                 "tool": "codes/rename_code",
@@ -1331,6 +1381,16 @@ class AiMcpServer:
                     "impact": impact,
                 },
             )
+            self._emit_project_table_changes(
+                {
+                    "code_cat": {
+                        "ops": ["update"],
+                        "affected_ids": [catid],
+                        "affected_cat_ids": [catid],
+                        "changed_columns": ["supercatid"],
+                    }
+                }
+            )
             return {
                 "tool": "codes/move_category",
                 "moved": True,
@@ -1384,6 +1444,17 @@ class AiMcpServer:
                     "after": {"catid": new_catid},
                     "impact": impact,
                 },
+            )
+            self._emit_project_table_changes(
+                {
+                    "code_name": {
+                        "ops": ["update"],
+                        "affected_ids": [cid],
+                        "affected_code_ids": [cid],
+                        "affected_cat_ids": [value for value in (old_catid, new_catid) if value is not None],
+                        "changed_columns": ["catid"],
+                    }
+                }
             )
             return {
                 "tool": "codes/move_code",
@@ -1439,6 +1510,22 @@ class AiMcpServer:
                     "impact": impact,
                 },
             )
+            self._emit_project_table_changes(
+                {
+                    "code_cat": {
+                        "ops": ["delete"],
+                        "affected_ids": category_ids,
+                        "affected_cat_ids": category_ids,
+                        "changed_columns": [],
+                    },
+                    "code_name": {
+                        "ops": ["delete"],
+                        "affected_ids": code_ids,
+                        "affected_code_ids": code_ids,
+                        "changed_columns": [],
+                    },
+                }
+            )
             return {
                 "tool": "codes/delete_category",
                 "deleted": True,
@@ -1478,6 +1565,17 @@ class AiMcpServer:
                     "snapshot": snapshot,
                     "impact": impact,
                 },
+            )
+            self._emit_project_table_changes(
+                {
+                    "code_name": {
+                        "ops": ["delete"],
+                        "affected_ids": [cid],
+                        "affected_code_ids": [cid],
+                        "affected_cat_ids": [code.get("catid", None)] if code.get("catid", None) is not None else [],
+                        "changed_columns": [],
+                    }
+                }
             )
             return {
                 "tool": "codes/delete_code",
