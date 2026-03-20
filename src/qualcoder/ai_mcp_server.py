@@ -65,16 +65,12 @@ class AiMcpServer:
         "codes/delete_text_coding",
     )
     PREVIEW_TOOL_NAMES = (
-        "codes/preview_move_category",
         "codes/preview_delete_category",
-        "codes/preview_move_code",
         "codes/preview_delete_code",
     )
     WRITE_TOOL_NAMES = SANDBOX_WRITE_TOOL_NAMES + FULL_ACCESS_WRITE_TOOL_NAMES
     PREVIEW_REQUIRED_EXECUTE_TOOLS = (
-        "codes/move_category",
         "codes/delete_category",
-        "codes/move_code",
         "codes/delete_code",
     )
 
@@ -101,7 +97,7 @@ class AiMcpServer:
             "and regular-expression search "
             "(qualcoder://search/regex?pattern=...) with optional filters file_ids and exclude_cids. "
             "Available tools include preview and write operations for categories, codes, and text codings. "
-            "High-impact move/delete actions on categories or codes should be previewed before execution. "
+            "Delete actions on categories or codes should be previewed before execution. "
             "Available prompts represent QualCoder skills from system, user, and project scope."
         )
 
@@ -309,25 +305,21 @@ class AiMcpServer:
                     code=str(code_name),
                     document=str(doc_name),
                 )
-            if tool_name in ("codes/preview_move_category", "codes/delete_category", "codes/move_category", "codes/preview_delete_category"):
+            if tool_name in ("codes/delete_category", "codes/move_category", "codes/preview_delete_category"):
                 catid = self._to_int(tool_args.get("catid"), -1)
                 category_name = self._fetch_category_name(catid) if catid > 0 else None
                 if category_name is None or str(category_name).strip() == "":
                     category_name = _("Category") + (f" #{catid}" if catid > 0 else "")
-                if tool_name == "codes/preview_move_category":
-                    return _('Reviewing impact of moving category "{name}"...').format(name=str(category_name))
                 if tool_name == "codes/preview_delete_category":
                     return _('Reviewing impact of deleting category "{name}"...').format(name=str(category_name))
                 if tool_name == "codes/move_category":
                     return _('Moving category "{name}"...').format(name=str(category_name))
                 return _('Deleting category "{name}"...').format(name=str(category_name))
-            if tool_name in ("codes/preview_move_code", "codes/delete_code", "codes/move_code", "codes/preview_delete_code"):
+            if tool_name in ("codes/delete_code", "codes/move_code", "codes/preview_delete_code"):
                 cid = self._to_int(tool_args.get("cid"), -1)
                 code_name = self._fetch_code_name(cid) if cid > 0 else None
                 if code_name is None or str(code_name).strip() == "":
                     code_name = _("Code") + (f" #{cid}" if cid > 0 else "")
-                if tool_name == "codes/preview_move_code":
-                    return _('Reviewing impact of moving code "{name}"...').format(name=str(code_name))
                 if tool_name == "codes/preview_delete_code":
                     return _('Reviewing impact of deleting code "{name}"...').format(name=str(code_name))
                 if tool_name == "codes/move_code":
@@ -644,22 +636,6 @@ class AiMcpServer:
                     },
                 },
                 {
-                    "name": "codes/preview_move_category",
-                    "description": (
-                        "Preview the impact of moving a category under another category. "
-                        "Returns subtree counts, warnings, and a preview_token for execution."
-                    ),
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "catid": {"type": "integer"},
-                            "new_supercatid": {"type": ["integer", "null"]},
-                        },
-                        "required": ["catid"],
-                        "additionalProperties": False,
-                    },
-                },
-                {
                     "name": "codes/preview_delete_category",
                     "description": (
                         "Preview the impact of deleting a category tree recursively. "
@@ -671,22 +647,6 @@ class AiMcpServer:
                             "catid": {"type": "integer"},
                         },
                         "required": ["catid"],
-                        "additionalProperties": False,
-                    },
-                },
-                {
-                    "name": "codes/preview_move_code",
-                    "description": (
-                        "Preview the impact of moving a code to another category or to top-level. "
-                        "Returns counts and a preview_token for execution."
-                    ),
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "cid": {"type": "integer"},
-                            "new_catid": {"type": ["integer", "null"]},
-                        },
-                        "required": ["cid"],
                         "additionalProperties": False,
                     },
                 },
@@ -735,16 +695,15 @@ class AiMcpServer:
                     "name": "codes/move_category",
                     "description": (
                         "Move a category tree under another category or to top-level. "
-                        "Requires Full access and a preview_token from codes/preview_move_category."
+                        "Requires Full access."
                     ),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "catid": {"type": "integer"},
                             "new_supercatid": {"type": ["integer", "null"]},
-                            "preview_token": {"type": "string"},
                         },
-                        "required": ["catid", "preview_token"],
+                        "required": ["catid"],
                         "additionalProperties": False,
                     },
                 },
@@ -752,16 +711,15 @@ class AiMcpServer:
                     "name": "codes/move_code",
                     "description": (
                         "Move a code to another category or to top-level. "
-                        "Requires Full access and a preview_token from codes/preview_move_code."
+                        "Requires Full access."
                     ),
                     "inputSchema": {
                         "type": "object",
                         "properties": {
                             "cid": {"type": "integer"},
                             "new_catid": {"type": ["integer", "null"]},
-                            "preview_token": {"type": "string"},
                         },
-                        "required": ["cid", "preview_token"],
+                        "required": ["cid"],
                         "additionalProperties": False,
                     },
                 },
@@ -870,12 +828,8 @@ class AiMcpServer:
             payload = self._tool_create_code(arguments, change_set_id)
         elif tool_name == "codes/create_text_coding":
             payload = self._tool_create_text_coding(arguments, change_set_id)
-        elif tool_name == "codes/preview_move_category":
-            payload = self._tool_preview_move_category(arguments)
         elif tool_name == "codes/preview_delete_category":
             payload = self._tool_preview_delete_category(arguments)
-        elif tool_name == "codes/preview_move_code":
-            payload = self._tool_preview_move_code(arguments)
         elif tool_name == "codes/preview_delete_code":
             payload = self._tool_preview_delete_code(arguments)
         elif tool_name == "codes/rename_category":
@@ -1161,56 +1115,6 @@ class AiMcpServer:
         finally:
             conn.close()
 
-    def _tool_preview_move_category(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        catid = self._to_int(arguments.get("catid"), -1)
-        new_supercatid_raw = arguments.get("new_supercatid", None)
-        new_supercatid = None
-        if new_supercatid_raw is not None:
-            new_supercatid = self._to_int(new_supercatid_raw, -1)
-            if new_supercatid <= 0:
-                raise ValueError("new_supercatid must be a positive integer or null.")
-
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            category = self._fetch_category_row_cur(cur, catid)
-            if category is None:
-                raise ValueError(f"Category id {catid} not found.")
-            target = None
-            if new_supercatid is not None:
-                target = self._fetch_category_row_cur(cur, new_supercatid)
-                if target is None:
-                    raise ValueError(f"Target category id {new_supercatid} not found.")
-            subtree = self._collect_category_subtree(cur, catid)
-            subtree_ids = [int(item["catid"]) for item in subtree["categories"]]
-            if new_supercatid is not None and new_supercatid in subtree_ids:
-                raise ValueError("A category cannot be moved into its own subtree.")
-
-            impact = self._build_category_tree_impact(cur, subtree)
-            signature = {"tool": "codes/move_category", "catid": catid, "new_supercatid": new_supercatid}
-            preview_token = self._issue_preview_token("codes/move_category", signature)
-            warnings = [
-                _("Moving this category also moves its full subtree, including descendant categories and codes.")
-            ]
-            if impact["counts"]["categories"] > 5 or impact["counts"]["codes"] > 10:
-                warnings.append(_("This is a large subtree. Review the affected items carefully before executing."))
-            return {
-                "tool": "codes/preview_move_category",
-                "execute_tool": "codes/move_category",
-                "preview_token": preview_token,
-                "requires_confirmation": True,
-                "risk_level": "high",
-                "category": self._category_ref(category),
-                "current_parent": self._category_ref(
-                    self._fetch_category_row_cur(cur, category.get("supercatid", None))
-                ),
-                "new_parent": self._category_ref(target),
-                "impact": impact,
-                "warnings": warnings,
-            }
-        finally:
-            conn.close()
-
     def _tool_preview_delete_category(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         catid = self._to_int(arguments.get("catid"), -1)
         conn = self._connect()
@@ -1240,46 +1144,6 @@ class AiMcpServer:
                 "category": self._category_ref(category),
                 "impact": impact,
                 "warnings": warnings,
-            }
-        finally:
-            conn.close()
-
-    def _tool_preview_move_code(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        cid = self._to_int(arguments.get("cid"), -1)
-        new_catid_raw = arguments.get("new_catid", None)
-        new_catid = None
-        if new_catid_raw is not None:
-            new_catid = self._to_int(new_catid_raw, -1)
-            if new_catid <= 0:
-                raise ValueError("new_catid must be a positive integer or null.")
-
-        conn = self._connect()
-        try:
-            cur = conn.cursor()
-            code = self._fetch_code_row_cur(cur, cid)
-            if code is None:
-                raise ValueError(f"Code id {cid} not found.")
-            target = None
-            if new_catid is not None:
-                target = self._fetch_category_row_cur(cur, new_catid)
-                if target is None:
-                    raise ValueError(f"Target category id {new_catid} not found.")
-            impact = self._build_code_impact(cur, code)
-            signature = {"tool": "codes/move_code", "cid": cid, "new_catid": new_catid}
-            preview_token = self._issue_preview_token("codes/move_code", signature)
-            return {
-                "tool": "codes/preview_move_code",
-                "execute_tool": "codes/move_code",
-                "preview_token": preview_token,
-                "requires_confirmation": True,
-                "risk_level": "medium",
-                "code": self._code_ref(code),
-                "current_category": self._category_ref(
-                    self._fetch_category_row_cur(cur, code.get("catid", None))
-                ),
-                "new_category": self._category_ref(target),
-                "impact": impact,
-                "warnings": [],
             }
         finally:
             conn.close()
@@ -1431,9 +1295,6 @@ class AiMcpServer:
             new_supercatid = self._to_int(new_supercatid_raw, -1)
             if new_supercatid <= 0:
                 raise ValueError("new_supercatid must be a positive integer or null.")
-        signature = {"tool": "codes/move_category", "catid": catid, "new_supercatid": new_supercatid}
-        self._consume_preview_token("codes/move_category", signature, arguments.get("preview_token", ""))
-
         conn = self._connect()
         try:
             cur = conn.cursor()
@@ -1492,9 +1353,6 @@ class AiMcpServer:
             new_catid = self._to_int(new_catid_raw, -1)
             if new_catid <= 0:
                 raise ValueError("new_catid must be a positive integer or null.")
-        signature = {"tool": "codes/move_code", "cid": cid, "new_catid": new_catid}
-        self._consume_preview_token("codes/move_code", signature, arguments.get("preview_token", ""))
-
         conn = self._connect()
         try:
             cur = conn.cursor()

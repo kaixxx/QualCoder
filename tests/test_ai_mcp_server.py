@@ -150,8 +150,11 @@ class TestAiMcpServer(TestCase):
         self.assertIn("codes/create_code", names)
         self.assertIn("codes/create_text_coding", names)
         self.assertIn("codes/preview_delete_category", names)
+        self.assertIn("codes/preview_delete_code", names)
         self.assertIn("codes/rename_code", names)
         self.assertIn("codes/delete_text_coding", names)
+        self.assertNotIn("codes/preview_move_category", names)
+        self.assertNotIn("codes/preview_move_code", names)
 
     def test_tool_create_category(self):
         req = {
@@ -276,11 +279,53 @@ class TestAiMcpServer(TestCase):
         self.assertEqual("code renamed", payload["code"]["new_name"])
         self.assertEqual("rename_code", self.ai_recorded_changes[-1][1]["type"])
 
+    def test_full_access_move_category_without_preview(self):
+        self.app.settings["ai_permissions"] = 2
+        req = {
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/move_category",
+                "arguments": {"catid": 3, "new_supercatid": 2},
+                "_ai_change_set_id": "run-move-category",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["moved"])
+        cur = self.conn.cursor()
+        cur.execute("SELECT supercatid FROM code_cat WHERE catid=3")
+        self.assertEqual(2, cur.fetchone()[0])
+        self.assertEqual("move_category_tree", self.ai_recorded_changes[-1][1]["type"])
+
+    def test_full_access_move_code_without_preview(self):
+        self.app.settings["ai_permissions"] = 2
+        req = {
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "tools/call",
+            "params": {
+                "name": "codes/move_code",
+                "arguments": {"cid": 1, "new_catid": 2},
+                "_ai_change_set_id": "run-move-code",
+            },
+        }
+        res = self.server.handle_request(req)
+        self.assertIn("result", res)
+        payload = res["result"]["structuredContent"]
+        self.assertTrue(payload["moved"])
+        cur = self.conn.cursor()
+        cur.execute("SELECT catid FROM code_name WHERE cid=1")
+        self.assertEqual(2, cur.fetchone()[0])
+        self.assertEqual("move_code", self.ai_recorded_changes[-1][1]["type"])
+
     def test_preview_and_delete_category_tree(self):
         self.app.settings["ai_permissions"] = 2
         preview_req = {
             "jsonrpc": "2.0",
-            "id": 43,
+            "id": 44,
             "method": "tools/call",
             "params": {
                 "name": "codes/preview_delete_category",
@@ -299,7 +344,7 @@ class TestAiMcpServer(TestCase):
 
         delete_req = {
             "jsonrpc": "2.0",
-            "id": 44,
+            "id": 45,
             "method": "tools/call",
             "params": {
                 "name": "codes/delete_category",
@@ -324,7 +369,7 @@ class TestAiMcpServer(TestCase):
         self.app.settings["ai_permissions"] = 2
         req = {
             "jsonrpc": "2.0",
-            "id": 45,
+            "id": 46,
             "method": "tools/call",
             "params": {
                 "name": "codes/move_text_coding",

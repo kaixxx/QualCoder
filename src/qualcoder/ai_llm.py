@@ -1969,7 +1969,7 @@ class AiLLM():
         return stats
 
     def undo_ai_agent_changes(self):
-        """Undo one selected AI-agent change set from the current app session."""
+        """Undo one or more selected AI-agent change sets from the current app session."""
 
         history = self._ensure_ai_change_history()
         options = []
@@ -1984,30 +1984,61 @@ class AiLLM():
             Message(self.app, _("Undo AI changes"), _("No AI changes available to undo.")).exec()
             return
 
-        ui = DialogSelectItems(self.app, options, _("Select AI changes to undo"), "single")
+        ui = DialogSelectItems(self.app, options, _("Select AI changes to undo"), "multiple")
         ui.ui.listView.setStyleSheet(self._ai_change_list_stylesheet(ui.ui.listView))
         
         ok = ui.exec()
         if not ok:
             return
         selected = ui.get_selected()
-        if not isinstance(selected, dict):
+        if not isinstance(selected, list) or len(selected) == 0:
+            return
+        selected_sets = [item for item in options if item in selected]
+        if len(selected_sets) == 0:
             return
 
-        impact_text = self._build_ai_change_impact_text(selected)
-        confirm_text = _("Undo AI changes from {timestamp}").format(timestamp=str(selected.get("name", "")))
-        if impact_text != "":
-            confirm_text += "\n\n" + impact_text
+        confirm_text = _("Undo {count} AI change set(s)?").format(count=len(selected_sets))
+        shown_names = [str(item.get("name", "")).strip() for item in selected_sets[:3] if str(item.get("name", "")).strip() != ""]
+        if len(shown_names) > 0:
+            confirm_text += "\n\n" + "\n".join(shown_names)
+            remaining_names = len(selected_sets) - len(shown_names)
+            if remaining_names > 0:
+                confirm_text += "\n" + _("Additional selected change set(s): ") + str(remaining_names)
+        impact_lines = []
+        for item in selected_sets:
+            impact_text = self._build_ai_change_impact_text(item)
+            if impact_text == "":
+                continue
+            item_name = str(item.get("name", "")).strip()
+            if item_name != "":
+                impact_lines.append(item_name)
+            impact_lines.append(impact_text)
+        if len(impact_lines) > 0:
+            confirm_text += "\n\n" + "\n\n".join(impact_lines)
         confirm_text += "\n\n" + _("Do you want to continue?")
         confirm = DialogConfirmDelete(self.app, confirm_text, _("Undo AI changes"))
         if not confirm.exec():
             return
 
-        stats = self._undo_ai_change_set(selected)
-        if selected in history:
-            history.remove(selected)
+        stats = {
+            "undone": 0,
+            "skipped_changed": 0,
+            "skipped_missing": 0,
+            "skipped_invalid": 0,
+            "deleted_code_codings": 0,
+            "deleted_code_codings_non_ai": 0,
+        }
+        undone_count = 0
+        for item in selected_sets:
+            item_stats = self._undo_ai_change_set(item)
+            for key in stats.keys():
+                stats[key] += int(item_stats.get(key, 0))
+            if item in history:
+                history.remove(item)
+            undone_count += 1
 
-        msg = _("Undo AI changes from {timestamp}").format(timestamp=str(selected.get("name", ""))) + "\n"
+        msg = _("Undo AI changes") + "\n"
+        msg += _("Selected change sets: ") + str(undone_count) + "\n"
         msg += _("Undone operations: ") + str(stats.get("undone", 0)) + "\n"
         skipped = int(stats.get("skipped_changed", 0)) + int(stats.get("skipped_missing", 0)) + int(stats.get("skipped_invalid", 0))
         if skipped > 0:

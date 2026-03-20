@@ -2131,9 +2131,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- Execute the plan directly unless required inputs are missing, the scope is genuinely ambiguous, or the user must decide on a methodological choice first.\n"
             "- Reading: Prefer specific reads over broad reads. Reading full empirical documents can be costly. Do this only when it is really needed.\n"
             "- For write actions, call tools/list before the first tools/call in this turn to verify available tool names and expected arguments.\n"
-            "- For high-impact category/code move or delete actions, do not execute the write tool immediately. "
+            "- For category/code delete actions, do not execute the write tool immediately. "
             "First call the matching preview tool, review the impact, and then ask the user for confirmation.\n"
-            "- After a high-impact preview, keep the actual execute tool call in proposed_next_calls until the user confirms. "
+            "- After a delete preview, keep the actual execute tool call in proposed_next_calls until the user confirms. "
             "When executing, include the preview_token returned by the preview tool.\n"
             "- If the conversation contains an Agent state snapshot with pending_user_decision and the latest user message confirms it, execute pending_user_decision.proposed_next_calls now.\n"
             "- If the user explicitly asks to create or change project data now, prioritize execution: set needs_mcp=true and include concrete tools/call write actions in calls.\n"
@@ -2175,7 +2175,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             "- If you need additional input, methodological decisions, or confirmation by the user, ask them by setting user_decision_required=true and providing a concise, natural language question in decision_question.\n"
             "- If user_decision_required=true, put the suggested follow-up MCP actions into proposed_next_calls and keep revised_calls empty.\n"
             "- If the user explicitly requested write actions, include revised_calls that execute the remaining write actions whenever this is possible.\n"
-            "- For category/code move or delete actions, use preview before execute: after a preview, summarize the impact, ask for confirmation, and place the execute tool with the returned preview_token into proposed_next_calls.\n"
+            "- For category/code delete actions, use preview before execute: after a preview, summarize the impact, ask for confirmation, and place the execute tool with the returned preview_token into proposed_next_calls.\n"
             "- Do not stop with explanations only if executable write actions are still pending.\n"
             "- If the task was about collecting information and you now have enough evidence for a final answer, set enough_information=true and revised_calls=[].\n"
             "- If more information or actions are still needed, set enough_information=false and propose only the necessary revised_calls.\n"
@@ -2282,9 +2282,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         "codes/create_category",
                         "codes/create_code",
                         "codes/create_text_coding",
-                        "codes/preview_move_category",
                         "codes/preview_delete_category",
-                        "codes/preview_move_code",
                         "codes/preview_delete_code",
                         "codes/rename_category",
                         "codes/rename_code",
