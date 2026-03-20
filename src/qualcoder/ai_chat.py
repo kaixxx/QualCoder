@@ -120,11 +120,13 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ui.plainTextEdit_question.setPlaceholderText(_('<your question>'))
         self.ui.pushButton_new_analysis.clicked.connect(self.button_new_clicked)
         self.ui.pushButton_delete.clicked.connect(self.delete_chat)
-        self.ui.pushButton_delete.setShortcut('Delete')
         self.chat_list_model = QStandardItemModel(self)
         self.ui.treeView_chat_list.setModel(self.chat_list_model)
         self.ui.treeView_chat_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.ui.treeView_chat_list.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.shortcut_delete_chat = QShortcut(QKeySequence("Delete"), self.ui.treeView_chat_list)
+        self.shortcut_delete_chat.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+        self.shortcut_delete_chat.activated.connect(self.delete_chat)
         # Enable editing of items on double click and when pressing F2
         self.ui.treeView_chat_list.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked |

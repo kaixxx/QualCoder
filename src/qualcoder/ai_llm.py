@@ -1267,11 +1267,22 @@ class AiLLM():
         palette = list_view.palette()
         base_color = palette.color(QtGui.QPalette.ColorRole.Base)
         text_color = palette.color(QtGui.QPalette.ColorRole.Text)
+        highlight_color = palette.color(QtGui.QPalette.ColorRole.Highlight)
+        highlighted_text_color = palette.color(QtGui.QPalette.ColorRole.HighlightedText)
         blend_amount = 0.42 if base_color.lightness() < 128 else 0.28
         separator_color = self._blend_color(base_color, text_color, blend_amount)
+        inactive_selection_color = self._blend_color(base_color, highlight_color, 0.8)
         return (
             "QListView::item {"
             f"border-bottom: 1px solid {separator_color.name()};"
+            "}"
+            "QListView::item:selected {"
+            f"background: {highlight_color.name()};"
+            f"color: {highlighted_text_color.name()};"
+            "}"
+            "QListView::item:selected:!active {"
+            f"background: {inactive_selection_color.name()};"
+            f"color: {highlighted_text_color.name()};"
             "}"
         )
 
@@ -1986,6 +1997,11 @@ class AiLLM():
 
         ui = DialogSelectItems(self.app, options, _("Select AI changes to undo"), "multiple")
         ui.ui.listView.setStyleSheet(self._ai_change_list_stylesheet(ui.ui.listView))
+        ui.ui.listView.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
+        ui.ui.listView.clearSelection()
+        ui.ui.listView.setCurrentIndex(QtCore.QModelIndex())
+        QtCore.QTimer.singleShot(0, lambda: ui.ui.listView.clearSelection())
+        QtCore.QTimer.singleShot(0, lambda: ui.ui.listView.setCurrentIndex(QtCore.QModelIndex()))
         
         ok = ui.exec()
         if not ok:
@@ -1998,12 +2014,6 @@ class AiLLM():
             return
 
         confirm_text = _("Undo {count} AI change set(s)?").format(count=len(selected_sets))
-        shown_names = [str(item.get("name", "")).strip() for item in selected_sets[:3] if str(item.get("name", "")).strip() != ""]
-        if len(shown_names) > 0:
-            confirm_text += "\n\n" + "\n".join(shown_names)
-            remaining_names = len(selected_sets) - len(shown_names)
-            if remaining_names > 0:
-                confirm_text += "\n" + _("Additional selected change set(s): ") + str(remaining_names)
         impact_lines = []
         for item in selected_sets:
             impact_text = self._build_ai_change_impact_text(item)
