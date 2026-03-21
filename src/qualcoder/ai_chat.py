@@ -31,6 +31,7 @@ from langchain_core.messages.ai import AIMessage
 from langchain_core.messages.system import SystemMessage
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.documents.base import Document
+from markdown_it import MarkdownIt
 
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
@@ -58,6 +59,70 @@ path = os.path.abspath(os.path.dirname(__file__))
 logger = logging.getLogger(__name__)
 
 topic_analysis_max_chunks = 30
+
+MARKDOWN_RENDERER = MarkdownIt(
+    "commonmark",
+    options_update={
+        "breaks": True,
+        "html": False,
+        "typographer": True,
+    },
+).enable(["table", "strikethrough"])
+MARKDOWN_INTERNAL_LINK_PATTERN = re.compile(
+    r"<a\s+href=(['\"])(?:coding|chunk|quote|action):.*?</a>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def render_markdown_to_html(text: str, hr_color: str = "#e6e6e6") -> str:
+    """Render AI Markdown for QLabel output while preserving internal QualCoder links."""
+
+    source_text = str(text if text is not None else "")
+    preserved_links: List[str] = []
+
+    def preserve_quote_link(match: re.Match) -> str:
+        token = f"@@QUALCODER_QUOTE_LINK_{len(preserved_links)}@@"
+        preserved_links.append(match.group(0))
+        return token
+
+    markdown_text = MARKDOWN_INTERNAL_LINK_PATTERN.sub(preserve_quote_link, source_text)
+    rendered_html = MARKDOWN_RENDERER.render(markdown_text).strip()
+    if rendered_html == "":
+        rendered_html = "<p></p>"
+
+    for idx, link_html in enumerate(preserved_links):
+        rendered_html = rendered_html.replace(f"@@QUALCODER_QUOTE_LINK_{idx}@@", link_html)
+
+    rendered_html = re.sub(
+        r"<code([^>]*)>",
+        r"""<code\1 style="font-family: Consolas, 'Courier New', monospace;">""",
+        rendered_html,
+    )
+    rendered_html = re.sub(
+        r"<hr\s*/?>",
+        f'<hr style="border: none; border-top: 1px solid {hr_color}; margin: 8px 0;" />',
+        rendered_html,
+        flags=re.IGNORECASE,
+    )
+    for old, new in (
+            ("<p>", '<p style="margin: 0 0 8px 0;">'),
+            ("<h1>", '<h1 style="margin: 10px 0 8px 0; font-weight: normal; font-size: 1.6em;">'),
+            ("<h2>", '<h2 style="margin: 8px 0 8px 0; font-weight: normal; font-size: 1.45em;">'),
+            ("<h3>", '<h3 style="margin: 8px 0 8px 0; font-weight: normal; font-size: 1.3em;">'),
+            ("<h4>", '<h4 style="margin: 8px 0 8px 0; font-weight: normal; font-size: 1.15em;">'),
+            ("<h5>", '<h5 style="margin: 8px 0 8px 0; font-weight: normal; font-size: 1.05em;">'),
+            ("<h6>", '<h6 style="margin: 8px 0 8px 0; font-weight: normal; font-size: 1em;">'),
+            ("<ul>", '<ul style="margin: 0 0 8px 0;">'),
+            ("<ol>", '<ol style="margin: 0 0 8px 0;">'),
+            ("<blockquote>", '<blockquote style="margin: 0 0 8px 12px; padding-left: 8px; border-left: 3px solid #999999;">'),
+            ("<pre>", '<pre style="margin: 0 0 8px 0; padding: 8px; border: 1px solid #999999; white-space: pre-wrap;">'),
+            ("<table>", '<table cellspacing="0" cellpadding="6" style="margin: 0 0 8px 0; border-collapse: collapse;">'),
+            ("<th>", '<th style="border: 1px solid #999999; text-align: left;">'),
+            ("<td>", '<td style="border: 1px solid #999999;">'),
+    ):
+        rendered_html = rendered_html.replace(old, new)
+
+    return f'<div style="margin-top: 4px;">{rendered_html}</div>'
 
 class AIChatSignalEmitter(QObject):
     newTextChatSignal = pyqtSignal(int, str, str, int, object)  # will start a new text analysis chat
@@ -260,6 +325,10 @@ class DialogAIChat(QtWidgets.QDialog):
             self.ai_status_style = f'"{doc_font} color: #808080;"'
         self.ui.plainTextEdit_question.setStyleSheet(self.ai_user_style[1:-1])
         default_bg_color = self.ui.plainTextEdit_question.palette().color(self.ui.plainTextEdit_question.viewport().backgroundRole())
+        if default_bg_color.lightness() < 128:
+            self.markdown_hr_color = default_bg_color.lighter(140).name()
+        else:
+            self.markdown_hr_color = default_bg_color.darker(110).name()
         self.ui.ai_output.setAutoFillBackground(True)
         self.ui.ai_output.setStyleSheet(f"""
             QLabel#ai_output {{
@@ -558,15 +627,14 @@ class DialogAIChat(QtWidgets.QDialog):
             author = ''
         return author or 'unknown'
 
-    def _display_ai_agent_author(self, author: str = '') -> str:
-        normalized = str(author if author is not None else '').strip()
-        if normalized == '':
-            return self._current_ai_profile_name()
-        return normalized
+    def _message_heading_html(self, heading_text: str) -> str:
+        safe_heading = html_lib.escape(str(heading_text if heading_text is not None else ""))
+        heading_size = self.app.settings['fontsize'] + 1
+        return f'<div style="margin-top: 6px; font-size: {heading_size}pt;">⦿ <b>{safe_heading}</b></div>'
 
     def _ai_agent_heading_html(self, author: str = '') -> str:
-        display_author = self._display_ai_agent_author(author)
-        return f'<b>{_("AI")} {_("Agent")} ({display_author}):</b>'
+        display_author = self._current_ai_profile_name()
+        return self._message_heading_html(f'{_("AI Agent")} ({display_author}):')
             
     def fill_chat_list(self):
         self.chat_list_model.clear()
@@ -1490,9 +1558,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                 summary_br = summary.replace('\n', '<br />')
                 display_type = self._display_chat_type_label(analysis_type, preserve_legacy_general=True)
                 if not self._is_agent_chat_type(analysis_type):
-                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {display_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /><b>{_('Prompt:')}</b> {analysis_prompt}<br /></p>")
+                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {display_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /><b>{_('Prompt:')}</b> {analysis_prompt}</p>")
                 else:
-                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {display_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}<br /></p>")
+                    html += (f"<p style={self.ai_info_style}><b>{_('Type:')}</b> {display_type}<br /><b>{_('Summary:')}</b> {summary_br}<br /><b>{_('Date:')}</b> {date}</p>")
                 # Show chat messages:
                 agent_status_lines = []
                 agent_status_author = ''
@@ -1501,8 +1569,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                     nonlocal html, agent_status_lines, agent_status_author
                     if len(agent_status_lines) == 0:
                         return
-                    body = '<br />'.join(agent_status_lines)
-                    block = f'{self._ai_agent_heading_html(agent_status_author)}<br />{body}'
+                    # body = '<br />'.join(agent_status_lines)
+                    body = "".join(agent_status_lines)
+                    block = f'{self._ai_agent_heading_html(agent_status_author)}<ul>{body}</ul>'
                     html += f'<p style={self.ai_status_style}>{block}</p>'
                     agent_status_lines = []
                     agent_status_author = ''
@@ -1510,9 +1579,23 @@ data collected. This information will accompany every prompt sent to the AI, res
                 for msg in self.chat_msg_list:
                     msg_type = str(msg[2])
                     if msg_type == 'agent_status':
-                        status_line = html_lib.escape(str(msg[4] if msg[4] is not None else '')).replace('\n', '<br />')
+                        raw_status = str(msg[4] if msg[4] is not None else '')
+                        status_kind = ''
+                        status_text = raw_status
+                        try:
+                            status_payload = json.loads(raw_status)
+                        except Exception:
+                            status_payload = None
+                        if isinstance(status_payload, dict):
+                            status_kind = str(status_payload.get("kind", "")).strip().lower()
+                            status_text = str(status_payload.get("text", "")).strip()
+                        status_line = html_lib.escape(status_text).replace('\n', '<br />')
                         if status_line.strip() == '':
                             continue
+                        if status_kind in ('planning', 'reflection'):
+                            status_line = f'<li>{status_line}</li>'
+                        else:
+                            status_line = f'<li>{status_line}</li>'
                         status_author = str(msg[3] if msg[3] is not None else '').strip()
                         if status_author == '':
                             status_author = 'unknown'
@@ -1532,17 +1615,17 @@ data collected. This information will accompany every prompt sent to the AI, res
                         author = msg[3]
                         if author is None or author == '':
                             author = 'unkown'
-                        txt = f'<b>{_("User")} ({author}):</b><br />{txt}'
+                        heading = f'{_("User")} ({author}):'
+                        txt = f'{self._message_heading_html(heading)}{txt}'
                         html += f'<p style={self.ai_user_style}>{txt}</p>'
                     elif msg_type == 'ai':
-                        txt = msg[4]
-                        txt = txt.replace('\n', '<br />')
+                        txt = render_markdown_to_html(msg[4], hr_color=self.markdown_hr_color)
                         author = msg[3]
-                        txt = f'{self._ai_agent_heading_html(author)}<br />{txt}'
+                        txt = f'{self._ai_agent_heading_html(author)}{txt}'
                         html += f'<p style={self.ai_response_style}>{txt}</p>'
                     elif msg_type == 'info':
-                        txt = msg[4].replace('\n', '<br />')
-                        txt = '<b>' + _('Info:') + '</b><br />' + txt
+                        txt = self._message_heading_html(_("Info:"))
+                        txt += msg[4].replace('\n', '<br />')
                         html += f'<p style={self.ai_info_style}>{txt}</p>'
                 flush_agent_status_block()
                 # add partially streamed ai response if needed
@@ -1552,9 +1635,9 @@ data collected. This information will accompany every prompt sent to the AI, res
                     if len(self.app.ai.ai_streaming_output) != len(txt) and len(txt) == 0:
                         txt = _('Thinking...')
                     txt = self.replace_references(txt, streaming=True)
-                    txt = txt.replace('\n', '<br />')
-                    txt = f'{self._ai_agent_heading_html()}<br />{txt}'
-                    html += f'<p style={self.ai_response_style}>{txt}</p>'
+                    txt = render_markdown_to_html(txt, hr_color=self.markdown_hr_color)
+                    txt = f'{self._ai_agent_heading_html()}{txt}'
+                    html += f'<div style={self.ai_response_style}>{txt}</div>'
                 elif not self._chat_scope_active(self.current_chat_idx): # streaming finished, add actions
                     actions_list = []
                     if analysis_type == 'topic chat':
@@ -1940,7 +2023,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
         if status_text is None or status_text.strip() == '':
             return
-        msg_author = self._display_ai_agent_author(msg_author)
         curr_chat_id = self.chat_list[chat_idx][0]
         cursor = self.chat_history_conn.cursor()
         status_line = status_text.strip()
@@ -2668,7 +2750,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             note = note[: max_length - 3].rstrip() + "..."
         return note
 
-    def _emit_mcp_status_text(self, signals, chat_idx: int, status_text: str):
+    def _emit_mcp_status_text(self, signals, chat_idx: int, status_text: str, status_kind: str = ""):
         """Emit one free-text MCP progress line."""
 
         status = self._normalize_progress_note(status_text)
@@ -2676,7 +2758,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             return
         if signals is None or signals.progress is None:
             return
-        payload = {"chat_idx": chat_idx, "status": status}
+        payload = {"chat_idx": chat_idx, "status": status, "status_kind": str(status_kind).strip()}
         signals.progress.emit(json.dumps(payload, ensure_ascii=False))
 
     def _short_reflection_next_step_note(self, reflection_summary: str,
@@ -3090,7 +3172,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             latest_reflection_summary = ""
             pending_user_decision = None
             if plan_summary != "":
-                self._emit_mcp_status_text(signals, chat_idx, plan_summary)
+                self._emit_mcp_status_text(signals, chat_idx, plan_summary, status_kind="planning")
             initial_brief = str(plan_data.get("answer_brief", "")).strip()
             if initial_brief != "":
                 final_hint = initial_brief
@@ -3226,7 +3308,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                     reflection_next_step_note,
                 )
                 if short_reflection_note != "":
-                    self._emit_mcp_status_text(signals, chat_idx, short_reflection_note)
+                    self._emit_mcp_status_text(signals, chat_idx, short_reflection_note, status_kind="reflection")
                 user_decision_required = self._json_bool(reflection_data.get("user_decision_required", False), False)
                 decision_question = self._normalize_progress_note(reflection_data.get("decision_question", ""), max_length=600)
                 decision_context = self._normalize_progress_note(reflection_data.get("decision_context", ""), max_length=600)
@@ -3276,7 +3358,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                         if replan_summary != "":
                             latest_plan_summary = replan_summary
                         if replan_summary != "":
-                            self._emit_mcp_status_text(signals, chat_idx, replan_summary)
+                            self._emit_mcp_status_text(signals, chat_idx, replan_summary, status_kind="planning")
                         revised_calls = self._normalize_mcp_calls(
                             replan_data.get("calls", []), allowed_methods, max_queued_calls
                         )
@@ -3472,15 +3554,19 @@ data collected. This information will accompany every prompt sent to the AI, res
                         msg_content,
                         chat_idx,
                         refresh_history=False,
-                        commit_history=True,
+                            commit_history=True,
                     )
             status = str(payload.get("status", "")).strip()
+            status_kind = str(payload.get("status_kind", "")).strip().lower()
         else:
             status = str(progress_msg).strip()
             chat_idx = self.current_chat_idx
+            status_kind = ""
         if status == '':
             self._update_undo_button_state()
             return
+        if status_kind != "":
+            status = json.dumps({"kind": status_kind, "text": status}, ensure_ascii=False)
         self.process_message('agent_status', status, chat_idx)
         self._update_undo_button_state()
     
