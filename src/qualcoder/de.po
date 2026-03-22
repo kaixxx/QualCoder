@@ -8335,3 +8335,6 @@ msgstr "Unbehandelter Fehler"
 
 #~ msgid "AI provider"
 #~ msgstr "KI-Anbieter"
+
+msgid "New Agent Chat"
+msgstr "Neuer Agent-Chat"

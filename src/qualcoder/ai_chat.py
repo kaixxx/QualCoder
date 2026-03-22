@@ -620,6 +620,15 @@ class DialogAIChat(QtWidgets.QDialog):
             return _('AI Agent Chat')
         return raw_value
 
+    def _empty_agent_chat_alias(self) -> str:
+        return _('New Agent Chat')
+
+    def _display_chat_name(self, name: str, analysis_type: str) -> str:
+        clean_name = str(name if name is not None else '').strip()
+        if clean_name == '' and self._is_agent_chat_type(analysis_type):
+            return self._empty_agent_chat_alias()
+        return clean_name
+
     def _current_ai_profile_name(self) -> str:
         try:
             author = str(self.app.ai_models[int(self.app.settings['ai_model_index'])]['name']).strip()
@@ -654,7 +663,7 @@ class DialogAIChat(QtWidgets.QDialog):
             elif analysis_type == 'code chat':
                 icon = self.app.ai.code_analysis_icon()
 
-            item = QStandardItem(icon, name)
+            item = QStandardItem(icon, self._display_chat_name(name, analysis_type))
             item.setToolTip(tooltip_text)
             item.setEditable(True)
             self.chat_list_model.appendRow(item)
@@ -669,10 +678,28 @@ class DialogAIChat(QtWidgets.QDialog):
         """Build tooltip text for a chat list item."""
 
         id_, name, analysis_type, summary, date, analysis_prompt = chat
+        display_name = self._display_chat_name(name, analysis_type)
         display_type = self._display_chat_type_label(analysis_type, preserve_legacy_general=True)
         if not self._is_agent_chat_type(analysis_type):
-            return f"{name}\nType: {display_type}\nSummary: {summary}\nDate: {date}\nPrompt: {analysis_prompt}"
-        return f"{name}\nType: {display_type}\nSummary: {summary}\nDate: {date}"
+            return f"{display_name}\nType: {display_type}\nSummary: {summary}\nDate: {date}\nPrompt: {analysis_prompt}"
+        return f"{display_name}\nType: {display_type}\nSummary: {summary}\nDate: {date}"
+
+    def _refresh_chat_list_item(self, row: int) -> None:
+        """Refresh one visible chat-list entry from self.chat_list."""
+
+        if row < 0 or row >= len(self.chat_list):
+            return
+        item = self.chat_list_model.item(row)
+        if item is None:
+            return
+        chat = self.chat_list[row]
+        display_name = self._display_chat_name(chat[1], chat[2])
+        self._is_updating_chat_title_item = True
+        try:
+            item.setText(display_name)
+            item.setToolTip(self._chat_tooltip_text(chat))
+        finally:
+            self._is_updating_chat_title_item = False
 
     def _refresh_chat_name_views(self):
         """Force visible chat-title widgets to repaint after a model update."""
@@ -716,14 +743,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.chat_history_conn.commit()
         updated_chat = (chat[0], clean_name, chat[2], chat[3], chat[4], chat[5])
         self.chat_list[row] = updated_chat
-        item = self.chat_list_model.item(row)
-        if item is not None:
-            self._is_updating_chat_title_item = True
-            try:
-                item.setText(clean_name)
-                item.setToolTip(self._chat_tooltip_text(updated_chat))
-            finally:
-                self._is_updating_chat_title_item = False
+        self._refresh_chat_list_item(row)
         self._refresh_chat_name_views()
         self.update_chat_window()
         return True
@@ -808,7 +828,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_output_autoscroll = True
         self.chat_list_selection_changed()
 
-    def new_general_chat(self, name, summary):
+    def new_general_chat(self, name='', summary=''):
         if self.app.project_name == "":
             msg = _('No project open.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
@@ -818,7 +838,7 @@ class DialogAIChat(QtWidgets.QDialog):
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
             return
 
-        self.new_chat(name, 'agent chat', summary, '')
+        self.new_chat(str(name if name is not None else ''), 'agent chat', summary, '')
         system_prompt = self._general_chat_base_system_prompt()
         self.ai_text_doc_id = None
         self.process_message('system', system_prompt)    
@@ -1364,7 +1384,10 @@ data collected. This information will accompany every prompt sent to the AI, res
         if self.current_chat_idx <= -1:
             return
         chat_id = int(self.chat_list[self.current_chat_idx][0])
-        chat_name = self.chat_list[self.current_chat_idx][1]
+        chat_name = self._display_chat_name(
+            self.chat_list[self.current_chat_idx][1],
+            self.chat_list[self.current_chat_idx][2],
+        )
         msg = _('Do you really want to delete ') + '"' + chat_name + '"?'
         ui = DialogConfirmDelete(self.app, msg, _('Delete Chat'))
         ok = ui.exec()
@@ -1554,7 +1577,7 @@ data collected. This information will accompany every prompt sent to the AI, res
                             
                 self.ui.ai_output.setText('')  # Clear chat window
                 # Show title
-                html += f'<h1 style={self.ai_info_style}>{name}</h1>'
+                html += f'<h1 style={self.ai_info_style}>{self._display_chat_name(name, analysis_type)}</h1>'
                 summary_br = summary.replace('\n', '<br />')
                 display_type = self._display_chat_type_label(analysis_type, preserve_legacy_general=True)
                 if not self._is_agent_chat_type(analysis_type):
@@ -1784,13 +1807,14 @@ data collected. This information will accompany every prompt sent to the AI, res
         if row < 0 or row >= len(self.chat_list):
             return
         previous_name = self.chat_list[row][1]
-        if not self._rename_chat_at_row(row, item.text()):
-            self._is_updating_chat_title_item = True
-            try:
-                item.setText(previous_name)
-                item.setToolTip(self._chat_tooltip_text(self.chat_list[row]))
-            finally:
-                self._is_updating_chat_title_item = False
+        analysis_type = self.chat_list[row][2]
+        proposed_name = str(item.text()).strip()
+        if previous_name.strip() == '' and self._is_agent_chat_type(analysis_type) and proposed_name == self._empty_agent_chat_alias():
+            self._refresh_chat_list_item(row)
+            self._refresh_chat_name_views()
+            return
+        if not self._rename_chat_at_row(row, proposed_name):
+            self._refresh_chat_list_item(row)
             self._refresh_chat_name_views()
 
     def open_context_menu(self, position):
@@ -1833,7 +1857,10 @@ data collected. This information will accompany every prompt sent to the AI, res
     def export_chat(self):
         """Export the current chat into a html or txt file"""
         chat_content = self.ui.ai_output.text()
-        default_file_name = self.chat_list[self.current_chat_idx][1]
+        default_file_name = self._display_chat_name(
+            self.chat_list[self.current_chat_idx][1],
+            self.chat_list[self.current_chat_idx][2],
+        )
         default_file_name = default_file_name.replace('"', '')
         if self.last_export_dir != '':
             default_file_name = os.path.join(self.last_export_dir, default_file_name)
@@ -1925,7 +1952,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         elif action == action_topic_analysis:
             self.new_topic_chat()
         elif action == action_general_chat:
-            self.new_general_chat(_('New AI Agent Chat'), '')
+            self.new_general_chat('', '')
 
     def ai_output_scroll_to_bottom(self, minVal=None, maxVal=None):  # toDO minVal, maxVal unused
         #self._ai_output_scroll_to_bottom()
@@ -2044,6 +2071,157 @@ data collected. This information will accompany every prompt sent to the AI, res
                        ' VALUES (?, ?, ?, ?)', (curr_chat_id, 'agent_status', msg_author, status_line))
         self.chat_history_conn.commit()
         self.history_update_message_list()
+
+    def _chat_user_message_count(self, chat_id: int, db_conn=None) -> int:
+        """Count persisted user messages for one chat."""
+
+        if db_conn is None:
+            db_conn = self.chat_history_conn
+        cursor = db_conn.cursor()
+        cursor.execute(
+            "SELECT COUNT(*) FROM chat_messages WHERE chat_id=? AND msg_type='user'",
+            (chat_id,),
+        )
+        row = cursor.fetchone()
+        if row is None or row[0] is None:
+            return 0
+        return int(row[0])
+
+    def _agent_chat_metadata_system_prompt(self) -> str:
+        language = str(self.app.ai.get_curr_language()).strip()
+        return (
+            "Create concise metadata for a new AI agent chat. "
+            "Return ONLY one JSON object with this shape:\n"
+            "{"
+            "\"name\": \"short chat title\", "
+            "\"summary\": \"one short summary sentence\""
+            "}\n"
+            "Rules:\n"
+            f"- Write both fields in {language} unless the user message clearly requires another language.\n"
+            "- name must be specific, 2 to 8 words, and must not be a generic placeholder.\n"
+            "- name must not contain quotes, line breaks, or ending punctuation.\n"
+            "- summary must be one concise sentence, max 160 characters.\n"
+            "- Base the result only on the first user message.\n"
+            "- Do not output prose outside JSON.\n"
+        )
+
+    def _agent_chat_metadata_json_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["name", "summary"],
+            "additionalProperties": False,
+        }
+
+    def _sanitize_generated_chat_title(self, raw_title: str) -> str:
+        title = re.sub(r'\s+', ' ', str(raw_title if raw_title is not None else '')).strip()
+        title = title.strip('\'"“”‘’`')
+        title = title.rstrip('.,:;!?')
+        if len(title) > 80:
+            title = title[:80].rstrip()
+        return title
+
+    def _sanitize_generated_chat_summary(self, raw_summary: str) -> str:
+        summary = re.sub(r'\s+', ' ', str(raw_summary if raw_summary is not None else '')).strip()
+        if len(summary) > 220:
+            summary = summary[:220].rstrip()
+        return summary
+
+    def _queue_agent_chat_metadata_generation(self, chat_idx: int, user_message: str) -> None:
+        """Generate chat title + summary after the first user turn for untitled agent chats."""
+
+        if chat_idx < 0 or chat_idx >= len(self.chat_list):
+            return
+        chat = self.chat_list[chat_idx]
+        chat_id, chat_name, analysis_type = chat[0], chat[1], chat[2]
+        if not self._is_agent_chat_type(analysis_type):
+            return
+        if str(chat_name if chat_name is not None else '').strip() != '':
+            return
+        if self._chat_user_message_count(chat_id) != 1:
+            return
+        prompt_text = str(user_message if user_message is not None else '').strip()
+        if prompt_text == '':
+            return
+        self.app.ai.start_query(
+            self._generate_agent_chat_metadata_worker,
+            self.agent_chat_metadata_callback,
+            chat_id,
+            prompt_text,
+            model_kind='fast',
+            scope_type='chat_title',
+            scope_id=chat_id,
+            cancel_result={"chat_id": chat_id, "canceled": True},
+        )
+
+    def _generate_agent_chat_metadata_worker(self, chat_id: int, user_message: str, signals=None) -> Dict[str, Any]:
+        """Background worker for agent-chat metadata generation."""
+
+        del signals
+        response = self._invoke_json_llm(
+            [
+                SystemMessage(content=self._agent_chat_metadata_system_prompt()),
+                HumanMessage(content='First user message:\n' + str(user_message)),
+            ],
+            schema_name='agent_chat_metadata',
+            response_schema=self._agent_chat_metadata_json_schema(),
+            context='agent_chat_metadata',
+            model_kind='fast',
+        )
+        return {
+            "chat_id": int(chat_id),
+            "name": self._sanitize_generated_chat_title(response.get("name", "")),
+            "summary": self._sanitize_generated_chat_summary(response.get("summary", "")),
+        }
+
+    def agent_chat_metadata_callback(self, result: Dict[str, Any]) -> None:
+        """Persist generated chat metadata if the chat is still unnamed."""
+
+        if not isinstance(result, dict) or result.get("canceled", False):
+            return
+        try:
+            chat_id = int(result.get("chat_id", -1))
+        except Exception:
+            chat_id = -1
+        if chat_id < 0:
+            return
+        generated_name = self._sanitize_generated_chat_title(result.get("name", ""))
+        generated_summary = self._sanitize_generated_chat_summary(result.get("summary", ""))
+        if generated_name == '' or generated_summary == '':
+            return
+
+        cursor = self.chat_history_conn.cursor()
+        cursor.execute('SELECT name FROM chats WHERE id = ?', (chat_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return
+        existing_name = str(row[0] if row[0] is not None else '').strip()
+        if existing_name != '':
+            return
+
+        cursor.execute(
+            "UPDATE chats SET name = ?, summary = ? "
+            "WHERE id = ? AND TRIM(COALESCE(name, '')) = ''",
+            (generated_name, generated_summary, chat_id),
+        )
+        if cursor.rowcount <= 0:
+            self.chat_history_conn.rollback()
+            return
+        self.chat_history_conn.commit()
+
+        row_idx = self.find_chat_idx(chat_id)
+        if row_idx is None:
+            self.fill_chat_list()
+            return
+        chat = self.chat_list[row_idx]
+        self.chat_list[row_idx] = (chat[0], generated_name, chat[2], generated_summary, chat[4], chat[5])
+        self._refresh_chat_list_item(row_idx)
+        self._refresh_chat_name_views()
+        if row_idx == self.current_chat_idx:
+            self.update_chat_window(scroll_to_bottom=False)
     
     def button_question_clicked(self):
         if self._chat_scope_active():
@@ -2137,6 +2315,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             # user question, shown on screen and send to the AI
             if chat_idx == self.current_chat_idx:
                 self.history_add_message(msg_type, self.app.settings['codername'], msg_content, chat_idx)
+                self._queue_agent_chat_metadata_generation(chat_idx, msg_content)
                 messages = self.history_get_ai_messages()
                 self.current_streaming_chat_idx = self.current_chat_idx
                 analysis_type = ''
@@ -2543,7 +2722,8 @@ data collected. This information will accompany every prompt sent to the AI, res
 
     def _invoke_json_llm(self, messages: List[Any], schema_name: str = '',
                          response_schema: Optional[Dict[str, Any]] = None,
-                         context: str = 'mcp_json_control') -> Dict[str, Any]:
+                         context: str = 'mcp_json_control',
+                         model_kind: str = 'large') -> Dict[str, Any]:
         """Invoke model and parse one JSON object response."""
 
         response_format = None
@@ -2557,7 +2737,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             response_format=response_format,
             context=context,
             fallback_without_response_format=True,
-            model_kind='large',
+            model_kind=model_kind,
         )
         raw = strip_think_blocks(str(llm_response.content)).strip()
         raw = self._extract_first_json_object(raw)

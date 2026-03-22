@@ -484,7 +484,7 @@ class AiLLM():
         self.app = app
         self.parent_text_edit = parent_text_edit
         self.threadpool = QtCore.QThreadPool()
-        self.threadpool.setMaxThreadCount(1)
+        self.threadpool.setMaxThreadCount(2)
         self.sources_vectorstore = AiVectorstore(self.app, self.parent_text_edit, self.sources_collection)
         self.ai_change_history = []  # Session-scoped AI write operations for undo
         self._runs_lock = threading.RLock()
@@ -793,6 +793,19 @@ class AiLLM():
                 if str(ctx.status).strip() not in ('finished', 'errored', 'canceled')
             )
 
+    def _has_blocking_active_runs(self) -> bool:
+        """Return whether any user-blocking AI run is still active."""
+
+        non_blocking_scopes = {'chat_title'}
+        with self._runs_lock:
+            for ctx in self._runs_by_id.values():
+                if str(ctx.status).strip() in ('finished', 'errored', 'canceled'):
+                    continue
+                if str(ctx.scope_type).strip() in non_blocking_scopes:
+                    continue
+                return True
+        return False
+
     def _request_cancel_run(self, run_context: AiRunContext) -> bool:
         if run_context is None:
             return False
@@ -931,6 +944,16 @@ class AiLLM():
                 raise
             if current_context.cancel_event.is_set():
                 raise AICancelled(current_context.run_id)
+            if str(current_context.model_kind).strip().lower() == 'fast':
+                self.log_llm_error(req_id, active_llm, err, context=f'{context}_fast_primary_error')
+            try:
+                res = self._invoke_with_large_model_fallback(messages, invoke_kwargs, context, current_context)
+                if res is not None:
+                    return res
+            except AICancelled:
+                raise
+            except Exception:
+                pass
             may_fallback = (
                 fallback_without_response_format
                 and response_format is not None
@@ -961,6 +984,44 @@ class AiLLM():
                 self._finalize_run_context(temp_context, terminal_status)
         self.log_llm_response(req_id, active_llm, getattr(res, 'content', ''), context=context)
         return res
+
+    def _invoke_with_large_model_fallback(self, messages, invoke_kwargs, context: str, current_context):
+        """Retry one failed fast-model invoke with the configured large model."""
+
+        if current_context is None:
+            return None
+        if str(current_context.model_kind).strip().lower() != 'fast':
+            return None
+        if self._large_llm_params is None or self._large_llm_factory is None:
+            return None
+
+        fallback_context = None
+        fallback_req_id = None
+        fallback_llm = None
+        fallback_context_label = f'{context}_fallback_large' if str(context).strip() != '' else 'fallback_large'
+        try:
+            self._raise_if_run_canceled(current_context)
+            fallback_context = self._create_run_context(model_kind='large', purpose='invoke')
+            fallback_llm = fallback_context.llm
+            fallback_req_id = self.log_llm_request(fallback_llm, messages, context=fallback_context_label)
+            res = fallback_llm.invoke(messages, **invoke_kwargs)
+            self._raise_if_run_canceled(current_context)
+            self.log_llm_response(fallback_req_id, fallback_llm, getattr(res, 'content', ''), context=fallback_context_label)
+            return res
+        except Exception as err:
+            if isinstance(err, AICancelled):
+                raise
+            if current_context.cancel_event.is_set():
+                raise AICancelled(current_context.run_id)
+            if fallback_req_id is not None and fallback_llm is not None:
+                self.log_llm_error(fallback_req_id, fallback_llm, err, context=fallback_context_label)
+            raise
+        finally:
+            if fallback_context is not None:
+                terminal_status = 'canceled' if fallback_context.cancel_event.is_set() else (
+                    'errored' if fallback_context.error_text != '' else 'finished'
+                )
+                self._finalize_run_context(fallback_context, terminal_status)
 
     def _ensure_ai_change_history(self):
         if not isinstance(self.ai_change_history, list):
@@ -2555,7 +2616,7 @@ class AiLLM():
         elif self._large_llm_factory is None or self._fast_llm_factory is None or \
                 self._large_llm_params is None or self._fast_llm_params is None:
             return 'closed'
-        elif self._active_run_count() > 0 or self.threadpool.activeThreadCount() > 0:
+        elif self._has_blocking_active_runs():
             return 'busy'
         else:
             return 'ready'
