@@ -2945,6 +2945,7 @@ class DialogCodeText(QtWidgets.QWidget):
         if "code_cat" not in tables and "code_name" not in tables:
             if "code_text" not in tables:
                 return
+            # only code_text has changed, so refresh coded text tooltips and code counts in tree, but not the whole tree
             code_text_change = tables.get("code_text", {})
             if not isinstance(code_text_change, dict):
                 return
@@ -2962,7 +2963,12 @@ class DialogCodeText(QtWidgets.QWidget):
             if current_file_matches or ai_assisted_coding:
                 self.fill_code_counts_in_tree()
             return
-        self.update_dialog_codes_and_categories()
+        # refresh the whole tree and coded text tooltips
+        self.get_codes_and_categories()
+        self.fill_tree()
+        self.unlight()
+        self.highlight()
+        self.get_coded_text_update_eventfilter_tooltips()
 
     def add_category(self, supercatid=None):
         """ When button pressed, add a new category.
