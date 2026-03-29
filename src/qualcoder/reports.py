@@ -301,7 +301,7 @@ class DialogReportCodeFrequencies(QtWidgets.QDialog):
         self.fill_tree()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local tree when KI project events change codes or codings."""
+        """Refresh the local tree when project events change codes or codings."""
 
         if not isinstance(event, dict):
             return
@@ -598,7 +598,7 @@ class DialogReportCoderComparisons(QtWidgets.QDialog):
             self.coders.append(row[0])
 
     def _on_project_data_changed(self, event):
-        """Refresh the local comparison tree when KI project events touch it."""
+        """Refresh the local comparison tree when project events touch it."""
 
         if not isinstance(event, dict):
             return

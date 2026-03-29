@@ -133,7 +133,7 @@ class DialogReportExactTextMatches(QtWidgets.QDialog):
             self.ui.comboBox_coders.blockSignals(False)
 
     def _on_project_data_changed(self, event):
-        """Refresh the local exact-match dialog when KI project events affect it."""
+        """Refresh the local exact-match dialog when project events affect it."""
 
         if not isinstance(event, dict):
             return

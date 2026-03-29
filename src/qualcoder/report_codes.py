@@ -44,6 +44,7 @@ from .confirm_delete import DialogConfirmDelete
 from .GUI.ui_dialog_report_codings import Ui_Dialog_reportCodings
 from .helpers import Message, msecs_to_hours_mins_secs, DialogCodeInImage, DialogCodeInAV, DialogCodeInText, \
     ExportDirectoryPathDialog
+from .memo import DialogMemo
 from .report_attributes import DialogSelectAttributeParameters
 from .ris import Ris
 from .select_items import DialogSelectItems
@@ -272,7 +273,6 @@ class DialogReportCodes(QtWidgets.QDialog):
         if not self.cases:
             self.ui.listWidget_cases.setHidden(True)
             view = self.ui.comboBox_matrix.view()
-            print("hiding")
             view.setRowHidden(1, True)
             view.setRowHidden(3, True)
             view.setRowHidden(5, True)
@@ -290,7 +290,7 @@ class DialogReportCodes(QtWidgets.QDialog):
             self.coders.append(row[0])
 
     def _on_project_data_changed(self, event):
-        """Refresh the local code tree when KI project events change the code system."""
+        """Refresh the local code tree when project events change the code system."""
 
         if not isinstance(event, dict):
             return
@@ -2401,6 +2401,7 @@ class DialogReportCodes(QtWidgets.QDialog):
         action_view = None
         action_unmark = None
         action_important = None
+        action_edit_memo = None
         action_change_code_to = None
         action_apply_additional_code = None
         code_here = None
@@ -2413,6 +2414,7 @@ class DialogReportCodes(QtWidgets.QDialog):
             action_unmark = menu.addAction(_("Unmark"))
             action_important = menu.addAction(_("Add important mark"))
             action_change_code_to = menu.addAction(_("Change code to"))
+            action_edit_memo = menu.addAction(_("Edit memo"))
             action_apply_additional_code = menu.addAction(_("Apply additional code"))
         action_copy = None
         if selected_text != "":
@@ -2436,6 +2438,8 @@ class DialogReportCodes(QtWidgets.QDialog):
             self.unmark(code_here)
         if action == action_important:
             self.mark_important(code_here)
+        if action == action_edit_memo:
+            self.edit_memo(code_here)
         if action == action_change_code_to:
             self.change_code_to_another_code(code_here)
         if action == action_apply_additional_code:
@@ -2469,10 +2473,42 @@ class DialogReportCodes(QtWidgets.QDialog):
         if code['result_type'] == 'av':
             cur.execute("update code_av set important=1 where avid=?", [code['avid']])
         self.app.conn.commit()
-
         self.app.delete_backup = False
+        # Remove widgets from coding layout, reload to update
+        contents = self.tab_coding.layout()
+        if contents:
+            for i in reversed(range(contents.count())):
+                contents.itemAt(i).widget().close()
+                contents.itemAt(i).widget().setParent(None)
 
-        # Remove widgets from coding layout
+    def edit_memo(self, code):
+        """ Edit the coded memo """
+
+        cur = self.app.conn.cursor()
+        if code['result_type'] == 'text':
+            cur.execute("select memo from code_text where ctid=?", [code['ctid']])
+        if code['result_type'] == 'image':
+            cur.execute("select memo from  code_image where imid=?", [code['imid']])
+        if code['result_type'] == 'av':
+            cur.execute("select memo from  code_av where avid=?", [code['avid']])
+        memo = cur.fetchone()[0]
+        ui = DialogMemo(self.app, _("Memo for coded"), memo)
+        ui.exec()
+        new_memo = ui.memo
+        if memo == new_memo:
+            return
+        if code['result_type'] == 'text':
+            cur.execute("update code_text set memo=? where ctid=?", [new_memo, code['ctid']])
+            self.parent_textEdit.append(_("Text memo updated for ctid: ") + str(code['ctid']))
+        if code['result_type'] == 'image':
+            cur.execute("update  code_image set memo=? where imid=?", [new_memo, code['imid']])
+            self.parent_textEdit.append(_("Image memo updated for imid: ") + str(code['imid']))
+        if code['result_type'] == 'av':
+            cur.execute("update code_av set memo=? where avid=?", [new_memo, code['avid']])
+            self.parent_textEdit.append(_("AV memo updated for avid: ") + str(code['avid']))
+        self.app.conn.commit()
+        self.app.delete_backup = False
+        # Remove widgets from coding layout, reload to update
         contents = self.tab_coding.layout()
         if contents:
             for i in reversed(range(contents.count())):

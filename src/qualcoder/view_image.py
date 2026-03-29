@@ -1014,7 +1014,7 @@ class DialogCodeImage(QtWidgets.QDialog):
                     c.fill_tree()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local image coding UI when KI project events affect it."""
+        """Refresh the local image coding UI when project events affect it."""
 
         if not isinstance(event, dict):
             return

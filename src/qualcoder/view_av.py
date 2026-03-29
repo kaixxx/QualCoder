@@ -1672,7 +1672,7 @@ class DialogCodeAV(QtWidgets.QDialog):
                     c.fill_tree()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local media coding UI when KI project events affect it."""
+        """Refresh the local media coding UI when project events affect it."""
 
         if not isinstance(event, dict):
             return

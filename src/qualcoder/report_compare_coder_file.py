@@ -136,7 +136,7 @@ class DialogCompareCoderByFile(QtWidgets.QDialog):
         self.get_files()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local code tree when KI project events change the code system."""
+        """Refresh the local code tree when project events change the code system."""
 
         if not isinstance(event, dict):
             return

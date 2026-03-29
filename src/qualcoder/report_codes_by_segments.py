@@ -173,7 +173,7 @@ class DialogCodesBySegments(QtWidgets.QDialog):
             self.coders.append(row[0])
 
     def _on_project_data_changed(self, event):
-        """Refresh the local tree when KI project events affect segment reports."""
+        """Refresh the local tree when project events affect segment reports."""
 
         if not isinstance(event, dict):
             return

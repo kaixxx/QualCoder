@@ -144,7 +144,7 @@ class DialogReportComparisonTable(QtWidgets.QDialog):
         self.codes = [fresh_code_map[cid] for cid in previous_selected_ids if cid in fresh_code_map]
 
     def _on_project_data_changed(self, event):
-        """Refresh the local comparison table when KI project events affect it."""
+        """Refresh the local comparison table when project events affect it."""
 
         if not isinstance(event, dict):
             return

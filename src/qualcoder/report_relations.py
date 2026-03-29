@@ -228,7 +228,7 @@ class DialogReportRelations(QtWidgets.QDialog):
         self.codes, self.categories = self.app.get_codes_categories()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local relations dialog when KI project events affect it."""
+        """Refresh the local relations dialog when project events affect it."""
 
         if not isinstance(event, dict):
             return

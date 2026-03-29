@@ -191,7 +191,7 @@ class DialogReportCooccurrence(QtWidgets.QDialog):
         self.ui.textEdit.clear()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local co-occurrence dialog when KI project events affect it."""
+        """Refresh the local co-occurrence dialog when project events affect it."""
 
         if not isinstance(event, dict):
             return

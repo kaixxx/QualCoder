@@ -2186,7 +2186,7 @@ class DialogCodePdf(QtWidgets.QWidget):
                     c.fill_tree()
 
     def _on_project_data_changed(self, event):
-        """Refresh the local PDF coding UI when KI project events affect it."""
+        """Refresh the local PDF coding UI when project events affect it."""
 
         if not isinstance(event, dict):
             return
