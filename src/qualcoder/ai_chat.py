@@ -662,6 +662,8 @@ class DialogAIChat(QtWidgets.QDialog):
                 icon = self.app.ai.text_analysis_icon()
             elif analysis_type == 'code chat':
                 icon = self.app.ai.code_analysis_icon()
+            else: # unknown type, ignore this chat altogether
+                continue
 
             item = QStandardItem(icon, self._display_chat_name(name, analysis_type))
             item.setToolTip(tooltip_text)
