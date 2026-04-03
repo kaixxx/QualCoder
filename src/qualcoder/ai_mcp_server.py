@@ -40,6 +40,8 @@ class AiMcpServer:
     default_vector_page_size = 20
     default_vector_k_per_query = 50
     default_vector_score_threshold = 0.5
+    default_bm25_page_size = 20
+    max_bm25_page_size = 100
     default_regex_page_size = 20
     max_regex_page_size = 100
     default_regex_context_chars = 120
@@ -94,6 +96,8 @@ class AiMcpServer:
             "(qualcoder://documents/text/{id}), code tree (qualcoder://codes/tree), and coded text segments by code id "
             "(qualcoder://codes/segments/{cid}), semantic vector search "
             "(qualcoder://vector/search?q=...) with optional filters file_ids and exclude_cids, "
+            "BM25 chunk search "
+            "(qualcoder://search/bm25?q=...) with optional filters file_ids and exclude_cids, "
             "and regular-expression search "
             "(qualcoder://search/regex?pattern=...) with optional filters file_ids and exclude_cids. "
             "Available tools include preview and write operations for categories, codes, and text codings. "
@@ -378,6 +382,8 @@ class AiMcpServer:
             return _('Reviewing the current code structure...')
         if uri_base == "qualcoder://vector/search":
             return _('Running semantic search in the project data...')
+        if uri_base == "qualcoder://search/bm25":
+            return _('Running BM25 search in the project data...')
         if uri_base == "qualcoder://search/regex":
             return _('Running keyword search in the project data...')
         code_segments_match = re.fullmatch(r"qualcoder://codes/segments/(\d+)", uri_base)
@@ -488,6 +494,16 @@ class AiMcpServer:
                     mimeType="application/json",
                 ),
                 types.ResourceTemplate(
+                    uriTemplate="qualcoder://search/bm25{?q,cursor,page_size,file_ids,exclude_cids}",
+                    name="BM25 search",
+                    description=(
+                        "Search chunked text lexically using SQLite FTS5 BM25 ranking. "
+                        "Pass one or more q parameters. Optional params: cursor, page_size, "
+                        "file_ids and exclude_cids."
+                    ),
+                    mimeType="application/json",
+                ),
+                types.ResourceTemplate(
                     uriTemplate="qualcoder://search/regex{?pattern,flags,cursor,page_size,file_ids,exclude_cids,context_chars}",
                     name="Regular-expression search",
                     description=(
@@ -534,6 +550,9 @@ class AiMcpServer:
         if uri_no_query == "qualcoder://vector/search":
             options = self._parse_vector_search_options(query)
             return self._read_vector_search(options)
+        if uri_no_query == "qualcoder://search/bm25":
+            options = self._parse_bm25_search_options(query)
+            return self._read_bm25_search(options)
         if uri_no_query == "qualcoder://search/regex":
             options = self._parse_regex_search_options(query)
             return self._read_regex_search(options)
@@ -578,6 +597,13 @@ class AiMcpServer:
                 uri="qualcoder://vector/search",
                 name="Semantic vector search",
                 description="Semantic retrieval over embedded text chunks. Requires query param q. "
+                            "Optional filters: file_ids and exclude_cids.",
+                mimeType="application/json",
+            ),
+            types.Resource(
+                uri="qualcoder://search/bm25",
+                name="BM25 search",
+                description="FTS5/BM25 lexical retrieval over text chunks. Requires query param q. "
                             "Optional filters: file_ids and exclude_cids.",
                 mimeType="application/json",
             ),
@@ -2072,6 +2098,48 @@ class AiMcpServer:
             "score_threshold": score_threshold,
         }
 
+    def _parse_bm25_search_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
+        query_strings: List[str] = []
+        for key in ("q", "query", "queries"):
+            values = query.get(key, [])
+            for raw in values:
+                raw_text = str(raw).strip()
+                if raw_text == "":
+                    continue
+                for line in raw_text.splitlines():
+                    line_clean = " ".join(line.split()).strip()
+                    if line_clean != "":
+                        query_strings.append(line_clean)
+
+        deduped_queries: List[str] = []
+        seen_queries: set[str] = set()
+        for q in query_strings:
+            q_key = q.lower()
+            if q_key in seen_queries:
+                continue
+            seen_queries.add(q_key)
+            deduped_queries.append(q)
+
+        if len(deduped_queries) == 0:
+            raise ValueError("Missing BM25 search query. Use at least one ?q=... parameter.")
+
+        cursor = self._to_int(query.get("cursor", [0])[0], 0)
+        cursor = max(0, cursor)
+
+        page_size = self._to_int(query.get("page_size", [self.default_bm25_page_size])[0], self.default_bm25_page_size)
+        page_size = max(1, min(page_size, self.max_bm25_page_size))
+
+        file_ids = self._parse_positive_int_list_options(query, ("file_ids",))
+        exclude_cids = self._parse_positive_int_list_options(query, ("exclude_cids", "exclude_code_ids", "cids"))
+
+        return {
+            "queries": deduped_queries,
+            "cursor": cursor,
+            "page_size": page_size,
+            "file_ids": file_ids,
+            "exclude_cids": exclude_cids,
+        }
+
     def _parse_regex_search_options(self, query: Dict[str, List[str]]) -> Dict[str, Any]:
         pattern = ""
         for key in ("pattern", "q", "query"):
@@ -2251,6 +2319,141 @@ class AiMcpServer:
             }
         finally:
             conn.close()
+
+    def _read_bm25_search(self, options: Dict[str, Any]) -> Dict[str, Any]:
+        ai = getattr(self.app, "ai", None)
+        if ai is None:
+            raise RuntimeError("AI integration is not initialized.")
+        vectorstore = getattr(ai, "sources_vectorstore", None)
+        if vectorstore is None or not getattr(vectorstore, "is_open", lambda: False)():
+            raise RuntimeError("Vectorstore is not initialized.")
+        is_ready_fn = getattr(vectorstore, "is_ready", None)
+        if callable(is_ready_fn) and not is_ready_fn():
+            raise RuntimeError("Vectorstore is currently updating. Please try again shortly.")
+
+        queries = options.get("queries", [])
+        if not isinstance(queries, list) or len(queries) == 0:
+            raise ValueError("Missing BM25 search query.")
+        cursor = max(0, self._to_int(options.get("cursor", 0), 0))
+        page_size = max(1, min(self._to_int(options.get("page_size", self.default_bm25_page_size),
+                                            self.default_bm25_page_size),
+                               self.max_bm25_page_size))
+        file_ids = options.get("file_ids", [])
+        if not isinstance(file_ids, list):
+            file_ids = []
+        exclude_cids = options.get("exclude_cids", [])
+        if not isinstance(exclude_cids, list):
+            exclude_cids = []
+
+        search_db_path = getattr(vectorstore, "faiss_db_path", None)
+        if search_db_path is None or str(search_db_path).strip() == "" or not os.path.exists(search_db_path):
+            raise RuntimeError("Search index is not initialized.")
+
+        excluded_ranges = self._fetch_excluded_coding_ranges(exclude_cids, file_ids) if len(exclude_cids) > 0 else {}
+        fused_hits: Dict[int, Dict[str, Any]] = {}
+
+        search_conn = sqlite3.connect(search_db_path, timeout=30)
+        try:
+            for query_text in queries:
+                params: List[Any] = [str(query_text)]
+                where_sql = " WHERE search_chunk_fts MATCH ?"
+                normalized_file_ids = []
+                for fid in file_ids:
+                    fid_i = self._to_int(fid, -1)
+                    if fid_i > 0:
+                        normalized_file_ids.append(fid_i)
+                normalized_file_ids = sorted(set(normalized_file_ids))
+                if len(normalized_file_ids) > 0:
+                    placeholders = ",".join(["?"] * len(normalized_file_ids))
+                    where_sql += f" AND source_id IN ({placeholders})"
+                    params.extend(normalized_file_ids)
+
+                try:
+                    rows = search_conn.execute(
+                        "SELECT chunk_id, source_id, source_name, start_index, length, text, bm25(search_chunk_fts) AS raw_score "
+                        "FROM search_chunk_fts"
+                        + where_sql
+                        + " ORDER BY raw_score ASC, CAST(chunk_id AS INTEGER) ASC",
+                        tuple(params),
+                    ).fetchall()
+                except sqlite3.OperationalError as err:
+                    raise ValueError(f"Invalid BM25 query: {err}")
+
+                for row in rows:
+                    chunk_id = self._to_int(row[0], -1)
+                    source_id = self._to_int(row[1], -1)
+                    start_index = self._to_int(row[3], -1)
+                    length = self._to_int(row[4], 0)
+                    if chunk_id <= 0 or source_id <= 0 or start_index < 0 or length <= 0:
+                        continue
+                    if len(excluded_ranges) > 0:
+                        if self._range_overlaps_any(start_index, start_index + length, excluded_ranges.get(source_id, [])):
+                            continue
+                    raw_score = self._to_float(row[6], 0.0)
+                    lexical_score = 1.0 / (1.0 + max(0.0, raw_score))
+                    hit = fused_hits.get(chunk_id)
+                    if hit is None:
+                        fused_hits[chunk_id] = {
+                            "chunk_id": chunk_id,
+                            "source_id": source_id,
+                            "source_name": "" if row[2] is None else str(row[2]),
+                            "start": start_index,
+                            "length": length,
+                            "text": "" if row[5] is None else str(row[5]),
+                            "score": 1.0 + lexical_score,
+                            "query_matches": 1,
+                        }
+                    else:
+                        hit["score"] = self._to_float(hit.get("score", 0.0), 0.0) + 1.0 + lexical_score
+                        hit["query_matches"] = self._to_int(hit.get("query_matches", 0), 0) + 1
+        finally:
+            search_conn.close()
+
+        ordered_hits = sorted(
+            fused_hits.values(),
+            key=lambda item: (
+                -self._to_float(item.get("score", 0.0), 0.0),
+                str(item.get("source_name", "")).lower(),
+                self._to_int(item.get("start", 0), 0),
+                self._to_int(item.get("chunk_id", 0), 0),
+            ),
+        )
+        total_hits = len(ordered_hits)
+        if cursor > total_hits:
+            cursor = total_hits
+        sliced_hits = ordered_hits[cursor:cursor + page_size]
+        returned_hits: List[Dict[str, Any]] = []
+        for pos, hit in enumerate(sliced_hits, start=cursor + 1):
+            returned_hits.append(
+                {
+                    "rank": pos,
+                    "position": pos - 1,
+                    "docstore_id": str(hit["chunk_id"]),
+                    "chunk_id": hit["chunk_id"],
+                    "source_id": hit["source_id"],
+                    "source_name": hit["source_name"],
+                    "start": hit["start"],
+                    "length": hit["length"],
+                    "score": hit["score"],
+                    "text": hit["text"],
+                }
+            )
+
+        next_cursor = min(total_hits, cursor + len(returned_hits))
+        truncated = next_cursor < total_hits
+        return {
+            "selection": {
+                "queries": queries,
+                "cursor": cursor,
+                "file_ids": file_ids,
+                "exclude_cids": exclude_cids,
+                "total_hits": total_hits,
+                "returned_hits": len(returned_hits),
+                "next_cursor": next_cursor,
+                "truncated": truncated,
+            },
+            "hits": returned_hits,
+        }
 
     def _read_regex_search(self, options: Dict[str, Any]) -> Dict[str, Any]:
         pattern_text = str(options.get("pattern", "")).strip()
@@ -2846,20 +3049,15 @@ class AiMcpServer:
         result: Dict[str, Any] = {}
         ai = getattr(self.app, "ai", None)
         vectorstore = getattr(ai, "sources_vectorstore", None) if ai is not None else None
-        faiss_db = getattr(vectorstore, "faiss_db", None) if vectorstore is not None else None
-        docstore = getattr(faiss_db, "docstore", None) if faiss_db is not None else None
-        if docstore is None:
+        if vectorstore is None:
             return result
-
-        for docstore_id in docstore_ids:
-            key = str(docstore_id).strip()
+        try:
+            docs = vectorstore.faiss_db_retrieve_documents(docstore_ids)
+        except Exception:
+            docs = []
+        for doc in docs:
+            key = str(getattr(doc, "id", "")).strip()
             if key == "" or key in result:
-                continue
-            try:
-                doc = docstore.search(key)
-            except Exception:
-                doc = None
-            if doc is None:
                 continue
             if not hasattr(doc, "page_content"):
                 continue
