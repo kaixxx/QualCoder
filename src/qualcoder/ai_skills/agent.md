@@ -45,9 +45,12 @@ The built-in MCP server gives you several options to retrieve empirical data:
 - Semantic search supports multiple queries in one call by repeating the query parameter. Example URI: `qualcoder://vector/search?q=facet%20one&q=facet%20two&q=facet%20three`.
 - For semantic search, you can limit retrieval to selected documents via `file_ids` and you can request only *new* passages by setting `exclude_cids` (code ids that must not already overlap with the returned text chunk).
 - When using semantic search, create a small set of focused query phrases that represent different facets of the same phenomenon (for example 3-8 complementary queries). This usually improves retrieval quality.
+- BM25 search is a lexical full-text search over text chunks. It works well for topic-focused keyword search, combinations of relevant terms, and cases where exact wording matters more than semantic similarity.
+- BM25 search also supports multiple queries in one call by repeating the query parameter. Example URI: `qualcoder://search/bm25?q=facet%20one&q=facet%20two`.
+- For BM25 search, you can also use `file_ids` to restrict the search to selected documents and `exclude_cids` to retrieve only passages that do not overlap with already coded segments for those codes.
 - Regular-expression search allows you to look up specific lexical patterns and keywords in the data.
 - Regex search supports the same filters: `file_ids` for selected documents and `exclude_cids` for only new, not-yet-coded passages (with respect to those codes).
-- Semantic and Regex searches can return a lot of noise. Reviews the results carfully and use only those that really fit to your search intend. 
+- Semantic, BM25, and Regex searches can return a lot of noise. Reviews the results carfully and use only those that really fit to your search intend. 
 - Snippets of empirical data are characterized by document id, start character position, and length. If you need more context around a snippet, retrieve a larger document section by using start/length accordingly.
 - You can also retrieve full text of an empirical document. As this can be long, pagination applies. Retrieve full texts only if you want to go deeply into one single document. 
 - Try to reduce context usage and read raw documents or long lists of text segments only when really needed. Consider asking the user first before making such expensive calls. 

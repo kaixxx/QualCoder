@@ -855,6 +855,9 @@ class AiVectorstore:
                 self._refresh_sources(conn, signals=signals, legacy_candidates=legacy_candidates)
                 self._rebuild_faiss_index_from_db(conn)
                 self._set_meta_build_state(conn, "ready")
+                msg = _("AI: Checked all documents, memory is up to date.")
+                self.parent_text_edit.append(msg)
+                logger.debug(msg)
             finally:
                 conn.close()
         else:
@@ -886,7 +889,8 @@ class AiVectorstore:
         self.threadpool.start(worker)
 
     def open_progress(self, msg):
-        Message(self.app, _('AI memory'), msg).exec()
+        self.parent_text_edit.append(msg)
+        logger.debug(msg)
 
     def progress_import(self, msg):
         self.parent_text_edit.append(msg)
