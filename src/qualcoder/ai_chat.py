@@ -43,6 +43,8 @@ import os
 import sqlite3
 import webbrowser
 import re
+import threading
+import time
 import unicodedata
 
 from .ai_search_dialog import DialogAiSearch
@@ -50,7 +52,7 @@ from .GUI.ui_ai_chat import Ui_Dialog_ai_chat
 from .helpers import Message
 from .confirm_delete import DialogConfirmDelete
 from .ai_prompts import PromptItem
-from .ai_llm import extract_ai_memo, ai_quote_search, strip_think_blocks
+from .ai_llm import extract_ai_memo, ai_quote_search, strip_think_blocks, AICancelled
 from .ai_mcp_server import AiMcpServer
 from .error_dlg import qt_exception_hook
 from .html_parser import html_to_text
@@ -2718,7 +2720,8 @@ data collected. This information will accompany every prompt sent to the AI, res
     def _invoke_json_llm(self, messages: List[Any], schema_name: str = '',
                          response_schema: Optional[Dict[str, Any]] = None,
                          context: str = 'mcp_json_control',
-                         model_kind: str = 'large') -> Dict[str, Any]:
+                         model_kind: str = 'large',
+                         run_context=None) -> Dict[str, Any]:
         """Invoke model and parse one JSON object response."""
 
         response_format = None
@@ -2733,6 +2736,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             context=context,
             fallback_without_response_format=True,
             model_kind=model_kind,
+            run_context=run_context,
         )
         raw = strip_think_blocks(str(llm_response.content)).strip()
         raw = self._extract_first_json_object(raw)
@@ -2745,6 +2749,115 @@ data collected. This information will accompany every prompt sent to the AI, res
         if not isinstance(data, dict):
             return {}
         return data
+
+    def _internal_json_step_timeouts(self) -> Tuple[float, float]:
+        """Return soft/hard wall-clock timeouts for planner-like JSON steps."""
+
+        ai_service = getattr(self.app, 'ai', None)
+        if ai_service is None:
+            read_timeout = float(self.app.settings.get('ai_timeout', '30.0'))
+        else:
+            timeout_obj = ai_service._run_timeout('large', 'invoke')
+            read_timeout = float(getattr(timeout_obj, 'read', self.app.settings.get('ai_timeout', '30.0')))
+        soft_timeout = max(1.0, 0.7 * read_timeout)
+        hard_timeout = read_timeout + 60.0
+        return soft_timeout, hard_timeout
+
+    def _invoke_json_llm_with_step_timeout(self, messages: List[Any], schema_name: str = '',
+                                           response_schema: Optional[Dict[str, Any]] = None,
+                                           context: str = 'mcp_json_control',
+                                           model_kind: str = 'large',
+                                           step_name: str = '',
+                                           status_kind: str = '',
+                                           signals=None, chat_idx: int = -1) -> Dict[str, Any]:
+        """Run one internal JSON LLM step with a visible soft timeout and a hard wall-clock timeout."""
+
+        ai_service = getattr(self.app, 'ai', None)
+        if ai_service is None:
+            return self._invoke_json_llm(
+                messages,
+                schema_name=schema_name,
+                response_schema=response_schema,
+                context=context,
+                model_kind=model_kind,
+            )
+
+        parent_context = ai_service._get_current_run_context()
+        parent_run_id = str(getattr(parent_context, 'run_id', '')).strip()
+        run_context = ai_service._create_run_context(
+            model_kind=model_kind,
+            purpose='invoke',
+            scope_type='chat_internal_json',
+            scope_id=chat_idx,
+            group_id=parent_run_id,
+            parent_run_id=parent_run_id,
+        )
+        run_context.worker_type = 'internal_json_step'
+        ai_service._register_run_context(run_context)
+
+        result_holder: Dict[str, Any] = {}
+        error_holder: Dict[str, Exception] = {}
+        finished = threading.Event()
+
+        def _runner():
+            ai_service._set_current_run_context(run_context)
+            ai_service._update_run_status(run_context.run_id, 'running')
+            try:
+                result_holder["data"] = self._invoke_json_llm(
+                    messages,
+                    schema_name=schema_name,
+                    response_schema=response_schema,
+                    context=context,
+                    model_kind=model_kind,
+                    run_context=run_context,
+                )
+            except Exception as err:
+                error_holder["error"] = err
+                ai_service._update_run_status(run_context.run_id, 'errored', str(err))
+            finally:
+                terminal_status = 'canceled' if run_context.cancel_event.is_set() else (
+                    'errored' if run_context.error_text != '' else 'finished'
+                )
+                ai_service._finalize_run_context(run_context, terminal_status)
+                ai_service._clear_current_run_context()
+                finished.set()
+
+        thread = threading.Thread(
+            target=_runner,
+            name=f'qualcoder-json-step-{context}',
+            daemon=True,
+        )
+        thread.start()
+
+        soft_timeout, hard_timeout = self._internal_json_step_timeouts()
+        step_label = str(step_name).strip() or _("Internal step")
+        soft_notice_sent = False
+        start_time = time.monotonic()
+
+        while not finished.wait(0.2):
+            if ai_service.is_current_run_canceled():
+                ai_service._request_cancel_run(run_context)
+                thread.join(1.0)
+                raise AICancelled(parent_run_id if parent_run_id != '' else run_context.run_id)
+
+            elapsed = time.monotonic() - start_time
+            if not soft_notice_sent and elapsed >= soft_timeout:
+                soft_notice_sent = True
+                self._emit_mcp_status_text(
+                    signals,
+                    chat_idx,
+                    _('{step} is taking longer than expected...').format(step=step_label),
+                    status_kind=status_kind,
+                )
+
+            if elapsed >= hard_timeout:
+                ai_service._request_cancel_run(run_context)
+                thread.join(2.0)
+                raise TimeoutError(step_label)
+
+        if "error" in error_holder:
+            raise error_holder["error"]
+        return result_holder.get("data", {})
 
     def _extract_first_json_object(self, text: str) -> str:
         """Extract the first complete JSON object from mixed model output text."""
@@ -3345,12 +3458,24 @@ data collected. This information will accompany every prompt sent to the AI, res
             planner_messages: List[Any] = [SystemMessage(content=planner_system_prompt)]
             planner_messages.extend(agent_messages)
             planner_messages.append(HumanMessage(content=planner_user_prompt))
-            plan_data = self._invoke_json_llm(
-                planner_messages,
-                schema_name='mcp_planner_control',
-                response_schema=planner_json_schema,
-                context='mcp_json_planner',
-            )
+            try:
+                plan_data = self._invoke_json_llm_with_step_timeout(
+                    planner_messages,
+                    schema_name='mcp_planner_control',
+                    response_schema=planner_json_schema,
+                    context='mcp_json_planner',
+                    step_name=_("Internal planning"),
+                    status_kind="planning",
+                    signals=signals,
+                    chat_idx=chat_idx,
+                )
+            except TimeoutError:
+                timeout_msg = _('Internal planning timed out. Please try again.')
+                self._emit_mcp_status_text(signals, chat_idx, timeout_msg, status_kind="planning")
+                result["direct_ai_message"] = timeout_msg
+                result["tool_messages"] = tool_messages
+                result["stream_messages"] = []
+                return result
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_queued_calls)
             proposed_plan_calls = self._normalize_mcp_calls(
                 plan_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
@@ -3472,12 +3597,28 @@ data collected. This information will accompany every prompt sent to the AI, res
                     )
                 append_single_instruct_log("reflection", "user", reflection_prompt)
                 reflection_messages.append(HumanMessage(content=reflection_prompt))
-                reflection_data = self._invoke_json_llm(
-                    reflection_messages,
-                    schema_name='mcp_reflection_control',
-                    response_schema=reflection_json_schema,
-                    context='mcp_json_reflection',
-                )
+                try:
+                    reflection_data = self._invoke_json_llm_with_step_timeout(
+                        reflection_messages,
+                        schema_name='mcp_reflection_control',
+                        response_schema=reflection_json_schema,
+                        context='mcp_json_reflection',
+                        step_name=_("Internal reflection"),
+                        status_kind="reflection",
+                        signals=signals,
+                        chat_idx=chat_idx,
+                    )
+                except TimeoutError:
+                    latest_reflection_summary = _('Internal reflection timed out; proceeding with the collected evidence.')
+                    self._emit_mcp_status_text(
+                        signals,
+                        chat_idx,
+                        latest_reflection_summary,
+                        status_kind="reflection",
+                    )
+                    planned_calls = []
+                    stop_reason = "reflection_timeout"
+                    break
                 reflection_summary = str(reflection_data.get("reflection_summary", "")).strip()
                 if reflection_summary != "":
                     latest_reflection_summary = reflection_summary
@@ -3549,12 +3690,28 @@ data collected. This information will accompany every prompt sent to the AI, res
                                 content=replanner_user_prompt
                             )
                         )
-                        replan_data = self._invoke_json_llm(
-                            replanner_messages,
-                            schema_name='mcp_replanner_control',
-                            response_schema=planner_json_schema,
-                            context='mcp_json_replanner',
-                        )
+                        try:
+                            replan_data = self._invoke_json_llm_with_step_timeout(
+                                replanner_messages,
+                                schema_name='mcp_replanner_control',
+                                response_schema=planner_json_schema,
+                                context='mcp_json_replanner',
+                                step_name=_("Internal replanning"),
+                                status_kind="planning",
+                                signals=signals,
+                                chat_idx=chat_idx,
+                            )
+                        except TimeoutError:
+                            latest_plan_summary = _('Internal replanning timed out; proceeding with the current results.')
+                            self._emit_mcp_status_text(
+                                signals,
+                                chat_idx,
+                                latest_plan_summary,
+                                status_kind="planning",
+                            )
+                            planned_calls = []
+                            stop_reason = "replanner_timeout"
+                            break
                         replan_summary = str(replan_data.get("plan_summary", "")).strip()
                         if replan_summary != "":
                             latest_plan_summary = replan_summary

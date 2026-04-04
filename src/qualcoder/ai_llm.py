@@ -688,9 +688,13 @@ class AiLLM():
             read_timeout = max(base_timeout, 60.0)
         else:
             read_timeout = max(base_timeout * 2.0, 90.0)
-        if reasoning in ('low', 'medium', 'high'):
-            factor = ('low', 'medium', 'high').index(reasoning) + 1
-            read_timeout = max(read_timeout, float(factor) * base_timeout * 2.0)
+        reasoning_factors = {
+            'low': 2.0,
+            'medium': 3.0,
+            'high': 4.0,
+        }
+        if reasoning in reasoning_factors:
+            read_timeout = max(read_timeout, reasoning_factors[reasoning] * base_timeout)
         return httpx.Timeout(
             connect=connect_timeout,
             read=read_timeout,
