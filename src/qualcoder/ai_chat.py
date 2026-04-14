@@ -2899,6 +2899,129 @@ data collected. This information will accompany every prompt sent to the AI, res
                     return raw[start:idx + 1].strip()
         return ""
 
+    def _is_internal_control_json_payload(self, data: Any) -> bool:
+        """Return True if a parsed JSON object looks like leaked internal control output."""
+
+        if not isinstance(data, dict) or len(data) == 0:
+            return False
+
+        normalized_keys = {str(key).strip() for key in data.keys()}
+        control_keys = {
+            "action",
+            "method",
+            "params",
+            "needs_mcp",
+            "calls",
+            "revised_calls",
+            "proposed_next_calls",
+            "enough_information",
+            "user_decision_required",
+            "decision_question",
+            "decision_context",
+            "answer_brief",
+            "skill_decision",
+            "skill_name",
+            "skill_reason",
+            "plan_summary",
+            "reflection_summary",
+            "continue_deferred_calls",
+            "pending_calls",
+            "stop_reason",
+        }
+        if len(normalized_keys.intersection(control_keys)) == 0:
+            return False
+
+        action = str(data.get("action", "")).strip().lower()
+        method = str(data.get("method", "")).strip().lower()
+        if action == "mcp_call":
+            return True
+        if method.startswith("tools/") or method.startswith("resources/") or method.startswith("prompts/"):
+            return True
+        if "params" in data and "method" in data:
+            return True
+        return True
+
+    def _is_invalid_final_output(self, text: str) -> bool:
+        """Detect leaked planner/reflection JSON in a supposedly user-facing final answer."""
+
+        raw = strip_think_blocks(str(text if text is not None else "")).strip()
+        if raw == "":
+            return False
+        json_text = self._extract_first_json_object(raw)
+        if json_text == "":
+            return False
+        try:
+            data = json.loads(json_text)
+        except Exception:
+            return False
+        return self._is_internal_control_json_payload(data)
+
+    def _get_latest_user_message_text(self, chat_idx: int) -> str:
+        """Return the latest persisted user message for one chat."""
+
+        if chat_idx == self.current_chat_idx and isinstance(self.chat_msg_list, list):
+            for msg in reversed(self.chat_msg_list):
+                if len(msg) >= 5 and str(msg[2]) == 'user':
+                    return str(msg[4] if msg[4] is not None else '').strip()
+
+        if chat_idx < 0 or chat_idx >= len(self.chat_list):
+            return ''
+
+        db_conn = sqlite3.connect(self.chat_history_path)
+        try:
+            cursor = db_conn.cursor()
+            cursor.execute(
+                "SELECT msg_content FROM chat_messages WHERE chat_id=? AND msg_type='user' ORDER BY id DESC LIMIT 1",
+                (int(self.chat_list[chat_idx][0]),),
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None:
+                return ''
+            return str(row[0]).strip()
+        finally:
+            db_conn.close()
+
+    def _repair_invalid_final_output(self, invalid_text: str, chat_idx: int) -> str:
+        """Attempt one repair pass when the final answer leaked internal control JSON."""
+
+        ai_service = getattr(self.app, 'ai', None)
+        if ai_service is None:
+            return ''
+
+        latest_user_message = self._get_latest_user_message_text(chat_idx)
+        current_language = str(ai_service.get_curr_language()).strip()
+        system_prompt = (
+            "You repair invalid final answers from an AI agent. "
+            "Rewrite the invalid output as one normal user-facing answer in the current conversation language. "
+            "Do not output JSON. "
+            "Do not output code fences. "
+            "Do not mention MCP, internal planning fields, method names, params, or tool calls. "
+            "Do not invent new empirical findings. "
+            "If the invalid output is only an internal control action and does not support a proper final answer, "
+            "say so briefly and naturally, without exposing internal JSON or field names."
+        )
+        repair_prompt = (
+            f'Current conversation language: "{current_language}".\n'
+            f'Latest user request:\n{latest_user_message}\n\n'
+            f'Invalid final output:\n{invalid_text}\n\n'
+            'Rewrite this now as a normal user-facing answer only.'
+        )
+        messages: List[Any] = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=repair_prompt),
+        ]
+        try:
+            repaired = ai_service.invoke_with_logging(
+                messages,
+                context='final_answer_repair',
+                fallback_without_response_format=False,
+                model_kind='large',
+            )
+            return strip_think_blocks(str(repaired.content if repaired is not None else '')).strip()
+        except Exception as err:
+            logger.warning("Final answer repair failed: %s", err)
+            return ''
+
     def _normalize_mcp_calls(self, raw_calls: Any, allowed_methods: set[str],
                              max_calls: Optional[int] = None) -> List[Dict[str, Any]]:
         """Validate and clamp model-proposed MCP calls."""
@@ -3944,7 +4067,26 @@ data collected. This information will accompany every prompt sent to the AI, res
         was_canceled = self._chat_scope_status(chat_idx) == 'canceled'
         self.ai_streaming_output = ''
         if ai_result != '':
-            self.process_message('ai', ai_result, chat_idx)
+            final_text = str(ai_result)
+            if self._is_invalid_final_output(final_text):
+                self.process_message('agent_status', json.dumps({
+                    "kind": "repair",
+                    "text": _('Repairing invalid final answer format...'),
+                }, ensure_ascii=False), chat_idx)
+                repaired_text = self._repair_invalid_final_output(final_text, chat_idx)
+                if repaired_text != '' and not self._is_invalid_final_output(repaired_text):
+                    final_text = repaired_text
+                else:
+                    self.process_message(
+                        'info',
+                        _('Error: The AI returned an internal control message instead of a final answer. Please try again.'),
+                        chat_idx,
+                    )
+                    if was_canceled:
+                        self.process_message('info', _('Chat has been canceled by the user. The partial response was kept.'), chat_idx)
+                    return
+
+            self.process_message('ai', final_text, chat_idx)
             if was_canceled:
                 self.process_message('info', _('Chat has been canceled by the user. The partial response was kept.'), chat_idx)
         else:
