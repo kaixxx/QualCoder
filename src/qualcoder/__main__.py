@@ -178,7 +178,7 @@ class ProjectEventBus(QtCore.QObject):
 
     project_data_changed = QtCore.pyqtSignal(list, object)
 
-    def emit_table_changes(self, tables: list[str], source=None):
+    def emit_table_changes(self, tables: list[str] | None, source=None):
         """Emit one project-change event for changed database tables.
 
         Args:
@@ -188,6 +188,8 @@ class ProjectEventBus(QtCore.QObject):
                 themselves to ignore events that originated from the same dialog instance.
         """
 
+        if tables is None:
+            return
         if len(tables) == 0:
             return
         self.project_data_changed.emit(tables, source)
@@ -3614,7 +3616,7 @@ Click "Yes" to start now.')
             logger.warning(str(err))
 
         tag = self.app.version.split("QualCoder ")[1]
-        citation = f"Citation:\nCurtain, C. Dröge, K. (2026) {self.app.version} [Computer software].\n"
+        citation = f"Citation:\nCurtain C, Dröge K, Salomón L, Missaghieh--Poncet J. (2026) {self.app.version} [Computer software].\n"
         citation += f"Retrieved from https://github.com/ccbogel/QualCoder/releases/tag/{tag}\n"
         self.ui.textEdit.append(citation)
 

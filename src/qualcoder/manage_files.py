@@ -1122,6 +1122,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                 "attribute desc: attribute name ttribute - descending
         """
 
+        # TODO add progress dialog
         # Check a placeholder attribute is present for the file, add if missing
         self.check_attribute_placeholders()
         self.source = []
@@ -1859,8 +1860,8 @@ class DialogManageFiles(QtWidgets.QDialog):
         md is text Markdown format.
         Note importing from html, odt, docx, rtf all formatting is lost.
         Imports images as jpg, jpeg, png which are stored in an images directory.
-        Imports audio as mp3, wav, m4a which are stored in an audio directory.
-        Imports video as mp4, mov, ogg, wmv, webm which are stored in a video directory.
+        Imports audio as flac, mp3, wav, ogg, m4a which are stored in an audio directory.
+        Imports video as mp4, mov, wmv, webm, m4v which are stored in a video directory.
 
         param:
             link:   False - files are imported into project folder,
@@ -1878,10 +1879,17 @@ class DialogManageFiles(QtWidgets.QDialog):
         imports = response[0]
         if not imports:
             return
+
+        steps = len(imports)
+        file_number = 0
+        first_filename = os.path.basename(imports[0])
+        progress = QtWidgets.QProgressDialog(first_filename, None, file_number, steps, self)
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setWindowTitle(_("Importing"))
+        progress.setMinimumDuration(0)  # Show immediately
+        progress.show()
         known_file_type = False
-        name_split = imports[0].split("/")
-        temp_filename = name_split[-1]
-        self.default_import_directory = imports[0][0:-len(temp_filename)]
+        self.default_import_directory = os.path.dirname(imports[0])
         pdf_msg = ""
         for import_path in imports:
             link_path = ""
@@ -1893,9 +1901,11 @@ class DialogManageFiles(QtWidgets.QDialog):
                 link_path = import_path
             # Need process events, if many large files are imported, leaves the FileDialog open and covering the screen.
             QtWidgets.QApplication.processEvents()
-            filename = import_path.split("/")[-1]
+            filename = os.path.basename(import_path)
+            progress.setValue(file_number + 1)
+            progress.setLabelText(filename)
             destination = self.app.project_path
-            if import_path.split('.')[-1].lower() in ('docx', 'odt', 'rtf', 'txt', 'htm', 'html', 'epub', 'md'):
+            if os.path.splitext(import_path)[1].lower() in ('.docx', '.odt', '.rtf', '.txt', '.htm', '.html', '.epub', '.md'):
                 destination += f"/documents/{filename}"
                 if link_path == "":
                     try:
@@ -1909,12 +1919,12 @@ class DialogManageFiles(QtWidgets.QDialog):
                 else:
                     self.load_file_text(import_path, f"docs:{link_path}")
                 known_file_type = True
-            if import_path.split('.')[-1].lower() == 'pdf':
+            if os.path.splitext(import_path)[1].lower() == '.pdf':
                 destination += f"/documents/{filename}"
                 if link_path == "":
                     try:
                         copyfile(import_path, destination)
-                        self.load_file_text(import_path)
+                        self.load_file_text(import_path, "", progress)
                     except PermissionError as e_:
                         msg = _("Cannot copy file: ") + f"{filename}\n" + _(
                             "Is the file open?\nIs there a permission restriction?") + f"\n{e_}"
@@ -1924,7 +1934,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                     self.load_file_text(import_path, f"docs:{link_path}")
                 known_file_type = True
             # Media files
-            if import_path.split('.')[-1].lower() in ('jpg', 'jpeg', 'png'):
+            if os.path.splitext(import_path)[1].lower() in ('.jpg', '.jpeg', '.png'):
                 if link_path == "":
                     destination += f"/images/{filename}"
                     try:
@@ -1938,7 +1948,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                 else:
                     self.load_media_reference(f"images:{link_path}")
                 known_file_type = True
-            if import_path.split('.')[-1].lower() in ('wav', 'mp3', 'm4a'):
+            if os.path.splitext(import_path)[1].lower() in ('.flac', '.m4a', '.mp3',  '.ogg', '.wav'):
                 if link_path == "":
                     destination += f"/audio/{filename}"
                     try:
@@ -1952,7 +1962,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                 else:
                     self.load_media_reference(f"audio:{link_path}")
                 known_file_type = True
-            if import_path.split('.')[-1].lower() in ('mkv', 'mov', 'mp4', 'ogg', 'wmv', 'webm'):
+            if os.path.splitext(import_path)[1].lower() in ('.mkv', '.mov', '.mp4', '.m4v', '.wmv', '.webm'):
                 if link_path == "":
                     destination += f"/video/{filename}"
                     try:
@@ -1967,29 +1977,12 @@ class DialogManageFiles(QtWidgets.QDialog):
                     self.load_media_reference(f"video:{link_path}")
                 known_file_type = True
             if not known_file_type:
-                Message(self.app, _('Unknown file type'),
-                        _("Trying to import as text") + f":\n{import_path}", "warning")
-                destination += "/documents/" + filename
-                if link_path == "":
-                    try:
-                        self.load_file_text(import_path)
-                    except Exception as err:
-                        print(err)
-                        logger.warning(str(err))
-                    try:
-                        copyfile(import_path, destination)
-                    except (OSError, PermissionError) as err:
-                        logger.warning(str(err))
-                        Message(self.app, _('Unknown file type'), _("Cannot import file") + f":\n{import_path}",
-                                "warning")
-                        continue
-                else:
-                    try:
-                        self.load_file_text(import_path, f"docs:{link_path}")
-                    except Exception as err:
-                        logger.warning(str(err))
-                        Message(self.app, _('Unknown file type'), _("Cannot import file") + f":\n{import_path}",
-                                "warning")
+                Message(self.app, _('Not supported file type'),
+                        _("Cannot import file") + f":\n{import_path}", "warning").exec()
+                continue
+
+            file_number += 1
+
         if pdf_msg != "":
             self.parent_text_edit.append(pdf_msg)
         self.load_file_data()
@@ -2134,7 +2127,7 @@ class DialogManageFiles(QtWidgets.QDialog):
 
         return raw_bytes.decode("utf-8", errors="backslashreplace"), "utf-8(backslashreplace)"
 
-    def load_file_text(self, import_file, link_path=""):
+    def load_file_text(self, import_file, link_path="", progress_ = None):
         """ Import from file types of odt, docx, rtf, pdf, epub, txt, html, htm.
         Implement character detection for txt imports.
         Loading pdf text. I have removed additional line breaks. See commented sections below.
@@ -2196,7 +2189,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                 if import_errors > 0:
                     Message(self.app, _("Warning"), str(import_errors) + _(" lines not imported"), "warning").exec()
         # Import PDF
-        if import_file[-4:].lower() == '.pdf':
+        if os.path.splitext(import_file)[1].lower() == '.pdf':
             pdf_file = open(import_file, 'rb')
             resource_manager = PDFResourceManager()
             laparams = LAParams()
@@ -2204,7 +2197,11 @@ class DialogManageFiles(QtWidgets.QDialog):
             interpreter = PDFPageInterpreter(resource_manager, device)
             pages_generator = PDFPage.get_pages(pdf_file)  # Generator PDFpage objects
             text_ = ""
+            # Can be very slow with large PDFs and older computers
             for i, page in enumerate(pages_generator):
+                name_and_page = f"{os.path.basename(import_file)} p:{i}"
+                progress_.setLabelText(name_and_page)
+                QtCore.QCoreApplication.processEvents()  # Trial this to see if it prevents 'App not responding'
                 self.pdf_page_text = ""
                 interpreter.process_page(page)
                 layout = device.get_result()

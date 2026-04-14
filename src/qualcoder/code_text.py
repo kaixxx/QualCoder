@@ -51,14 +51,11 @@ from .ai_chat import ai_chat_signal_emitter
 from .code_in_all_files import DialogCodeInAllFiles
 from .color_selector import DialogColorSelect, colour_ranges, colors, TextColor, show_codes_of_colour_range
 from .confirm_delete import DialogConfirmDelete
-from .helpers import Message, DialogGetStartAndEndMarks, ExportDirectoryPathDialog, MarkdownHighlighter, NumberBar
+from .helpers import Message, DialogGetStartAndEndMarks, ExportDirectoryPathDialog, NumberBar, CodeResizeHandle, ToolTipEventFilter
 from .GUI.ui_dialog_code_text import Ui_Dialog_code_text
 from .memo import DialogMemo
-#from .edit_journal import DialogEditJournal  # journal editor dialog <- L
+# from .edit_journal import DialogEditJournal  # journal editor dialog <- L
 from .report_attributes import DialogSelectAttributeParameters
-from .reports import DialogReportCoderComparisons, DialogReportCodeFrequencies  # For isinstance()
-from .report_codes import DialogReportCodes
-from .report_code_summary import DialogReportCodeSummary  # For isinstance()
 from .ris import Ris
 from .select_items import DialogSelectItems  # For isinstance()
 from .speakers import DialogSpeakers, speaker_coder_name
@@ -68,73 +65,6 @@ ai_search_analysis_max_count = 10  # How many chunks of data are analysed in the
 
 path = os.path.abspath(os.path.dirname(__file__))
 logger = logging.getLogger(__name__)
-
-
-class CodeResizeHandle(QtWidgets.QWidget):
-    """ Overlay widget used as a visual drag handle for code boundary resizing. """
-
-    def __init__(self, parent_editor, is_start, code_item, main_dialog):
-        super().__init__(parent_editor.viewport())
-        self.editor = parent_editor
-        self.is_start = is_start
-        self.code_item = code_item
-        self.main_dialog = main_dialog
-        
-        # Store original positions in case of cancel or error
-        self.orig_pos0 = code_item['pos0']
-        self.orig_pos1 = code_item['pos1']
-        self.setCursor(Qt.CursorShape.SizeHorCursor)
-        self.setFixedSize(14, 18)
-        # Force PyQt to render the QWidget background
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        
-        color = self.code_item.get('color', '#0078d7')  # Blue
-        self.setStyleSheet(f"background-color: {color}; border: 2px solid #333; border-radius: 4px;")
-        self.dragging = False
-        self.show()
-        self.raise_()  # Ensure it stays on top of the text
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = True
-
-    def mouseMoveEvent(self, event):
-        if self.dragging:
-            global_pos = event.globalPosition().toPoint()
-            viewport_pos = self.editor.viewport().mapFromGlobal(global_pos)
-
-            # Move the handle visually
-            cursor = self.editor.cursorForPosition(viewport_pos)
-            cursor_rect = self.editor.cursorRect(cursor)
-            self.move(cursor_rect.x() - 7, cursor_rect.y() + 2)
-            self.raise_()
-            
-            # Clamp new position to text boundaries
-            new_pos = cursor.position() + self.main_dialog.file_['start']
-            max_pos = len(self.main_dialog.text) + self.main_dialog.file_['start']
-            min_pos = self.main_dialog.file_['start']
-            new_pos = max(min_pos, min(new_pos, max_pos))
-            
-            # Update position in memory for live highlight feedback
-            if self.is_start:
-                if new_pos < self.code_item['pos1']:
-                    self.code_item['pos0'] = new_pos
-            else:
-                if new_pos > self.code_item['pos0']:
-                    self.code_item['pos1'] = new_pos
-            
-            # Refresh the text highlighting
-            self.main_dialog.unlight()
-            self.main_dialog.highlight()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = False
-            viewport_pos = self.editor.viewport().mapFromGlobal(event.globalPosition().toPoint())
-            cursor = self.editor.cursorForPosition(viewport_pos)
-            new_pos = cursor.position() + self.main_dialog.file_['start']
-            # Pass original positions for potential revert
-            self.main_dialog.update_code_position_from_handle(self.code_item, new_pos, self.is_start, self.orig_pos0, self.orig_pos1)
 
 
 class DialogCodeText(QtWidgets.QWidget):
@@ -160,6 +90,8 @@ class DialogCodeText(QtWidgets.QWidget):
         self.undo_deleted_codes = []  # To restore recently deleted codes
         self.attributes = []  # Show selected files using these attributes in list widget
         self.tree_sort_option = "all asc"  # all asc, all desc, cat then code asc
+        self.show_codes_like_filter = ""  # gets filled when text strings are used to show specific code names
+        self.show_codes_colour_filter = ""  # gets filled when a code colur is selected
 
         # Get data
         self.annotations = self.app.get_annotations()
@@ -286,8 +218,8 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.pushButton_document_memo.pressed.connect(self.active_file_memo)
         self.ui.pushButton_file_attributes.setIcon(qta.icon('mdi6.variable', options=[{'scale_factor': 1.3}]))
         self.ui.pushButton_file_attributes.pressed.connect(self.get_files_from_attributes)
-        # Buttons under codes tree
-        self.ui.pushButton_find_code.setIcon(qta.icon('mdi6.card-search-outline', options=[{'scale-factor': 1.2}]))
+        # Buttons under codes-tree
+        self.ui.pushButton_find_code.setIcon(qta.icon('mdi6.card-search-outline', options=[{'scale-factor': 1.3}]))
         self.ui.pushButton_find_code.pressed.connect(self.find_code_in_tree)
         self.ui.pushButton_show_codings_next.setIcon(qta.icon('mdi6.arrow-right'))
         self.ui.pushButton_show_codings_next.pressed.connect(self.show_selected_code_in_text_next)
@@ -371,6 +303,8 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.pushButton_exit_edit.pressed.connect(self.edit_mode_toggle)
         self.ui.pushButton_undo_edit.setIcon(qta.icon('mdi6.undo', options=[{'scale_factor': 1.3}]))
         self.ui.pushButton_undo_edit.pressed.connect(self.undo_edited_text)
+        self.ui.comboBox_export.currentIndexChanged.connect(self.export_option_selected)
+        # Tree widget
         self.ui.treeWidget.setDragEnabled(True)
         self.ui.treeWidget.setAcceptDrops(True)
         self.ui.treeWidget.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
@@ -378,7 +312,11 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.treeWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ui.treeWidget.customContextMenuRequested.connect(self.tree_menu)
         self.ui.treeWidget.itemPressed.connect(self.fill_code_label_with_selected_code)
-        self.ui.comboBox_export.currentIndexChanged.connect(self.export_option_selected)
+        # Codes-tree header menu
+        self.ui.treeWidget.header().setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.treeWidget.header().customContextMenuRequested.connect(self.codes_tree_header_menu)
+        self.tree_column_widths_auto_resize = True
+
         self.ui.splitter.setSizes([150, 400, 0])  # 3 values; right pane starts collapsed <- L
         try:
             s0 = int(self.app.settings['dialogcodetext_splitter0'])
@@ -532,8 +470,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.pushButton_font.setToolTip(tt)
 
     def find_code_in_tree(self):
-        """ Find a code by name in the codes tree and select it.
-        """
+        """ Find a code by name in the codes tree and select it. """
 
         dialog = QtWidgets.QInputDialog(None)
         dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
@@ -554,18 +491,44 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.treeWidget.clearSelection()
         item = None
         iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        matches = []
         while iterator.value():
             item = iterator.value()
             if "cid" in item.text(1):
                 cid = int(item.text(1)[4:])
                 code_ = next((code_ for code_ in self.codes if code_['cid'] == cid), None)
                 if search_text in code_['name']:
+                    matches.append(code_)
+            iterator += 1
+        if not matches:
+            Message(self.app, _("Match not found"), _("No code with matching text found.")).exec()
+            return
+
+        # Get one selected code from one or more codes.
+        selected = None
+        if len(matches) > 1:
+            ui = DialogSelectItems(self.app, matches, _("Select code"), "single")
+            ok = ui.exec()
+            if not ok:
+                return
+            selected = ui.get_selected()
+            if not selected:
+                return
+        else:
+            selected = matches[0]
+
+        # Set selected in tree
+        item = None
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            item = iterator.value()
+            if "cid" in item.text(1):
+                cid = int(item.text(1)[4:])
+                if cid == selected['cid']:
                     self.ui.treeWidget.setCurrentItem(item)
                     break
             iterator += 1
-        if item is None:
-            Message(self.app, _("Match not found"), _("No code with matching text found.")).exec()
-            return
+
         # Expand parents
         parent = item.parent()
         while parent is not None:
@@ -775,10 +738,15 @@ class DialogCodeText(QtWidgets.QWidget):
         if self.code_rule:
             self.show_code_rule()
         if current.text(1)[0:3] == 'cat':
-            self.ui.label_code.hide()
-            self.ui.label_code.setToolTip("")
+            style = f"QLabel {{background-color:transparent;}}"
+            self.ui.label_code.setStyleSheet(style)
+            tooltip = ""
+            if self.show_codes_like_filter:
+                tooltip = _("Filtered: ") + self.show_codes_like_filter
+            if self.show_codes_colour_filter:
+                tooltip = _("Filtered: ") + self.show_codes_colour_filter
+            self.ui.label_code.setToolTip(tooltip)
             return
-        self.ui.label_code.show()
         # Set background colour of label to code color, and store current code for underlining
         for c in self.codes:
             if int(current.text(1)[4:]) == c['cid']:
@@ -786,13 +754,17 @@ class DialogCodeText(QtWidgets.QWidget):
                 style = f"QLabel {{background-color:{c['color']}; color: {fg_color};}}"
                 self.ui.label_code.setStyleSheet(style)
                 self.ui.label_code.setAutoFillBackground(True)
-                tt = f"{c['name']}\n"
+                tooltip = f"{c['name']}\n"
                 if c['memo'] != "":
-                    tt += _("Memo: ") + c['memo']
-                self.ui.label_code.setToolTip(tt)
+                    tooltip += _("Memo: ") + c['memo']
+                if self.show_codes_like_filter:
+                    tooltip += "\n" + _("Filtered: ") + self.show_codes_like_filter
+                if self.show_codes_colour_filter:
+                    tooltip += "\n" + _("Filtered: ") + self.show_codes_colour_filter
+                self.ui.label_code.setToolTip(tooltip)
                 break
         selected_text = self.ui.plainTextEdit.textCursor().selectedText()
-        if len(selected_text) > 0:
+        if len(selected_text) > 0 and not (QtWidgets.QApplication.mouseButtons() & Qt.MouseButton.RightButton):
             self.mark()
         # When a code is selected undo the show selected code features
         self.highlight()
@@ -816,8 +788,12 @@ class DialogCodeText(QtWidgets.QWidget):
             self.ui.treeWidget.setColumnHidden(1, True)
         else:
             self.ui.treeWidget.setColumnHidden(1, False)
-        self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        if self.tree_column_widths_auto_resize:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        else:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         self.ui.treeWidget.header().setStretchLastSection(False)
+
         # Add top level categories
         remove_list = []
         for c in cats:
@@ -1008,6 +984,19 @@ class DialogCodeText(QtWidgets.QWidget):
                         item.setText(3, str(code[2]))
                         break
             iterator += 1  # Move to the next item
+
+    def codes_tree_header_menu(self, position):
+        """ treeWidget resize mode - resize to contents or interactive. """
+
+        menu = QtWidgets.QMenu(self)
+        action_resize = menu.addAction(_("Toggle automatic resize"))
+        action = menu.exec(self.ui.treeWidget.mapToGlobal(position))
+        if action == action_resize:
+            self.tree_column_widths_auto_resize = not self.tree_column_widths_auto_resize
+        if self.tree_column_widths_auto_resize:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        else:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
 
     def get_codes_and_categories(self):
         """ Called from init, delete category/code.
@@ -1532,7 +1521,6 @@ class DialogCodeText(QtWidgets.QWidget):
         
         # --- Handles experimental
         action_show_handles = None
-        # ---
 
         # Can have multiple coded text at this position
         for item in self.code_text:
@@ -1567,12 +1555,10 @@ class DialogCodeText(QtWidgets.QWidget):
             menu.addAction(action_not_important)
         if action_change_code:
             menu.addAction(action_change_code)
-        
         # --- Handles experimental
         if action_show_handles:
             menu.addAction(action_show_handles)
-        # ---
-       
+
         action_annotate = menu.addAction(_("Annotate (A)"))
         action_copy = menu.addAction(_("Copy to clipboard"))
         action_copy_metadata = menu.addAction(_("Copy with metadata"))
@@ -1642,13 +1628,10 @@ class DialogCodeText(QtWidgets.QWidget):
         if action == action_change_code:
             self.change_code_to_another_code(cursor.position())
             return
-        
-        # ---  handlers experimental
+        # ---  handles experimental
         if action == action_show_handles:
             self.display_handles_for_code(cursor.position())
             return
-        # ---
-        
         if action == action_show_top_groupbox:
             self.ui.groupBox.setVisible(True)
             return
@@ -2040,8 +2023,8 @@ class DialogCodeText(QtWidgets.QWidget):
             action_color = menu.addAction(_("Change code color"))
             action_show_coded_media = menu.addAction(_("Show coded files"))
             action_move_code = menu.addAction(_("Move code to"))
-        action_show_codes_like = menu.addAction(_("Show codes like"))
-        action_show_codes_of_colour = menu.addAction(_("Show codes of colour"))
+        action_show_codes_like = menu.addAction(_("Show codes like") + ": " + self.show_codes_like_filter)
+        action_show_codes_of_colour = menu.addAction(_("Show codes of colour") + ": " + self.show_codes_colour_filter)
         action_all_asc = menu.addAction(_("Sort ascending"))
         action_all_desc = menu.addAction(_("Sort descending"))
         action_cat_then_code_asc = menu.addAction(_("Sort category then code ascending"))
@@ -2270,48 +2253,88 @@ class DialogCodeText(QtWidgets.QWidget):
          Show selected codes that contain entered text.
          The input dialog is too narrow, so it is re-created. """
 
-        dialog = QtWidgets.QInputDialog(None)
-        dialog.setStyleSheet("* {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
+        dialog = QtWidgets.QDialog(None)
+        dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
         dialog.setWindowTitle(_("Show some codes"))
         dialog.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
-        dialog.setInputMode(QtWidgets.QInputDialog.InputMode.TextInput)
-        dialog.setLabelText(_("Show codes containing the text. (Blank for all)"))
-        dialog.resize(200, 20)
+        dlg_text = _("Show codes containing the text. (Blank for all)") + "\n"
+        if self.show_codes_like_filter:
+            dlg_text += _("Filter: ") + self.show_codes_like_filter
+        lbl = QtWidgets.QLabel(dlg_text)
+        line = QtWidgets.QLineEdit()
+        chkbox = QtWidgets.QCheckBox(_("Case sensitive"))
+        btnBox = QtWidgets.QDialogButtonBox()
+        btnBox.setStandardButtons(QtWidgets.QDialogButtonBox.StandardButton.Ok|QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(lbl)
+        layout.addWidget(chkbox)
+        layout.addWidget(line)
+        layout.addWidget(btnBox)
+        dialog.setLayout(layout)
+        btnBox.rejected.connect(dialog.reject)
+        btnBox.accepted.connect(dialog.accept)
+        dialog.resize(200, 60)
         ok = dialog.exec()
         if not ok:
             return
-        text_ = str(dialog.textValue())
+        self.show_codes_colour_filter = ""
+        case_sensitive = chkbox.isChecked()
+        self.show_codes_like_filter = line.text()
         root = self.ui.treeWidget.invisibleRootItem()
-        self.recursive_traverse(root, text_)
+        self.recursive_traverse(root, "")  # Show all codes in tree
+        root = self.ui.treeWidget.invisibleRootItem()
+        self.recursive_traverse(root, self.show_codes_like_filter, case_sensitive)
+        if self.show_codes_like_filter == "":
+            self.ui.label_code.setPixmap(QtGui.QPixmap())
+            self.ui.label_code.setToolTip("")
+        else:
+            self.ui.label_code.setPixmap(qta.icon('mdi6.filter-outline').pixmap(22, 22))
+            self.ui.label_code.setToolTip(_("Filtered: ") + self.show_codes_like_filter)
 
     def show_codes_of_color(self):
         """ Show all codes in colour range in code tree., ir all codes if no selection.
         Show selected codes that are of a selected colour.
+        Note: The code color needs to be in English - not translated. As the code colour ranges are in English.
         """
 
         ui = DialogSelectItems(self.app, colour_ranges, _("Select code colors"), "single")
         ok = ui.exec()
         if not ok:
             return
-        selected_color = ui.get_selected()
-        show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected_color)
+        selected = ui.get_selected()
+        self.show_codes_colour_filter = selected['name']  # colour range name
+        if self.show_codes_colour_filter == "all":
+            self.show_codes_colour_filter = ""
+        show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected)
+        self.show_codes_like_filter = ""
+        if self.show_codes_colour_filter == "":
+            self.ui.label_code.setPixmap(QtGui.QPixmap())
+            self.ui.label_code.setToolTip("")
+        else:
+            self.ui.label_code.setPixmap(qta.icon('mdi6.filter-outline').pixmap(22, 22))
+            self.ui.label_code.setToolTip(_("Filtered: ") + self.show_codes_colour_filter)
 
-    def recursive_traverse(self, item, text_):
+    def recursive_traverse(self, item, text_="", case_sensitive=False):
         """ Find all children codes of this item that match or not and hide or unhide based on 'text'.
-        Looks at tooltip also because the code text may be shortened to 50 characters for display, and the tooltip
-        is not shortened.
         Recurse through all child categories.
         Called by: show_codes_like
         Args:
             item: a QTreeWidgetItem
             text_:  Text string for matching with code names
+            case_sensitive:  Bool
         """
 
         child_count = item.childCount()
         for i in range(child_count):
-            if "cid:" in item.child(i).text(1) and len(text_) > 0 and text_ not in item.child(i).text(0) and \
-                    text_ not in item.child(i).toolTip(0):
-                item.child(i).setHidden(True)
+            if "cid:" in item.child(i).text(1) and len(text_) > 0:
+                cid = int(item.child(i).text(1)[4:])
+                for c in self.codes:
+                    if cid == c['cid']:
+                        if text_ not in c['name'] and not case_sensitive:
+                            item.child(i).setHidden(True)
+                        if text_.lower() not in c['name'].lower() and case_sensitive:
+                            item.child(i).setHidden(True)
+                        break
             if "cid:" in item.child(i).text(1) and text_ == "":
                 item.child(i).setHidden(False)
             self.recursive_traverse(item.child(i), text_)
@@ -3768,7 +3791,7 @@ class DialogCodeText(QtWidgets.QWidget):
         self.get_coded_text_update_eventfilter_tooltips()
         return True
 
-    def update_dialog_codes_and_categories(self, tables: list[str] = []):
+    def update_dialog_codes_and_categories(self, tables: list[str]|None = None):
         """Refresh the local dialog after code/category changes and optionally notify other dialogs.
 
         Args:
@@ -6501,7 +6524,6 @@ class DialogCodeText(QtWidgets.QWidget):
                 coded_text_list.append(item)
         if not coded_text_list:
             return
-        
         code_to_handle = coded_text_list[-1]
         if len(coded_text_list) > 1:
             ui = DialogSelectItems(self.app, coded_text_list, _("Select code to resize"), "single")
@@ -6509,7 +6531,6 @@ class DialogCodeText(QtWidgets.QWidget):
                 code_to_handle = ui.get_selected()
             else:
                 return
-
         self.hide_resize_handles()
 
         # Create start handle
@@ -6567,7 +6588,6 @@ class DialogCodeText(QtWidgets.QWidget):
             self.unlight()
             self.highlight()
             return
-            
         seltext = res[0]
 
         try:
@@ -6582,111 +6602,8 @@ class DialogCodeText(QtWidgets.QWidget):
             code_item['pos1'] = orig_pos1
             Message(self.app, _("Duplicate Error"),
                     _("This code already exists at this exact location."), "warning").exec()
-        
         self.hide_resize_handles()
         self.get_coded_text_update_eventfilter_tooltips()
-
-
-class ToolTipEventFilter(QtCore.QObject):
-    """ Used to add a dynamic tooltip for the textEdit.
-    The tool top text is changed according to its position in the text.
-    If over a coded section the codename(s) or Annotation note are displayed in the tooltip.
-    """
-
-    codes = None
-    code_text = None
-    annotations = None
-    file_id = None
-    offset = 0
-    app = None
-
-    def set_codes_and_annotations(self, app, code_text, codes, annotations, file_):
-        """ Code_text contains the coded text to be displayed in a tooptip.
-        Annotations - a mention is made if current position is annotated
-
-        param:
-            code_text: List of dictionaries of the coded text contains: pos0, pos1, seltext, cid, memo
-            codes: List of dictionaries contains id, name, color
-            annotations: List of dictionaries of
-            offset: integer 0 if all the text is loaded, other numbers mean a portion of the text is loaded,
-            beginning at the offset
-        """
-
-        self.app = app
-        self.code_text = code_text
-        self.codes = codes
-        self.annotations = annotations
-        self.file_id = file_['id']
-        self.offset = file_['start']
-        for item in self.code_text:
-            for c in self.codes:
-                if item['cid'] == c['cid']:
-                    item['name'] = c['name']
-                    item['color'] = c['color']
-
-    def eventFilter(self, receiver, event):
-        # QtGui.QToolTip.showText(QtGui.QCursor.pos(), tip)
-        if event.type() == QtCore.QEvent.Type.ToolTip:
-            cursor = receiver.cursorForPosition(event.pos())
-            pos = cursor.position()
-            receiver.setToolTip("")
-            text_ = ""
-            multiple_msg = '<p style="color:#f89407">' + _("Press O to cycle overlapping codes") + "</p>"
-            multiple = 0
-            # Occasional None type error
-            if self.code_text is None:
-                # Call Base Class Method to Continue Normal Event Processing
-                return super(ToolTipEventFilter, self).eventFilter(receiver, event)
-            for item in self.code_text:
-                if item['pos0'] - self.offset <= pos <= item['pos1'] - self.offset and \
-                        item['seltext'] is not None:
-                    seltext = item['seltext']
-                    seltext = seltext.replace("\n", "")
-                    seltext = seltext.replace("\r", "")
-                    # Selected text with a readable cut off, not cut off halfway through a word.
-                    if len(seltext) > 90:
-                        pre = seltext[0:40].split(' ')
-                        post = seltext[len(seltext) - 40:].split(' ')
-                        try:
-                            pre = pre[:-1]
-                        except IndexError:
-                            pass
-                        try:
-                            post = post[1:]
-                        except IndexError:
-                            pass
-                        seltext = " ".join(pre) + " ... " + " ".join(post)
-                    try:
-                        color = TextColor(item['color']).recommendation
-                        text_ += '<p style="background-color:' + item['color'] + "; color:" + color + '"><em>'
-                        text_ += item['name'] + "</em>"
-                        if self.app.settings['showids']:
-                            text_ += " [ctid:" + str(item['ctid']) + "]"
-                        text_ += " (" + item['owner'] + ")"
-                        text_ += "<br />" + seltext
-                        if item['memo'] != "":
-                            memo_text = item['memo']
-                            if len(memo_text) > 150:
-                                memo_text = memo_text[:150] + "..."
-                            text_ += "<br /><em>" + _("MEMO: ") + memo_text + "</em>"
-                        if item['important'] == 1:
-                            text_ += "<br /><em>" + _("IMPORTANT") + "</em>"
-                        text_ += "</p>"
-                        multiple += 1
-                    except Exception as e:
-                        msg = "Codes ToolTipEventFilter Exception\n" + str(e) + ". Possible key error: \n"
-                        msg += str(item)
-                        logger.error(msg)
-            if multiple > 1:
-                text_ = multiple_msg + text_
-            # Check annotations
-            for ann in self.annotations:
-                if ann['pos0'] - self.offset <= pos <= ann['pos1'] - self.offset and self.file_id == ann['fid']:
-                    text_ += "<p>" + _("ANNOTATED") + " (" + ann['owner'] + "): " + ann['memo'] + "</p>"
-            if text_ != "":
-                receiver.setToolTip(text_)
-        # Call Base Class Method to Continue Normal Event Processing
-        return super(ToolTipEventFilter, self).eventFilter(receiver, event)
 
 
 class DialogFontAndSize(QtWidgets.QDialog):

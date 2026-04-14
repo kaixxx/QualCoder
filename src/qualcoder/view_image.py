@@ -49,8 +49,6 @@ from .move_resize_rectangle import DialogMoveResizeRectangle
 from .helpers import ExportDirectoryPathDialog, Message
 from .memo import DialogMemo
 from .report_attributes import DialogSelectAttributeParameters
-from .reports import DialogReportCoderComparisons, DialogReportCodeFrequencies  # for isinstance()
-from .report_codes import DialogReportCodes
 from .ris import Ris
 from .select_items import DialogSelectItems
 
@@ -61,27 +59,6 @@ logger = logging.getLogger(__name__)
 class DialogCodeImage(QtWidgets.QDialog):
     """ View and code images. Create codes and categories.  """
 
-    app = None
-    parent_textEdit = None
-    tab_reports = None  # Tab widget reports, used for updates to codes
-    pixmap = None
-    scene = None
-    files = []  # List of Dictionaries
-    file_ = None  # Dictionary with name, memo, id, mediapath?
-    codes = []
-    categories = []
-    tree_sort_option = "all asc"  # all desc, cat then code asc
-    selection = None  # Initial code rectangle point
-    scale = 1.0
-    code_areas = []
-    important = False  # Show/hide important flagged codes
-    attributes = []
-    undo_deleted_code = None  # Undo last deleted code
-    degrees = 0  # For image rotation
-    show_code_captions = 0  # 0 = no, 1 = code name, 2 = codename + memo
-    pdf_page = None  # display at 1
-    pdf_total_pages = None  # Total pages in pdf
-
     def __init__(self, app, parent_textedit, tab_reports):
         """ Show list of image files.
         On select, Show a scalable and scrollable image.
@@ -91,25 +68,37 @@ class DialogCodeImage(QtWidgets.QDialog):
 
         super(DialogCodeImage, self).__init__()
         self.app = app
-        self.tab_reports = tab_reports
+        self.tab_reports = tab_reports  # Tab widget reports, used for updates to codes
         self.parent_textEdit = parent_textedit
         self.codes = []
         self.categories = []
         self.files = []
-        self.undo_deleted_code = None
-        self.file_ = None
+        self.code_areas = []
+        self.undo_deleted_code = None  # Undo last deleted code
+        self.file_ = None    # Dictionary with name, memo, id, mediapath
+        self.pixmap = None
         self.log = ""
-        self.scale = 1.0
-        self.selection = None
-        self.important = False
+        self.scale = 1.0  # Image scaling
+        self.selection = None  # Initial code rectangle point
+        # State variables for interactive resizing functionality <- L
+        self.item_to_resize = None         # Stores the segment dictionary selected for resizing <- L
+        self.is_dragging_handle = False    # Flag indicating if a resize handle is being dragged <- L
+        self.active_handle = None          # Identifies the active corner ("TL", "TR", "BL", "BR") <- L
+        self.interactive_rect_item = None  # Visual dashed rectangle shown during drag <- L
+        self.original_resize_geom = None   # Stores original geometry (x, y, w, h) before drag <- L
+        self.important = False  # Show/hide important flagged codes
         self.attributes = []
-        self.degrees = 0
+        self.degrees = 0  # For image rotation
         self.get_codes_and_categories()
-        self.tree_sort_option = "all asc"
-        self.show_code_captions = 0
-        self.pdf_page = None
-        self.pdf_total_pages = None
+        self.tree_sort_option = "all asc"  # all desc, cat then code asc
+        self.show_code_captions = 0  # 0 = no, 1 = code name, 2 = codename + memo
         self.default_new_code_color = None
+        self.show_codes_like_filter = ""  # gets filled when text strings are used to show specific code names
+        self.show_codes_colour_filter = ""  # gets filled when a code colur is selected
+
+        self.pdf_page = None  # display at 1
+        self.pdf_total_pages = None
+
         QtWidgets.QDialog.__init__(self)
         self.ui = Ui_Dialog_code_image()
         self.ui.setupUi(self)
@@ -149,6 +138,10 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.ui.listWidget.installEventFilter(self)
         self.ui.treeWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ui.treeWidget.customContextMenuRequested.connect(self.tree_menu)
+        # Codes-tree header menu
+        self.ui.treeWidget.header().setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.treeWidget.header().customContextMenuRequested.connect(self.codes_tree_header_menu)
+        self.tree_column_widths_auto_resize = True
         # Header widgets
         self.ui.pushButton_zoom_in.setIcon(qta.icon('mdi6.magnify-plus-outline', options=[{'scale_factor': 1.4}]))
         self.ui.pushButton_zoom_in.pressed.connect(self.zoom_in)
@@ -253,8 +246,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.default_new_code_color = color
 
     def find_code_in_tree(self):
-        """ Find a code by name in the codes tree and select it.
-        """
+        """ Find a code by name in the codes tree and select it. """
 
         dialog = QtWidgets.QInputDialog(None)
         dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
@@ -269,24 +261,46 @@ class DialogCodeImage(QtWidgets.QDialog):
         if not ok:
             return
         search_text = dialog.textValue()
-
         # Remove selections and search for matching item text
         self.ui.treeWidget.setCurrentItem(None)
         self.ui.treeWidget.clearSelection()
         item = None
         iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        matches = []
         while iterator.value():
             item = iterator.value()
             if "cid" in item.text(1):
                 cid = int(item.text(1)[4:])
                 code_ = next((code_ for code_ in self.codes if code_['cid'] == cid), None)
                 if search_text in code_['name']:
+                    matches.append(code_)
+            iterator += 1
+        if not matches:
+            Message(self.app, _("Match not found"), _("No code with matching text found.")).exec()
+            return
+        # Get one selected code from one or more codes.
+        selected = None
+        if len(matches) > 1:
+            ui = DialogSelectItems(self.app, matches, _("Select code"), "single")
+            ok = ui.exec()
+            if not ok:
+                return
+            selected = ui.get_selected()
+            if not selected:
+                return
+        else:
+            selected = matches[0]
+        # Set selected in tree
+        item = None
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            item = iterator.value()
+            if "cid" in item.text(1):
+                cid = int(item.text(1)[4:])
+                if cid == selected['cid']:
                     self.ui.treeWidget.setCurrentItem(item)
                     break
             iterator += 1
-        if item is None:
-            Message(self.app, _("Match not found"), _("No code with matching text found.")).exec()
-            return
         # Expand parents
         parent = item.parent()
         while parent is not None:
@@ -316,15 +330,17 @@ class DialogCodeImage(QtWidgets.QDialog):
         cur = self.app.conn.cursor()
         self.code_areas = []
         if self.pdf_page is not None:
-            sql = "select imid,id,x1, y1, width, height, code_image_visible.memo, code_image_visible.date, code_image_visible.owner, " \
-                  "code_image_visible.cid, important, code_name.name, code_name.color, pdf_page from code_image_visible " \
+            sql = "select imid,id,x1, y1, width, height, code_image_visible.memo, code_image_visible.date, " \
+                  "code_image_visible.owner, code_image_visible.cid, " \
+                  "important, code_name.name, code_name.color, pdf_page from code_image_visible " \
                   "join code_name on code_name.cid=code_image_visible.cid " \
                   " where code_image_visible.id=? and width > 0 and height > 0 and pdf_page=?" \
                   " order by width*height desc"
             cur.execute(sql, [self.file_['id'], self.pdf_page])
         else:  # Images, jpg, png
-            sql = "select imid,id,x1, y1, width, height, code_image_visible.memo, code_image_visible.date, code_image_visible.owner, " \
-                  "code_image_visible.cid, important, code_name.name, code_name.color, pdf_page from code_image_visible " \
+            sql = "select imid,id,x1, y1, width, height, code_image_visible.memo, code_image_visible.date, " \
+                  "code_image_visible.owner, code_image_visible.cid, " \
+                  "important, code_name.name, code_name.color, pdf_page from code_image_visible " \
                   "join code_name on code_name.cid=code_image_visible.cid " \
                   " where code_image_visible.id=? and width > 0 and height > 0" \
                   " order by width*height desc"
@@ -457,7 +473,10 @@ class DialogCodeImage(QtWidgets.QDialog):
             self.ui.treeWidget.setColumnHidden(1, True)
         else:
             self.ui.treeWidget.setColumnHidden(1, False)
-        self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        if self.tree_column_widths_auto_resize:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        else:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
         self.ui.treeWidget.header().setStretchLastSection(False)
         # Add top level categories
         remove_list = []
@@ -640,36 +659,24 @@ class DialogCodeImage(QtWidgets.QDialog):
                         break
             iterator += 1  # Move to the next item
 
-    '''def fill_code_counts_in_tree(self):
-        """ Count instances of each code for current coder and in the selected file.
-        Called by: fill_tree """
+    def codes_tree_header_menu(self, position):
+        """ treeWidget resize mode - resize to contents or interactive. """
 
-        if self.file_ is None:
-            return
-        cur = self.app.conn.cursor()
-        sql = "select count(cid) from code_image_visible where cid=? and id=?"
-        it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
-        item = it.value()
-        count = 0
-        while item and count < 10000:
-            if item.text(1)[0:4] == "cid:":
-                cid = str(item.text(1)[4:])
-                cur.execute(sql, [cid, self.file_['id']])
-                result = cur.fetchone()
-                if result[0] > 0:
-                    item.setText(3, str(result[0]))
-                else:
-                    item.setText(3, "")
-            it += 1
-            item = it.value()
-            count += 1'''
+        menu = QtWidgets.QMenu(self)
+        action_resize = menu.addAction(_("Toggle automatic resize"))
+        action = menu.exec(self.ui.treeWidget.mapToGlobal(position))
+        if action == action_resize:
+            self.tree_column_widths_auto_resize = not self.tree_column_widths_auto_resize
+        if self.tree_column_widths_auto_resize:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        else:
+            self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
 
     def get_collapsed(self, item):
         """ On category collapse or expansion signal, find the collapsed parent category items.
         This will fill the self.app.collapsed_categories and is the expanded/collapsed tree is then replicated across
         other areas of the app. """
 
-        #print(item.text(0), item.text(1), "Expanded:", item.isExpanded())
         if item.text(1)[:3] == "cid":
             return
         if not item.isExpanded() and item.text(1) not in self.app.collapsed_categories:
@@ -864,6 +871,12 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.file_ = None
         self.selection = None
         self.scale = 1.0
+        # Clear handle states on image change/close to prevent ghost handles or memory errors <- L
+        self.item_to_resize = None
+        self.is_dragging_handle = False
+        self.active_handle = None
+        self.interactive_rect_item = None
+        self.original_resize_geom = None
         items = list(self.scene.items())
         for i in range(items.__len__()):
             self.scene.removeItem(items[i])
@@ -988,7 +1001,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.draw_coded_areas()
         self.fill_code_counts_in_tree()
 
-    def update_dialog_codes_and_categories(self, tables: list[str] = []):
+    def update_dialog_codes_and_categories(self, tables: list[str]|None = None):
         """Refresh the local dialog after code/category changes and optionally notify other dialogs.
 
         Args:
@@ -1040,6 +1053,13 @@ class DialogCodeImage(QtWidgets.QDialog):
 
         if self.pixmap is None:
             return
+        # If the user uses keyboard shortcuts to zoom/rotate WHILE dragging, safely cancel the drag <- L
+        if hasattr(self, 'is_dragging_handle') and self.is_dragging_handle:
+            self.is_dragging_handle = False
+            self.interactive_rect_item = None
+            self.active_handle = None
+            self.original_resize_geom = None
+            self.ui.graphicsView.setDragMode(QtWidgets.QGraphicsView.DragMode.RubberBandDrag)    
         self.scale = (self.ui.horizontalSlider.value() + 1) / 100
         height = int(self.scale * self.pixmap.height())
         pixmap = self.pixmap.scaledToHeight(height, QtCore.Qt.TransformationMode.FastTransformation)
@@ -1135,6 +1155,24 @@ class DialogCodeImage(QtWidgets.QDialog):
                     self.scene.addItem(rect_item)
                 if not self.important:
                     self.scene.addItem(rect_item)
+                # Draw 4 handles (red squares) on the corners of the active segment <- L
+                if hasattr(self, 'item_to_resize') and self.item_to_resize and self.item_to_resize['imid'] == coded['imid']:
+                    handle_size = 12
+                    # Dictionary with relative X, Y coordinates for the 4 corners:
+                    # Top-Left (TL), Top-Right (TR), Bottom-Left (BL), Bottom-Right (BR) <- L
+                    handles = {
+                        "TL": (x, y),
+                        "TR": (x + width - handle_size, y),
+                        "BL": (x, y + height - handle_size),
+                        "BR": (x + width - handle_size, y + height - handle_size)
+                    }
+                    # Iterate through corners to create interactive square items in the scene <- L
+                    for h_type, (hx, hy) in handles.items():
+                        handle_item = QtWidgets.QGraphicsRectItem(hx, hy, handle_size, handle_size)
+                        handle_item.setBrush(QBrush(QtGui.QColor("#ff0000")))  # Red color for visibility <- L
+                        handle_item.setData(0, "resize_handle")  # Main tag to detect clicks <- L
+                        handle_item.setData(1, h_type)          # Identifies the specific corner <- L
+                        self.scene.addItem(handle_item)
                 if self.show_code_captions == 1:
                     self.caption(x, y, code_name)
                 if self.show_code_captions == 2:
@@ -1233,7 +1271,7 @@ class DialogCodeImage(QtWidgets.QDialog):
 
     def tree_menu(self, position):
         """ Context menu for treewidget items.
-        Add, rename, memo, move or delete code or category. Change code color. """
+        Add, rename, memo, move or delete code or category. Change code color. Find code. """
 
         menu = QtWidgets.QMenu()
         menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
@@ -1257,11 +1295,12 @@ class DialogCodeImage(QtWidgets.QDialog):
             action_color = menu.addAction(_("Change code color"))
             action_move_code = menu.addAction(_("Move code to"))
             action_show_coded_media = menu.addAction(_("Show coded text and media"))
-        action_show_codes_like = menu.addAction(_("Show codes like"))
-        action_show_codes_of_colour = menu.addAction(_("Show codes of colour"))
+        action_show_codes_like = menu.addAction(_("Show codes like") + ": " + self.show_codes_like_filter)
+        action_show_codes_of_colour = menu.addAction(_("Show codes of colour") + ": " + self.show_codes_colour_filter)
         action_all_asc = menu.addAction(_("Sort ascending"))
         action_all_desc = menu.addAction(_("Sort descending"))
         action_cat_then_code_asc = menu.addAction(_("Sort category then code ascending"))
+        action_find_code = menu.addAction(_("Find code"))
         action = menu.exec(self.ui.treeWidget.mapToGlobal(position))
         if action is None:
             return
@@ -1279,6 +1318,9 @@ class DialogCodeImage(QtWidgets.QDialog):
         if action == action_cat_then_code_asc:
             self.tree_sort_option = "cat and code asc"
             self.fill_tree()
+            return
+        if action == action_find_code:
+            self.find_code_in_tree()
             return
         if selected is not None and selected.text(1)[0:3] == 'cid' and action == action_color:
             self.change_code_color(selected)
@@ -1353,23 +1395,41 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.update_dialog_codes_and_categories(["code_name"])
 
     def show_codes_like(self):
-        """ Show all codes if text parameter is empty.
+        """ Show all codes if text is empty.
          Show selected codes that contain entered text.
-         Input dialog is narrow, so some code below to make it wider. """
+         The input dialog is too narrow, so it is re-created. """
 
-        dialog = QtWidgets.QInputDialog(None)
-        dialog.setStyleSheet("* {font-size:" + str(self.app.settings['fontsize']) + "pt} ")
-        dialog.setWindowTitle(_("Show codes containing"))
+        dialog = QtWidgets.QDialog(None)
+        dialog.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
+        dialog.setWindowTitle(_("Show some codes"))
         dialog.setWindowFlags(self.windowFlags() & ~QtCore.Qt.WindowType.WindowContextHelpButtonHint)
-        dialog.setInputMode(QtWidgets.QInputDialog.InputMode.TextInput)
-        dialog.setLabelText(_("Show codes containing text.\n(Blank for all)"))
-        dialog.resize(200, 20)
+        dlg_text = _("Show codes containing the text. (Blank for all)") + "\n"
+        if self.show_codes_like_filter:
+            dlg_text += _("Filter: ") + self.show_codes_like_filter
+        lbl = QtWidgets.QLabel(dlg_text)
+        line = QtWidgets.QLineEdit()
+        chkbox = QtWidgets.QCheckBox(_("Case sensitive"))
+        btn_box = QtWidgets.QDialogButtonBox()
+        btn_box.setStandardButtons(QtWidgets.QDialogButtonBox.StandardButton.Ok|QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(lbl)
+        layout.addWidget(chkbox)
+        layout.addWidget(line)
+        layout.addWidget(btn_box)
+        dialog.setLayout(layout)
+        btn_box.rejected.connect(dialog.reject)
+        btn_box.accepted.connect(dialog.accept)
+        dialog.resize(200, 60)
         ok = dialog.exec()
         if not ok:
             return
-        txt = str(dialog.textValue())
+        self.show_codes_colour_filter = ""
+        case_sensitive = chkbox.isChecked()
+        self.show_codes_like_filter = line.text()
         root = self.ui.treeWidget.invisibleRootItem()
-        self.recursive_traverse(root, txt)
+        self.recursive_traverse(root, "")  # Show all codes in tree
+        root = self.ui.treeWidget.invisibleRootItem()
+        self.recursive_traverse(root, self.show_codes_like_filter, case_sensitive)
 
     def show_codes_of_color(self):
         """ Show all codes in colour range in code tree., ir all codes if no selection.
@@ -1380,23 +1440,34 @@ class DialogCodeImage(QtWidgets.QDialog):
         ok = ui.exec()
         if not ok:
             return
-        selected_color = ui.get_selected()
-        show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected_color)
+        selected = ui.get_selected()
+        self.show_codes_colour_filter = selected['name']  # colour range name
+        if self.show_codes_colour_filter == "all":
+            self.show_codes_colour_filter = ""
+        show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected)
+        self.show_codes_like_filter = ""
 
-    def recursive_traverse(self, item, text_):
+    def recursive_traverse(self, item, text_="", case_sensitive=False):
         """ Find all children codes of this item that match or not and hide or unhide based on 'text'.
         Recurse through all child categories.
         Called by: show_codes_like
-        param:
+        Args:
             item: a QTreeWidgetItem
             text_:  Text string for matching with code names
+            case_sensitive:  Bool
         """
 
         child_count = item.childCount()
         for i in range(child_count):
-            if "cid:" in item.child(i).text(1) and len(text_) > 0 and \
-                    (text_ not in item.child(i).text(0) or text_ not in item.child(i).toolTip(0)):
-                item.child(i).setHidden(True)
+            if "cid:" in item.child(i).text(1) and len(text_) > 0:
+                cid = int(item.child(i).text(1)[4:])
+                for c in self.codes:
+                    if cid == c['cid']:
+                        if text_ not in c['name'] and not case_sensitive:
+                            item.child(i).setHidden(True)
+                        if text_.lower() not in c['name'].lower() and case_sensitive:
+                            item.child(i).setHidden(True)
+                        break
             if "cid:" in item.child(i).text(1) and text_ == "":
                 item.child(i).setHidden(False)
             self.recursive_traverse(item.child(i), text_)
@@ -1579,8 +1650,61 @@ class DialogCodeImage(QtWidgets.QDialog):
                 self.item_moved_update_data(item, parent)
                 return True
         if object_ is self.scene:
+            # Detect mouse movement on the scene to update the dashed rectangle in real-time <- L
+            if type(event) == QtWidgets.QGraphicsSceneMouseEvent and event.type() == QtCore.QEvent.Type.GraphicsSceneMouseMove:
+                if hasattr(self, 'is_dragging_handle') and self.is_dragging_handle:
+                    # Call function to recalculate boundaries based on cursor movement <- L
+                    self.update_interactive_resize(event.scenePos())
+                    return True
             if type(event) == QtWidgets.QGraphicsSceneMouseEvent and event.button() == Qt.MouseButton.LeftButton:
                 pos = event.buttonDownScenePos(Qt.MouseButton.LeftButton)
+                # Intercept left click to initiate handle dragging or cancel it <- L
+                if event.type() == QtCore.QEvent.Type.GraphicsSceneMousePress:
+                    item_at = self.scene.itemAt(pos, QtGui.QTransform())
+                    # Check if the click is exactly on one of the 4 handles... <- L
+                    if hasattr(self, 'item_to_resize') and self.item_to_resize and item_at and item_at.data(0) == "resize_handle":
+                        self.is_dragging_handle = True
+                        self.active_handle = item_at.data(1)  # Store which corner was clicked <- L
+                        
+                        # Extract absolute data from the active segment, scaled to screen <- L
+                        it = self.item_to_resize
+                        vx = it['x1'] * self.scale
+                        vy = it['y1'] * self.scale
+                        vw = it['width'] * self.scale
+                        vh = it['height'] * self.scale
+                        
+                        # Calculate exact visual position applying rotations manually (90, 180, 270 degrees) <- L
+                        if self.degrees == 90:
+                            vy = it['x1'] * self.scale
+                            vx = (self.pixmap.height() - it['y1'] - it['height']) * self.scale
+                            vh = it['width'] * self.scale
+                            vw = it['height'] * self.scale
+                        if self.degrees == 180:
+                            vx = (self.pixmap.width() - it['x1'] - it['width']) * self.scale
+                            vy = (self.pixmap.height() - it['y1'] - it['height']) * self.scale
+                            vw = it['width'] * self.scale
+                            vh = it['height'] * self.scale
+                        if self.degrees == 270:
+                            vy = (self.pixmap.width() - it['x1'] - it['width']) * self.scale
+                            vx = it['y1'] * self.scale
+                            vh = it['width'] * self.scale
+                            vw = it['height'] * self.scale
+
+                        # Store this starting geometric position <- L
+                        self.original_resize_geom = (vx, vy, vw, vh)
+                        # Create the temporary rectangle that guides the user visually (live feedback) <- L
+                        self.interactive_rect_item = QtWidgets.QGraphicsRectItem(vx, vy, vw, vh)
+                        pen = QtGui.QPen(QtGui.QColor("#ff0000"), 2, QtCore.Qt.PenStyle.DashLine)
+                        self.interactive_rect_item.setPen(pen)
+                        self.scene.addItem(self.interactive_rect_item)
+                        
+                        # Temporarily disable standard selection rubber band
+                        self.ui.graphicsView.setDragMode(QtWidgets.QGraphicsView.DragMode.NoDrag)
+                        return True
+                    # If we didn't click a handle, but a segment was active, cancel the process <- L
+                    elif hasattr(self, 'item_to_resize') and self.item_to_resize:
+                        self.item_to_resize = None
+                        self.redraw_scene()  # Redraw clears the handles from the screen <- L
                 self.fill_coded_area_label(self.find_coded_areas_for_pos(pos))
                 if event.type() == QtCore.QEvent.Type.GraphicsSceneMousePress:
                     p0 = event.buttonDownScenePos(Qt.MouseButton.LeftButton)
@@ -1588,6 +1712,10 @@ class DialogCodeImage(QtWidgets.QDialog):
                     return True
                 if event.type() == QtCore.QEvent.Type.GraphicsSceneMouseRelease:
                     p1 = event.lastScenePos()
+                    # On button release, process and save the final change if dragging a handle <- L
+                    if hasattr(self, 'is_dragging_handle') and self.is_dragging_handle:
+                        self.execute_interactive_resize(p1)
+                        return True
                     self.create_code_area(p1)
                     return True
             if type(event) == QtWidgets.QGraphicsSceneMouseEvent and event.button() == Qt.MouseButton.RightButton:
@@ -1666,6 +1794,8 @@ class DialogCodeImage(QtWidgets.QDialog):
         action_memo = menu.addAction(_('Memo'))
         action_unmark = menu.addAction(_('Unmark'))
         action_move_resize = menu.addAction(_("Move or resize"))
+        # Add the option Interactive resize <- L
+        action_interactive_resize = menu.addAction(_("Interactive resize"))
         action_important = None
         if item['important'] is None or item['important'] != 1:
             action_important = menu.addAction(_("Add important mark"))
@@ -1705,6 +1835,10 @@ class DialogCodeImage(QtWidgets.QDialog):
             self.set_coded_importance(item, False)
         if action == action_move_resize:
             self.move_or_resize_coding(item)
+        # If the user selects the new option, store the segment to be resized <- L
+        if action == action_interactive_resize:
+            self.item_to_resize = item
+            self.redraw_scene()  # Redrawing triggers draw_coded_areas, showing the handles <- L
         items = self.find_coded_areas_for_pos(pos)
         self.fill_coded_area_label(items)
 
@@ -1964,6 +2098,125 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.app.delete_backup = False
         self.fill_code_counts_in_tree()
 
+    # Functions responsible for mathematically processing the interactive resizing <- L
+    def update_interactive_resize(self, pos):
+        """ Update the visual dashed rectangle during mouse movement. """ 
+        if not self.interactive_rect_item or not self.original_resize_geom:
+            return
+            
+        # Extract original boundaries (X, Y, Right, Bottom)
+        orig_x, orig_y, orig_w, orig_h = self.original_resize_geom
+        orig_right = orig_x + orig_w
+        orig_bottom = orig_y + orig_h
+        
+        # Initialize new boundaries based on the original ones
+        new_x, new_y = orig_x, orig_y
+        new_right, new_bottom = orig_right, orig_bottom
+        
+        mouse_x, mouse_y = pos.x(), pos.y()
+        min_size = 10 * self.scale  # Prevents the box from shrinking to near invisibility
+        
+        # Logic to push the rectangle walls depending on the dragged corner
+        if self.active_handle == "TL":  # Top-Left: Modifies left X and top Y
+            new_x = min(mouse_x, orig_right - min_size)
+            new_y = min(mouse_y, orig_bottom - min_size)
+        elif self.active_handle == "TR":  # Top-Right: Modifies right X and top Y
+            new_right = max(mouse_x, orig_x + min_size)
+            new_y = min(mouse_y, orig_bottom - min_size)
+        elif self.active_handle == "BL":  # Bottom-Left: Modifies left X and bottom Y
+            new_x = min(mouse_x, orig_right - min_size)
+            new_bottom = max(mouse_y, orig_y + min_size)
+        elif self.active_handle == "BR":  # Bottom-Right: Modifies right X and bottom Y
+            new_right = max(mouse_x, orig_x + min_size)
+            new_bottom = max(mouse_y, orig_y + min_size)
+            
+        # Apply the new calculated size to the red dashed rectangle (Live feedback)
+        self.interactive_rect_item.setRect(new_x, new_y, new_right - new_x, new_bottom - new_y)
+
+    def execute_interactive_resize(self, release_pos):
+        """ Calculate final size based on the interactive rect and update DB. """
+        self.is_dragging_handle = False
+        self.ui.graphicsView.setDragMode(QtWidgets.QGraphicsView.DragMode.RubberBandDrag)  # Restore standard mode
+        
+        if not self.item_to_resize or not self.interactive_rect_item:
+            self.item_to_resize = None
+            self.redraw_scene()
+            return
+            
+        final_rect = self.interactive_rect_item.rect()
+        item = self.item_to_resize
+        
+        # Unscale back to the pixmap's real pixels
+        v_x = final_rect.x() / self.scale
+        v_y = final_rect.y() / self.scale
+        v_w = final_rect.width() / self.scale
+        v_h = final_rect.height() / self.scale
+        
+        px_w = self.pixmap.width()
+        px_h = self.pixmap.height()
+        
+        # Inverse mapping: Translate the rotated screen coordinates back to the original 
+        # 0-degree coordinates of the image to save them correctly in the DB.
+        x_unscaled, y_unscaled = 0, 0
+        width_unscaled, height_unscaled = 0, 0
+        if self.degrees == 0:
+            x_unscaled, y_unscaled = v_x, v_y
+            width_unscaled, height_unscaled = v_w, v_h
+        elif self.degrees == 90:
+            x_unscaled = v_y
+            y_unscaled = px_h - v_x - v_w
+            width_unscaled = v_h
+            height_unscaled = v_w
+        elif self.degrees == 180:
+            x_unscaled = px_w - v_x - v_w
+            y_unscaled = px_h - v_y - v_h
+            width_unscaled = v_w
+            height_unscaled = v_h
+        elif self.degrees == 270:
+            x_unscaled = px_w - v_y - v_h
+            y_unscaled = v_x
+            width_unscaled = v_h
+            height_unscaled = v_w
+
+        x_unscaled = round(x_unscaled)
+        y_unscaled = round(y_unscaled)
+        width_unscaled = round(width_unscaled)
+        height_unscaled = round(height_unscaled)
+        
+        # Strict boundaries: Prevent the user from expanding the box beyond the real image dimensions
+        if x_unscaled < 0: x_unscaled = 0
+        if y_unscaled < 0: y_unscaled = 0
+        if x_unscaled + width_unscaled > px_w:
+            width_unscaled = px_w - x_unscaled
+        if y_unscaled + height_unscaled > px_h:
+            height_unscaled = px_h - y_unscaled
+            
+        item['x1'] = x_unscaled
+        item['y1'] = y_unscaled
+        item['width'] = width_unscaled
+        item['height'] = height_unscaled
+        
+        # Execute SQL statement to permanently update SQLite
+        cur = self.app.conn.cursor()
+        # Prevent app crash if the user resizes the segment to perfectly match an existing identical one <- L
+        try:
+            cur.execute("update code_image set x1=?, y1=?, width=?, height=? where imid=?",
+                        (item['x1'], item['y1'], item['width'], item['height'], item['imid']))
+            self.app.conn.commit()
+        except sqlite3.IntegrityError:
+            self.app.conn.rollback()
+            Message(self.app, _("Duplicate Error"), _("This exact coded area already exists."), "warning").exec()
+        
+        # Clean up state variables and remove the dashed rectangle
+        self.scene.removeItem(self.interactive_rect_item)
+        self.interactive_rect_item = None
+        self.active_handle = None
+        self.original_resize_geom = None
+        self.item_to_resize = None
+        
+        self.redraw_scene()
+        self.app.delete_backup = False
+
     def item_moved_update_data(self, item, parent):
         """ Called from drop event in treeWidget view port.
         identify code or category to move.
@@ -2062,6 +2315,29 @@ class DialogCodeImage(QtWidgets.QDialog):
             return
         category = ui.get_selected()
         try:
+            # Always record merge information in the target category's memo <- L
+            source_cat = None
+            for c in self.categories:
+                if c['catid'] == catid:
+                    source_cat = c
+                    break
+            if source_cat is not None and category['catid'] is not None:
+                target_cat = None
+                for c in self.categories:
+                    if c['catid'] == category['catid']:
+                        target_cat = c
+                        break
+                if target_cat is not None:
+                    merge_date = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                    source_memo = (source_cat.get('memo', '') or '').strip()
+                    source_owner = source_cat.get('owner', self.app.settings['codername'])
+                    merged_block = f"\n\n[{_('Merged from category:')} {source_cat['name']}, {_('Coder:')} {source_owner}, {_('Merger date:')} {merge_date}]"  
+                    if source_memo:
+                        merged_block += f"\n{source_memo}"
+                    target_memo = target_cat.get('memo', '') or ''
+                    new_memo = (target_memo + merged_block).strip()
+                    cur.execute("update code_cat set memo=? where catid=?", [new_memo, category['catid']])
+                    target_cat['memo'] = new_memo 
             for code in self.codes:
                 if code['catid'] == catid:
                     cur.execute("update code_name set catid=? where catid=?", [category['catid'], catid])
@@ -2105,6 +2381,23 @@ class DialogCodeImage(QtWidgets.QDialog):
         cur = self.app.conn.cursor()
         old_cid = item['cid']
         new_cid = int(parent.text(1).split(':')[1])
+        # Always record merge information in the target code's memo <- L
+        target_code = None
+        for c in self.codes:
+            if c['cid'] == new_cid:
+                target_code = c
+                break
+        if target_code is not None:
+            merge_date = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            source_memo = item.get('memo', '').strip()
+            source_owner = item.get('owner', self.app.settings['codername'])
+            merged_block = f"\n\n[{_('Merged from code:')} {item['name']}, {_('Coder:')} {source_owner}, {_('Merger date:')} {merge_date}]"  
+            if source_memo:
+                merged_block += f"\n{source_memo}"
+            target_memo = target_code.get('memo', '') or ''
+            new_memo = (target_memo + merged_block).strip()
+            cur.execute("update code_name set memo=? where cid=?", [new_memo, new_cid])
+            target_code['memo'] = new_memo
         # Update cid for each coded segment in text, av, image. Delete where there is an Integrity error
         ct_sql = "select ctid from code_text where cid=?"
         cur.execute(ct_sql, [old_cid])
@@ -2113,8 +2406,7 @@ class DialogCodeImage(QtWidgets.QDialog):
             for ct in ct_res:
                 try:
                     cur.execute("update code_text set cid=? where ctid=?", [new_cid, ct[0]])
-                except sqlite3.IntegrityError as e_:
-                    # print(ct, e_)
+                except sqlite3.IntegrityError:
                     cur.execute("delete from code_text where ctid=?", [ct[0]])
             av_sql = "select avid from code_av where cid=?"
             cur.execute(av_sql, [old_cid])
@@ -2122,8 +2414,7 @@ class DialogCodeImage(QtWidgets.QDialog):
             for av in av_res:
                 try:
                     cur.execute("update code_av set cid=? where avid=?", [new_cid, av[0]])
-                except sqlite3.IntegrityError as e_:
-                    # print(e_)
+                except sqlite3.IntegrityError:
                     cur.execute("delete from code_av where avid=?", [av[0]])
             img_sql = "select imid from code_image where cid=?"
             cur.execute(img_sql, [old_cid])
@@ -2131,14 +2422,14 @@ class DialogCodeImage(QtWidgets.QDialog):
             for img in img_res:
                 try:
                     cur.execute("update code_image set cid=? where imid=?", [new_cid, img[0]])
-                except sqlite3.IntegrityError as e_:
-                    # print(e_)
+                except sqlite3.IntegrityError:
                     cur.execute("delete from code_image where imid=?", [img[0]])
 
             cur.execute("delete from code_name where cid=?", [old_cid, ])
             self.app.conn.commit()
         except Exception as e_:
             print(e_)
+            logger.warning(e_)
             self.app.conn.rollback()  # revert all changes
             raise
         self.parent_textEdit.append(msg)
@@ -2421,24 +2712,19 @@ class DialogViewImage(QtWidgets.QDialog):
     """ View image. View and edit displayed memo.
     Show a scalable and scrollable image.
     The slider values range from 10 to 99.
-
     Linked images have 'image:' at start of mediapath
     """
 
-    app = None
-    image_data = None
-    pixmap = None
-    scene = None
-    degrees = 0  # for rotation
-
-    def __init__(self, app, image_data, parent=None):
+    def __init__(self, app, image_data):
         """ Image_data contains: {name, mediapath, owner, id, date, memo, fulltext}
         mediapath may be a link as: 'images:path'
         """
 
         self.app = app
         self.image_data = image_data
-        self.degrees = 0
+        self.degrees = 0  # For rotation
+        self.pixmap = None
+        self.scene = None
         QtWidgets.QDialog.__init__(self)
         self.ui = Ui_Dialog_view_image()
         self.ui.setupUi(self)

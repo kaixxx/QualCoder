@@ -31,6 +31,7 @@ import re
 from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 
+from .code_in_all_files import DialogCodeInAllFiles
 from .color_selector import TextColor
 from .GUI.ui_dialog_report_code_summary import Ui_Dialog_code_summary
 from .stopwords import *
@@ -48,8 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class DialogReportCodeSummary(QtWidgets.QDialog):
-    """ Provide a summary report for selected code.
-    """
+    """ Provide a summary report for selected code. """
 
     def __init__(self, app, parent_textedit):
         self.app = app
@@ -74,6 +74,13 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         self.ui.pushButton_search_next.pressed.connect(self.search_results_next)
         self.ui.treeWidget.setStyleSheet(treefont)
         self.ui.treeWidget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.ui.treeWidget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.ui.treeWidget.customContextMenuRequested.connect(self.tree_menu)
+        # Tree variables
+        self.contains_long_names = False
+        self.truncated_code_names = True
+        self.tree_column_widths_auto_resize = True
+
         languages = ["  ", "Deutsch de", "English en", "Español es", "Français fr", "Italiano it", "Português pt"]
         for lang in languages:
             self.ui.comboBox_stopwords.addItem(lang)
@@ -151,7 +158,12 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                 memo = ""
                 if c['memo'] != "":
                     memo = _("Memo")
-                top_item = QtWidgets.QTreeWidgetItem([c['name'], f'catid:{c["catid"]}', memo])
+                cat_name = c['name']
+                if self.truncated_code_names:
+                    if len(c['name']) > 62:  # Keep category name short
+                        cat_name = c['name'][:30] + '..' + c['name'][-30:]
+                        self.contains_long_names = True
+                top_item = QtWidgets.QTreeWidgetItem([cat_name, f'catid:{c["catid"]}', memo])
                 top_item.setToolTip(0, c['name'])
                 top_item.setToolTip(2, c['memo'])
                 self.ui.treeWidget.addTopLevelItem(top_item)
@@ -168,15 +180,20 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         while len(cats) > 0 and count < 10000:
             remove_list = []
             for c in cats:
-                it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
-                item = it.value()
+                iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+                item = iterator.value()
                 count2 = 0
                 while item and count2 < 10000:  # while there is an item in the list
                     if item.text(1) == f'catid:{c["supercatid"]}':
                         memo = ""
                         if c['memo'] != "":
                             memo = _("Memo")
-                        child = QtWidgets.QTreeWidgetItem([c['name'], f'catid:{c["catid"]}', memo])
+                        cat_name = c['name']
+                        if self.truncated_code_names:
+                            if len(c['name']) > 62:  # Keep category name short
+                                cat_name = c['name'][:30] + '..' + c['name'][-30:]
+                                self.contains_long_names = True
+                        child = QtWidgets.QTreeWidgetItem([cat_name, f'catid:{c["catid"]}', memo])
                         child.setToolTip(0, c['name'])
                         child.setToolTip(2, c['memo'])
                         item.addChild(child)
@@ -185,8 +202,8 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                         else:
                             child.setExpanded(True)
                         remove_list.append(c)
-                    it += 1
-                    item = it.value()
+                    iterator += 1
+                    item = iterator.value()
                     count2 += 1
             for item in remove_list:
                 cats.remove(item)
@@ -199,7 +216,12 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                 memo = ""
                 if c['memo'] != "":
                     memo = _("Memo")
-                top_item = QtWidgets.QTreeWidgetItem([c['name'], f'cid:{c["cid"]}', memo])
+                code_name = c['name']
+                if self.truncated_code_names:
+                    if len(c['name']) > 62:  # Keep category name short
+                        code_name = c['name'][:30] + '..' + c['name'][-30:]
+                        self.contains_long_names = True
+                top_item = QtWidgets.QTreeWidgetItem([code_name, f'cid:{c["cid"]}', memo])
                 top_item.setToolTip(0, c['name'])
                 top_item.setToolTip(2, c['memo'])
                 top_item.setBackground(0, QtGui.QBrush(QtGui.QColor(c['color']), Qt.BrushStyle.SolidPattern))
@@ -214,15 +236,20 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
 
         # Add codes as children
         for c in codes:
-            it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
-            item = it.value()
+            iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+            item = iterator.value()
             count = 0
             while item and count < 10000:
                 if item.text(1) == f'catid:{c["catid"]}':
                     memo = ""
                     if c['memo'] != "":
                         memo = _("Memo")
-                    child = QtWidgets.QTreeWidgetItem([c['name'], f'cid:{c["cid"]}', memo])
+                    code_name = c['name']
+                    if self.truncated_code_names:
+                        if len(c['name']) > 62:  # Keep category name short
+                            code_name = c['name'][:30] + '..' + c['name'][-30:]
+                            self.contains_long_names = True
+                    child = QtWidgets.QTreeWidgetItem([code_name, f'cid:{c["cid"]}', memo])
                     child.setBackground(0, QtGui.QBrush(QtGui.QColor(c['color']), Qt.BrushStyle.SolidPattern))
                     color = TextColor(c['color']).recommendation
                     child.setForeground(0, QtGui.QBrush(QtGui.QColor(color)))
@@ -232,24 +259,22 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDragEnabled)
                     item.addChild(child)
                     c['catid'] = -1  # Make unmatchable
-                it += 1
-                item = it.value()
+                iterator += 1
+                item = iterator.value()
                 count += 1
         self.ui.treeWidget.sortByColumn(0, QtCore.Qt.SortOrder.AscendingOrder)
-        # self.ui.treeWidget.expandAll()
         self.fill_code_counts_in_tree()
 
     def fill_code_counts_in_tree(self):
         """ Count instances of each code.
-        Called by: fill_tree
-        """
+        Called by: fill_tree """
 
         cur = self.app.conn.cursor()
         sql_text = "select count(cid) from code_text where cid=?"
         sql_img = "select count(cid) from code_image where cid=?"
         sql_av = "select count(cid) from code_av where cid=?"
-        it = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
-        item = it.value()
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        item = iterator.value()
         count = 0
         while item and count < 10000:
             if item.text(1)[0:4] == "cid:":
@@ -271,10 +296,48 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                     item.setText(3, str(coding_count))
                 else:
                     item.setText(3, "")
-
-            it += 1
-            item = it.value()
+            iterator += 1
+            item = iterator.value()
             count += 1
+
+    def tree_menu(self, position):
+        menu = QtWidgets.QMenu()
+        menu.setStyleSheet(f"QMenu {{font-size:{self.app.settings['fontsize']}pt}} ")
+        selected = self.ui.treeWidget.currentItem()
+        action_show_coded_media = None
+        if selected is not None and selected.text(1)[0:3] == 'cid':
+            action_show_coded_media = menu.addAction(_("Show coded files"))
+        action_expand_names = None
+        if self.contains_long_names:
+            action_expand_names = menu.addAction(_("Expand names"))
+        action_truncate_names = None
+        if self.contains_long_names and self.truncated_code_names is False:
+            action_truncate_names = menu.addAction(_("Truncate names"))
+        action_resize = menu.addAction(_("Toggle automatic column resize"))
+        action = menu.exec(self.ui.treeWidget.mapToGlobal(position))
+        if action is not None:
+            if action == action_show_coded_media:
+                found_code = None
+                tofind = int(selected.text(1)[4:])
+                for code in self.codes:
+                    if code['cid'] == tofind:
+                        found_code = code
+                        break
+                if found_code:
+                    DialogCodeInAllFiles(self.app, found_code)
+                return
+            if action == action_expand_names:
+                self.truncated_code_names = False
+                self.fill_tree()
+            if action == action_truncate_names:
+                self.truncated_code_names = True
+                self.fill_tree()
+            if action == action_resize:
+                self.tree_column_widths_auto_resize = not self.tree_column_widths_auto_resize
+            if self.tree_column_widths_auto_resize:
+                self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            else:
+                self.ui.treeWidget.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
 
     def fill_text_edit(self):
         """ Get data about file and fill text edit. """
@@ -287,7 +350,7 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
             return
         code_ = None
         for c in self.codes:
-            if c['name'] == current.text(0):
+            if c['cid'] == int(current.text(1)[4:]):
                 code_ = c
         if code_ is None:
             return
@@ -361,7 +424,6 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
         text += "  " + _("Average characters: ") + f"{int(avg_chars)}\n"
 
         # Get stopwords from user created list or
-        # TODO default to user selection
         stopwords_file_path = os.path.join(os.path.expanduser('~'), ".qualcoder", "stopwords.txt")
         user_created_stopwords = []
         stopwords = []
@@ -376,7 +438,7 @@ class DialogReportCodeSummary(QtWidgets.QDialog):
                         break
                     user_created_stopwords.append(stopword.strip())  # Remove line ending
             stopwords = user_created_stopwords
-        except FileNotFoundError as err:
+        except FileNotFoundError:
             pass
         if not user_created_stopwords:
             stopwords = []
