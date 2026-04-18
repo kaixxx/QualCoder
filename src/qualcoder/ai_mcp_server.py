@@ -340,15 +340,19 @@ class AiMcpServer:
                 return _('Deleting code "{name}"...').format(name=str(code_name))
             if tool_name == "codes/rename_category":
                 catid = self._to_int(tool_args.get("catid"), -1)
-                category_name = self._fetch_category_name(catid) if catid > 0 else None
+                if catid <= 0:
+                    return _('Renaming category "error: missing category id"...')
+                category_name = self._fetch_category_name(catid)
                 if category_name is None or str(category_name).strip() == "":
-                    category_name = _("Category") + (f" #{catid}" if catid > 0 else "")
+                    category_name = _("Category") + f" #{catid}"
                 return _('Renaming category "{name}"...').format(name=str(category_name))
             if tool_name == "codes/rename_code":
                 cid = self._to_int(tool_args.get("cid"), -1)
-                code_name = self._fetch_code_name(cid) if cid > 0 else None
+                if cid <= 0:
+                    return _('Renaming code "error: missing code id"...')
+                code_name = self._fetch_code_name(cid)
                 if code_name is None or str(code_name).strip() == "":
-                    code_name = _("Code") + (f" #{cid}" if cid > 0 else "")
+                    code_name = _("Code") + f" #{cid}"
                 return _('Renaming code "{name}"...').format(name=str(code_name))
             if tool_name == "codes/move_text_coding":
                 ctid = self._to_int(tool_args.get("ctid"), -1)

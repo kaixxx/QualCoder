@@ -2467,8 +2467,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             "}\n"
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, tools/list, tools/call.\n"
-            "- The turn already contains initialize, resources/list, and tools/list. Do not repeat them with identical params.\n"
+            "- The turn already contains initialize, resources/list, and resources/templates/list. Do not repeat them with identical params.\n"
             "- Use as few calls as possible and keep them focused.\n"
+            "- If you need any tool and the available tools are not already known from the current conversation context, call tools/list before planning or using tools/call.\n"
+            "- Use tools/call only for tools that have already been discovered through tools/list in the current conversation context.\n"
             "- Default to user_decision_required=false.\n"
             "- Set user_decision_required=true only when the global agent rules require a user decision or confirmation.\n"
             "- If user_decision_required=true, provide one concise natural-language question in decision_question, keep calls empty, and put suggested follow-up MCP actions into proposed_next_calls.\n"
@@ -2502,8 +2504,10 @@ data collected. This information will accompany every prompt sent to the AI, res
             "}\n"
             "Rules:\n"
             "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, tools/list, tools/call.\n"
-            "- Initialize, resources/list, and tools/list are already available in context unless explicitly changed.\n"
+            "- Initialize, resources/list, and resources/templates/list are already available in context unless explicitly changed.\n"
             "- Use as few additional calls as possible and keep them focused.\n"
+            "- If you need any tool and the available tools are not already known from the current conversation context, call tools/list before planning or using tools/call.\n"
+            "- Use tools/call only for tools that have already been discovered through tools/list in the current conversation context.\n"
             "- If deferred_calls are listed in the reflection prompt, decide explicitly whether they should continue unchanged by setting continue_deferred_calls=true or false.\n"
             "- If continue_deferred_calls=true, you may keep revised_calls empty to continue the deferred queue unchanged, or provide revised_calls to prepend/adjust the next steps.\n"
             "- Default to user_decision_required=false.\n"
@@ -2597,24 +2601,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         tool_call_params = {
             "type": "object",
             "properties": {
-                "name": {
-                    "type": "string",
-                    "enum": [
-                        "codes/create_category",
-                        "codes/create_code",
-                        "codes/create_text_coding",
-                        "codes/preview_delete_category",
-                        "codes/preview_delete_code",
-                        "codes/rename_category",
-                        "codes/rename_code",
-                        "codes/move_category",
-                        "codes/move_code",
-                        "codes/delete_category",
-                        "codes/delete_code",
-                        "codes/move_text_coding",
-                        "codes/delete_text_coding",
-                    ],
-                },
+                "name": {"type": "string"},
                 "arguments": {
                     "type": "object",
                     "properties": {},
@@ -3483,7 +3470,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
                 ("initialize", {}),
                 ("resources/list", {}),
-                ("tools/list", {}),
+                ("resources/templates/list", {}),
             ]
             planner_json_schema = self._mcp_planner_json_schema()
             reflection_json_schema = self._mcp_reflection_json_schema()
