@@ -22,7 +22,6 @@ from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.server.lowlevel.server import ReadResourceContents
-from .ai_skills import AiSkillsCatalog
 
 
 class AiMcpServer:
@@ -78,7 +77,6 @@ class AiMcpServer:
 
     def __init__(self, app):
         self.app = app
-        self.skills_catalog = AiSkillsCatalog(app)
         self._request_seq = 1
         self._preview_tokens: Dict[str, Dict[str, Any]] = {}
         self._sdk_server = Server(
@@ -91,7 +89,7 @@ class AiMcpServer:
     def _server_instructions(self) -> str:
         return (
             "QualCoder internal MCP server. "
-            "Use resources/list, resources/read, prompts/list, prompts/get, tools/list, and tools/call. "
+            "Use resources/list, resources/read, tools/list, and tools/call. "
             "Available resources: text documents list (qualcoder://documents), document text by id "
             "(qualcoder://documents/text/{id}), code tree (qualcoder://codes/tree), and coded text segments by code id "
             "(qualcoder://codes/segments/{cid}), semantic vector search "
@@ -101,8 +99,7 @@ class AiMcpServer:
             "and regular-expression search "
             "(qualcoder://search/regex?pattern=...) with optional filters file_ids and exclude_cids. "
             "Available tools include preview and write operations for categories, codes, and text codings. "
-            "Delete actions on categories or codes should be previewed before execution. "
-            "Available prompts represent QualCoder skills from system, user, and project scope."
+            "Delete actions on categories or codes should be previewed before execution."
         )
 
     def _current_ai_permissions(self) -> int:
@@ -270,16 +267,6 @@ class AiMcpServer:
                     raise ValueError("Tool arguments must be an object.")
                 change_set_id = str(params.get("_ai_change_set_id", "")).strip()
                 result = self._call_tool_payload(name, args, change_set_id)
-            elif method == "prompts/list":
-                result = self._list_prompts_payload()
-            elif method == "prompts/get":
-                name = str(params.get("name", "")).strip()
-                if name == "":
-                    raise ValueError("Missing prompt name.")
-                args = params.get("arguments")
-                if args is not None and not isinstance(args, dict):
-                    raise ValueError("Prompt arguments must be an object.")
-                result = self._get_prompt_payload(name, args)
             else:
                 return self._error_response(request_id, -32601, "Method not found", method)
             return self._result_response(request_id, result)
@@ -616,20 +603,6 @@ class AiMcpServer:
             ),
         ]
 
-    def _list_prompts_payload(self) -> Dict[str, Any]:
-        prompts: List[Dict[str, Any]] = []
-        for skill in self.skills_catalog.list_skills():
-            description = str(skill.description).strip()
-            if description == "":
-                description = _("No description provided.")
-            prompts.append(
-                {
-                    "name": skill.skill_id,
-                    "description": f"[{skill.scope}] {description}",
-                }
-            )
-        return {"prompts": prompts}
-
     def _list_tools_payload(self) -> Dict[str, Any]:
         return {
             "tools": [
@@ -829,33 +802,6 @@ class AiMcpServer:
                     },
                 },
             ]
-        }
-
-    def _get_prompt_payload(self, name: str, arguments: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        if arguments is not None and not isinstance(arguments, dict):
-            raise ValueError("Prompt arguments must be an object.")
-        skill = self.skills_catalog.get_skill(name)
-        if skill is None:
-            raise RuntimeError(f"Prompt not found: {name}")
-
-        description = str(skill.description).strip()
-        if description == "":
-            description = _("No description provided.")
-        content = str(skill.content).strip()
-        if content == "":
-            content = _("(empty skill)")
-
-        return {
-            "description": f"[{skill.scope}] {description}",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": {
-                        "type": "text",
-                        "text": content,
-                    },
-                }
-            ],
         }
 
     def _call_tool_payload(self, name: str, arguments: Optional[Dict[str, Any]], change_set_id: str) -> Dict[str, Any]:

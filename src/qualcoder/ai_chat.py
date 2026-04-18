@@ -51,6 +51,7 @@ from .ai_search_dialog import DialogAiSearch
 from .GUI.ui_ai_chat import Ui_Dialog_ai_chat
 from .helpers import Message
 from .confirm_delete import DialogConfirmDelete
+from .ai_agent_prompts import AiAgentPromptsCatalog, AgentPromptRecord
 from .ai_prompts import PromptItem
 from .ai_llm import extract_ai_memo, ai_quote_search, strip_think_blocks, AICancelled
 from .ai_mcp_server import AiMcpServer
@@ -236,6 +237,7 @@ class DialogAIChat(QtWidgets.QDialog):
         self.ai_stream_buffer = ""
         self.ai_stream_in_ref = False
         self.curr_codings = None
+        self.agent_prompts_catalog = AiAgentPromptsCatalog(self.app)
         self.ai_mcp_server = AiMcpServer(self.app)
         self.ai_prompt = None
         self.ai_search_code_name = None
@@ -848,8 +850,8 @@ class DialogAIChat(QtWidgets.QDialog):
         self.process_message('system', system_prompt)    
         self.update_chat_window()  
 
-    def _agent_md_path(self) -> str:
-        return os.path.join(os.path.dirname(__file__), "ai_skills", "agent.md")
+    def _agent_base_prompt_name(self) -> str:
+        return "_agent"
 
     def _ai_permissions_label(self) -> str:
         """Return the current AI permissions label used in agent instructions."""
@@ -885,8 +887,8 @@ class DialogAIChat(QtWidgets.QDialog):
         )
         self.process_message('env_update', content, self.current_chat_idx)
 
-    def _render_agent_md_content(self, content: str) -> str:
-        """Replace supported runtime placeholders in agent.md."""
+    def _render_agent_prompt_content(self, content: str) -> str:
+        """Replace supported runtime placeholders in the internal agent prompt."""
 
         if content == "":
             return ""
@@ -902,22 +904,18 @@ class DialogAIChat(QtWidgets.QDialog):
 
         return re.sub(r"\{\{([A-Z0-9_]+)\}\}", replace_placeholder, content)
 
-    def _load_agent_md_content(self) -> str:
-        """Load global agent instructions from agent.md if present."""
+    def _load_internal_agent_prompt_content(self, prompt_name: str) -> str:
+        """Load one internal agent prompt by exact prompt filename."""
 
-        agent_md_path = self._agent_md_path()
-        if not os.path.exists(agent_md_path):
+        prompt = self.agent_prompts_catalog.get_internal_prompt(prompt_name)
+        if prompt is None:
             return ""
-        try:
-            with open(agent_md_path, "r", encoding="utf-8") as handle:
-                return self._render_agent_md_content(handle.read().strip())
-        except OSError:
-            return ""
+        return self._render_agent_prompt_content(prompt.content)
 
     def _general_chat_base_system_prompt(self) -> str:
-        """Build the base system prompt for the AI agent chat from agent.md + project memo."""
+        """Build the base system prompt for the AI agent chat from _agent.md + project memo."""
 
-        base_prompt = self._load_agent_md_content()
+        base_prompt = self._load_internal_agent_prompt_content(self._agent_base_prompt_name())
         if base_prompt == "":
             return self.app.ai.get_default_system_prompt()
 
@@ -938,6 +936,48 @@ class DialogAIChat(QtWidgets.QDialog):
         if phase_text == "":
             return base_prompt
         return base_prompt + "\n\n# Current task contract\n\n" + phase_text
+
+    def _resolve_turn_agent_prompts(self, user_message: str) -> List[AgentPromptRecord]:
+        """Resolve explicit `/name` prompt references from one user message."""
+
+        return self.agent_prompts_catalog.extract_prompt_references(user_message)
+
+    def _build_turn_prompt_message(self, prompt: AgentPromptRecord) -> str:
+        """Format one loaded explicit prompt as persistent supplemental instructions."""
+
+        header = (
+            f'The user explicitly activated the prompt "/{prompt.name}" in this conversation. '
+            "Treat the following text as supplemental instructions for the rest of this conversation."
+        )
+        content = str(prompt.content if prompt.content is not None else "").strip()
+        if content == "":
+            content = _("(empty prompt)")
+        return header + "\n\n" + content
+
+    def _persist_explicit_agent_prompts(self, chat_idx: int, user_message: str) -> List[AgentPromptRecord]:
+        """Persist newly activated explicit prompts so they remain active in later turns."""
+
+        prompts = self._resolve_turn_agent_prompts(user_message)
+        if len(prompts) == 0:
+            return []
+
+        latest_prompt_content: Dict[str, str] = {}
+        for msg in reversed(self.chat_msg_list):
+            if len(msg) < 5 or str(msg[2]) != 'prompt':
+                continue
+            prompt_name = str(msg[3] if msg[3] is not None else '').strip()
+            if prompt_name == "" or prompt_name in latest_prompt_content:
+                continue
+            latest_prompt_content[prompt_name] = str(msg[4] if msg[4] is not None else '')
+
+        loaded_prompts: List[AgentPromptRecord] = []
+        for prompt in prompts:
+            prompt_message = self._build_turn_prompt_message(prompt)
+            if latest_prompt_content.get(prompt.name, None) == prompt_message:
+                continue
+            self.history_add_message('prompt', prompt.name, prompt_message, chat_idx)
+            loaded_prompts.append(prompt)
+        return loaded_prompts
 
     def new_text_analysis(self):
         """analyze a piece of text from an empirical document"""
@@ -1989,6 +2029,7 @@ data collected. This information will accompany every prompt sent to the AI, res
     def history_get_ai_messages(self):
         messages = []
         latest_agent_state_id = -1
+        latest_prompt_ids: Dict[str, int] = {}
         for msg in self.chat_msg_list:
             if msg[2] == 'agent_state':
                 try:
@@ -1997,11 +2038,33 @@ data collected. This information will accompany every prompt sent to the AI, res
                     msg_id = -1
                 if msg_id > latest_agent_state_id:
                     latest_agent_state_id = msg_id
+            elif msg[2] == 'prompt':
+                prompt_name = str(msg[3] if msg[3] is not None else '').strip()
+                if prompt_name == '':
+                    continue
+                try:
+                    msg_id = int(msg[0])
+                except Exception:
+                    msg_id = -1
+                prev_id = latest_prompt_ids.get(prompt_name, -1)
+                if msg_id > prev_id:
+                    latest_prompt_ids[prompt_name] = msg_id
 
         for msg in self.chat_msg_list:
             if msg[2] == 'system':
                 messages.append(SystemMessage(content=msg[4]))
             elif msg[2] == 'instruct' or msg[2] == 'user':
+                messages.append(HumanMessage(content=msg[4]))
+            elif msg[2] == 'prompt':
+                prompt_name = str(msg[3] if msg[3] is not None else '').strip()
+                if prompt_name == '':
+                    continue
+                try:
+                    msg_id = int(msg[0])
+                except Exception:
+                    msg_id = -1
+                if msg_id != latest_prompt_ids.get(prompt_name, -1):
+                    continue
                 messages.append(HumanMessage(content=msg[4]))
             elif msg[2] == 'env_update':
                 messages.append(HumanMessage(content=msg[4]))
@@ -2294,6 +2357,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             # single_instruct messages are persisted for audit/logging, but not rendered
             # and not sent again in future turns.
             self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
+        elif msg_type == 'prompt':
+            # explicit prompt activations are persisted for future turns, but not rendered
+            self.history_add_message(msg_type, '', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
         elif msg_type == 'agent_state':
             # compact state memory for future turns (persisted, not rendered)
             self.history_add_message(msg_type, 'ai_agent', msg_content, chat_idx, db_conn=db_conn, refresh=refresh_history, commit=commit_history)
@@ -2326,6 +2392,26 @@ data collected. This information will accompany every prompt sent to the AI, res
                 if 0 <= chat_idx < len(self.chat_list):
                     analysis_type = self.chat_list[chat_idx][2]
                 if self._is_agent_chat_type(analysis_type):
+                    loaded_prompts = self._persist_explicit_agent_prompts(chat_idx, msg_content)
+                    if len(loaded_prompts) == 1:
+                        status_text = _('Loaded prompt: {name}').format(
+                            name='/' + loaded_prompts[0].name
+                        )
+                        self.process_message(
+                            'agent_status',
+                            json.dumps({"kind": "prompt", "text": status_text}, ensure_ascii=False),
+                            chat_idx,
+                        )
+                    elif len(loaded_prompts) > 1:
+                        status_text = _('Loaded prompts: {names}').format(
+                            names=', '.join('/' + prompt.name for prompt in loaded_prompts)
+                        )
+                        self.process_message(
+                            'agent_status',
+                            json.dumps({"kind": "prompt", "text": status_text}, ensure_ascii=False),
+                            chat_idx,
+                        )
+                    messages = self.history_get_ai_messages()
                     self.app.ai.start_query(self._mcp_general_chat_worker,
                                             self.ai_mcp_message_callback,
                                             messages,
@@ -2371,25 +2457,18 @@ data collected. This information will accompany every prompt sent to the AI, res
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"needs_mcp\": true|false, "
-            "\"skill_decision\": \"use_skill|no_skill\", "
-            "\"skill_name\": \"skill id from prompts/list if skill_decision=use_skill, else empty\", "
-            "\"skill_reason\": \"short reason\", "
             "\"plan_summary\": \"one short user-facing note\", "
             "\"user_decision_required\": true|false, "
             "\"decision_question\": \"optional question\", "
             "\"decision_context\": \"optional short reason\", "
-            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
-            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
+            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|tools/list|tools/call\", \"params\": {}}], "
+            "\"calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|tools/list|tools/call\", \"params\": {}}], "
             "\"answer_brief\": \"optional draft answer idea\""
             "}\n"
             "Rules:\n"
-            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get, tools/list, tools/call.\n"
-            "- The turn already contains initialize, resources/list, prompts/list, and tools/list. Do not repeat them with identical params.\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, tools/list, tools/call.\n"
+            "- The turn already contains initialize, resources/list, and tools/list. Do not repeat them with identical params.\n"
             "- Use as few calls as possible and keep them focused.\n"
-            "- Evaluate whether a predefined skill is useful.\n"
-            "- Set skill_decision explicitly: use_skill or no_skill.\n"
-            "- If skill_decision=use_skill and the skill is not already loaded in the conversation, include prompts/get with params {\"name\": \"<skill_name>\"}.\n"
-            "- skill_name must match a name from prompts/list when use_skill is selected.\n"
             "- Default to user_decision_required=false.\n"
             "- Set user_decision_required=true only when the global agent rules require a user decision or confirmation.\n"
             "- If user_decision_required=true, provide one concise natural-language question in decision_question, keep calls empty, and put suggested follow-up MCP actions into proposed_next_calls.\n"
@@ -2411,25 +2490,20 @@ data collected. This information will accompany every prompt sent to the AI, res
             "Return ONLY one JSON object with this shape:\n"
             "{"
             "\"enough_information\": true|false, "
-            "\"skill_decision\": \"use_skill|no_skill|already_applied\", "
-            "\"skill_name\": \"skill id from prompts/list if needed, else empty\", "
-            "\"skill_reason\": \"short reason\", "
             "\"reflection_summary\": \"one short user-facing note\", "
             "\"next_step_note\": \"optional short alias\", "
             "\"continue_deferred_calls\": true|false, "
             "\"user_decision_required\": true|false, "
             "\"decision_question\": \"optional question\", "
             "\"decision_context\": \"optional short reason\", "
-            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
-            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|prompts/list|prompts/get|tools/list|tools/call\", \"params\": {}}], "
+            "\"proposed_next_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|tools/list|tools/call\", \"params\": {}}], "
+            "\"revised_calls\": [{\"method\": \"resources/list|resources/read|resources/templates/list|initialize|tools/list|tools/call\", \"params\": {}}], "
             "\"answer_brief\": \"short answer plan for final response\""
             "}\n"
             "Rules:\n"
-            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, prompts/list, prompts/get, tools/list, tools/call.\n"
-            "- Initialize, resources/list, prompts/list, and tools/list are already available in context unless explicitly changed.\n"
+            "- Allowed methods: initialize, resources/list, resources/templates/list, resources/read, tools/list, tools/call.\n"
+            "- Initialize, resources/list, and tools/list are already available in context unless explicitly changed.\n"
             "- Use as few additional calls as possible and keep them focused.\n"
-            "- Re-evaluate whether a skill is needed.\n"
-            "- Use skill_decision=already_applied when the relevant skill guidance is already present in the conversation.\n"
             "- If deferred_calls are listed in the reflection prompt, decide explicitly whether they should continue unchanged by setting continue_deferred_calls=true or false.\n"
             "- If continue_deferred_calls=true, you may keep revised_calls empty to continue the deferred queue unchanged, or provide revised_calls to prepend/adjust the next steps.\n"
             "- Default to user_decision_required=false.\n"
@@ -2513,19 +2587,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             "required": ["uri"],
             "additionalProperties": False,
         }
-        prompt_get_params = {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "arguments": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            },
-            "required": ["name"],
-            "additionalProperties": False,
-        }
         tool_list_params = {
             "type": "object",
             "properties": {
@@ -2606,24 +2667,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                 {
                     "type": "object",
                     "properties": {
-                        "method": {"const": "prompts/list"},
-                        "params": list_params,
-                    },
-                    "required": ["method", "params"],
-                    "additionalProperties": False,
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "method": {"const": "prompts/get"},
-                        "params": prompt_get_params,
-                    },
-                    "required": ["method", "params"],
-                    "additionalProperties": False,
-                },
-                {
-                    "type": "object",
-                    "properties": {
                         "method": {"const": "tools/list"},
                         "params": tool_list_params,
                     },
@@ -2651,9 +2694,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             "type": "object",
             "properties": {
                 "needs_mcp": {"type": "boolean"},
-                "skill_decision": {"type": "string", "enum": ["use_skill", "no_skill", "already_applied"]},
-                "skill_name": {"type": "string"},
-                "skill_reason": {"type": "string"},
                 "plan_summary": {"type": "string"},
                 "user_decision_required": {"type": "boolean"},
                 "decision_question": {"type": "string"},
@@ -2664,9 +2704,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             },
             "required": [
                 "needs_mcp",
-                "skill_decision",
-                "skill_name",
-                "skill_reason",
                 "plan_summary",
                 "user_decision_required",
                 "decision_question",
@@ -2686,9 +2723,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             "type": "object",
             "properties": {
                 "enough_information": {"type": "boolean"},
-                "skill_decision": {"type": "string", "enum": ["use_skill", "no_skill", "already_applied"]},
-                "skill_name": {"type": "string"},
-                "skill_reason": {"type": "string"},
                 "reflection_summary": {"type": "string"},
                 "next_step_note": {"type": "string"},
                 "continue_deferred_calls": {"type": "boolean"},
@@ -2701,9 +2735,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             },
             "required": [
                 "enough_information",
-                "skill_decision",
-                "skill_name",
-                "skill_reason",
                 "reflection_summary",
                 "next_step_note",
                 "continue_deferred_calls",
@@ -2919,9 +2950,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             "decision_question",
             "decision_context",
             "answer_brief",
-            "skill_decision",
-            "skill_name",
-            "skill_reason",
             "plan_summary",
             "reflection_summary",
             "continue_deferred_calls",
@@ -2935,7 +2963,7 @@ data collected. This information will accompany every prompt sent to the AI, res
         method = str(data.get("method", "")).strip().lower()
         if action == "mcp_call":
             return True
-        if method.startswith("tools/") or method.startswith("resources/") or method.startswith("prompts/"):
+        if method.startswith("tools/") or method.startswith("resources/"):
             return True
         if "params" in data and "method" in data:
             return True
@@ -3042,49 +3070,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                 params = {}
             normalized.append({"method": method, "params": params})
         return normalized
-
-    def _ensure_skill_prompt_call(self, skill_decision: Any, skill_name: Any,
-                                  calls: List[Dict[str, Any]],
-                                  max_calls: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Ensure prompts/get is planned when the model decided to use a skill."""
-
-        decision = str(skill_decision if skill_decision is not None else "").strip().lower()
-        if decision not in ("use_skill", "needs_skill", "skill"):
-            return calls
-
-        resolved_name = str(skill_name if skill_name is not None else "").strip()
-        if resolved_name == "":
-            return calls
-
-        wanted_params = {"name": resolved_name}
-
-        for call in calls:
-            if not isinstance(call, dict):
-                continue
-            method = str(call.get("method", "")).strip()
-            params = call.get("params", {})
-            if not isinstance(params, dict):
-                params = {}
-            if method == "prompts/get" and str(params.get("name", "")).strip() == resolved_name:
-                return calls
-
-        merged: List[Dict[str, Any]] = [{"method": "prompts/get", "params": wanted_params}]
-        seen: set[str] = {wanted_key}
-        for call in calls:
-            if not isinstance(call, dict):
-                continue
-            method = str(call.get("method", "")).strip()
-            params = call.get("params", {})
-            if not isinstance(params, dict):
-                params = {}
-            key = self._mcp_call_key(method, params)
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append({"method": method, "params": params})
-            if max_calls is not None and max_calls > 0 and len(merged) >= max_calls:
-                break
-        return merged
 
     def _merge_mcp_call_lists(self, primary_calls: List[Dict[str, Any]],
                               secondary_calls: List[Dict[str, Any]],
@@ -3483,8 +3468,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             "resources/list",
             "resources/templates/list",
             "resources/read",
-            "prompts/list",
-            "prompts/get",
             "tools/list",
             "tools/call",
         }
@@ -3500,7 +3483,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             bootstrap_calls: List[Tuple[str, Dict[str, Any]]] = [
                 ("initialize", {}),
                 ("resources/list", {}),
-                ("prompts/list", {}),
                 ("tools/list", {}),
             ]
             planner_json_schema = self._mcp_planner_json_schema()
@@ -3602,18 +3584,6 @@ data collected. This information will accompany every prompt sent to the AI, res
             planned_calls = self._normalize_mcp_calls(plan_data.get("calls", []), allowed_methods, max_queued_calls)
             proposed_plan_calls = self._normalize_mcp_calls(
                 plan_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
-            )
-            planned_calls = self._ensure_skill_prompt_call(
-                plan_data.get("skill_decision", ""),
-                plan_data.get("skill_name", ""),
-                planned_calls,
-                max_queued_calls,
-            )
-            proposed_plan_calls = self._ensure_skill_prompt_call(
-                plan_data.get("skill_decision", ""),
-                plan_data.get("skill_name", ""),
-                proposed_plan_calls,
-                max_calls_per_round,
             )
             needs_mcp = self._json_bool(plan_data.get("needs_mcp", True), True)
             plan_summary = str(plan_data.get("plan_summary", "")).strip()
@@ -3760,12 +3730,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                 proposed_next_calls = self._normalize_mcp_calls(
                     reflection_data.get("proposed_next_calls", []), allowed_methods, max_calls_per_round
                 )
-                revised_calls = self._ensure_skill_prompt_call(
-                    reflection_data.get("skill_decision", ""),
-                    reflection_data.get("skill_name", ""),
-                    revised_calls,
-                    max_queued_calls,
-                )
                 if continue_deferred_calls and len(deferred_calls) > 0:
                     revised_calls = self._merge_mcp_call_lists(revised_calls, deferred_calls, max_queued_calls)
                 short_reflection_note = self._short_reflection_next_step_note(
@@ -3842,12 +3806,6 @@ data collected. This information will accompany every prompt sent to the AI, res
                             self._emit_mcp_status_text(signals, chat_idx, replan_summary, status_kind="planning")
                         revised_calls = self._normalize_mcp_calls(
                             replan_data.get("calls", []), allowed_methods, max_queued_calls
-                        )
-                        revised_calls = self._ensure_skill_prompt_call(
-                            replan_data.get("skill_decision", ""),
-                            replan_data.get("skill_name", ""),
-                            revised_calls,
-                            max_queued_calls,
                         )
                     if len(revised_calls) == 0:
                         stop_reason = "no_more_valid_calls"

@@ -64,6 +64,7 @@ setup(
     install_requires=required_modules,
     package_data={
         'qualcoder':['Codebook.xsd', 'Project-mrt2019.xsd',
+        'ai_prompts/*.md',
         'GUI/*.html', 'GUI/NotoSans-hinted/*.ttf',
         'locale/de/app_de.qm', 'locale/de/LC_MESSAGES/de,mo',
         'locale/es/app_es.qm', 'locale/es/LC_MESSAGES/es,mo',
