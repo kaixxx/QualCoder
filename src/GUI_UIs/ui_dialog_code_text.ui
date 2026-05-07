@@ -1176,6 +1176,22 @@ Formatted like below for name detection.
                <string/>
               </property>
              </widget>
+             <widget class="QPushButton" name="pushButton_toggle_margin_highlight">
+              <property name="geometry">
+               <rect>
+                <x>280</x>
+                <y>0</y>
+                <width>28</width>
+                <height>28</height>
+               </rect>
+              </property>
+              <property name="toolTip">
+               <string>Toggle code stripes margin</string>
+              </property>
+              <property name="text">
+               <string/>
+              </property>
+             </widget>
             </widget>
            </widget>
           </item>
