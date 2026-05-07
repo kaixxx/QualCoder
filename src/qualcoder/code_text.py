@@ -144,11 +144,12 @@ class CodingMargin(QtWidgets.QWidget): # <- L
         block_start = block.position() + file_start
         block_end = block_start + block.length()
 
-        names_drawn_here = 0
+        names_drawn_by_line = {}
         margin_width = self.width()
 
         # respect the 'important' filter
         important_only = getattr(self.dialog, 'important', False)
+        layout = block.layout()
 
         for code in self.dialog.code_text:
             if code.get('fid') != current_fid:
@@ -171,8 +172,31 @@ class CodingMargin(QtWidgets.QWidget): # <- L
                 painter.setPen(QtCore.Qt.PenStyle.NoPen)
                 painter.setBrush(color)
 
-                # 3px wide vertical bar spanning the block height
-                painter.drawRect(offset_x, int(rect.top()), 3, int(rect.height()))
+                # Draw only the visual lines covered by the coded range.
+                # A QTextBlock is a paragraph; wrapped paragraphs contain
+                # multiple QTextLayout lines.
+                start_rel = max(code['pos0'], block_start) - block_start
+                end_rel = min(code['pos1'], block_end) - block_start
+                start_rel = max(0, min(start_rel, max(0, block.length() - 1)))
+                end_rel = max(start_rel + 1, min(end_rel, block.length()))
+                start_line = layout.lineForTextPosition(start_rel)
+                end_line = layout.lineForTextPosition(max(start_rel, end_rel - 1))
+
+                if start_line.isValid() and end_line.isValid():
+                    first_line = start_line.lineNumber()
+                    last_line = end_line.lineNumber()
+                    for line_number in range(first_line, last_line + 1):
+                        line = layout.lineAt(line_number)
+                        if not line.isValid():
+                            continue
+                        painter.drawRect(
+                            offset_x,
+                            int(rect.top() + line.y()),
+                            3,
+                            max(1, int(line.height()))
+                        )
+                else:
+                    painter.drawRect(offset_x, int(rect.top()), 3, int(rect.height()))
 
                 # Code name only once per visible coded segment
                 if ctid not in drawn_ctids and code['pos0'] >= block_start:
@@ -181,14 +205,24 @@ class CodingMargin(QtWidgets.QWidget): # <- L
                     raw_name = code.get('name', '')
                     name = (raw_name[:11] + '..') if len(raw_name) > 11 else raw_name
 
-                    # Stack code names vertically when several start on the same line
-                    y_pos = int(rect.top() + 10 + (names_drawn_here * 12))
+                    if start_line.isValid():
+                        # Stack code names only when several codes start on the
+                        # same visual line, not merely in the same paragraph.
+                        line_number = start_line.lineNumber()
+                        names_drawn_on_line = names_drawn_by_line.get(line_number, 0)
+                        y_pos = int(rect.top() + start_line.y() + painter.fontMetrics().ascent()
+                                    + (names_drawn_on_line * 12))
+                        names_drawn_by_line[line_number] = names_drawn_on_line + 1
+                    else:
+                        names_drawn_on_line = names_drawn_by_line.get(-1, 0)
+                        y_pos = int(rect.top() + painter.fontMetrics().ascent()
+                                    + (names_drawn_on_line * 12))
+                        names_drawn_by_line[-1] = names_drawn_on_line + 1
 
                     # Names are drawn fixed at x=5 (far-left absolute position)
                     painter.drawText(5, y_pos, name)
 
                     drawn_ctids.add(ctid)
-                    names_drawn_here += 1
 
 
 class DialogCodeText(QtWidgets.QWidget):
