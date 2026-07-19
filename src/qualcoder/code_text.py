@@ -621,13 +621,13 @@ class DialogCodeText(QtWidgets.QWidget):
         # show_margin_stripes and highlight_style are INDEPENDENT preferences,
         # persisted under separate keys and changed via the margin context menu <- L
         try:
-            saved_pref = self.app.settings.get('codetext_show_margin_stripes', 'False')
+            saved_pref = self.app.settings.get('codetext_show_margin_stripes', 'True')
             if isinstance(saved_pref, bool):
                 self.show_margin_stripes = saved_pref
             else:
                 self.show_margin_stripes = str(saved_pref).lower() == 'true'
         except (KeyError, AttributeError):
-            self.show_margin_stripes = False  # (default: margin hidden)
+            self.show_margin_stripes = True  # default: margin visible
 
         try:
             saved_style = self.app.settings.get('codetext_highlight_style', None)
