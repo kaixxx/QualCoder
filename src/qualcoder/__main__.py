@@ -1371,8 +1371,6 @@ class App(object):
             'dialogcodetext_splitter1': 1,
             'dialogcodetext_splitter_v0': 1,
             'dialogcodetext_splitter_v1': 1,
-            'codetext_show_margin_stripes': True,
-            'codetext_highlight_style': 'marker',
             'dialogcodetext_coding_margin_width': 100,
             'dialogcodeimage_splitter0': 1,
             'dialogcodeimage_splitter1': 1,
