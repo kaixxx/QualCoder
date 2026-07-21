@@ -1071,19 +1071,45 @@ class DialogManageFiles(QtWidgets.QDialog):
     def mark_speakers(self):
         """ Mark the speakers in text files.
          Note: User generated files (not loaded files) have medipath None.
-         When text file found open the text coding pane. """
+         Preselection rules (Van's feedback):
+         - Every selected AND VISIBLE text file carries over to the speakers dialog,
+           not just the last selected one.
+         - If nothing usable is selected (no selection, or the selection is hidden by
+           the current filter), all VISIBLE text files become the preselection, which
+           also carries over an active filter.
+         When text files are found the text coding pane opens. """
 
-        try:
-            row = self.ui.tableWidget.currentRow()
-            if row == -1:
-                raise ValueError()
-            id_ = int(self.ui.tableWidget.item(row, self.ID_COLUMN).text())
-            text_item = next((item for item in self.source if item['id'] == id_ and item['fulltext']), None)
-            if not text_item:
-                raise ValueError()
-            self.main_window.text_coding(task='mark_speakers', doc_id=int(id_))
-        except (AttributeError, ValueError):
+        text_ids = {item['id'] for item in self.source if item['fulltext']}
+
+        def row_text_file_id(row):
+            """ id of the text file at a visible row, else None. """
+            if self.ui.tableWidget.isRowHidden(row):
+                return None  # hidden by the current filter: not usable
+            id_item = self.ui.tableWidget.item(row, self.ID_COLUMN)
+            if id_item is None:
+                return None
+            try:
+                id_ = int(id_item.text())
+            except ValueError:
+                return None
+            return id_ if id_ in text_ids else None
+
+        ids = []
+        selected_rows = sorted({index.row() for index in self.ui.tableWidget.selectedIndexes()})
+        for row in selected_rows:
+            id_ = row_text_file_id(row)
+            if id_ is not None and id_ not in ids:
+                ids.append(id_)
+        if not ids:
+            # Fallback: every visible text file (respects the active filter)
+            for row in range(self.ui.tableWidget.rowCount()):
+                id_ = row_text_file_id(row)
+                if id_ is not None and id_ not in ids:
+                    ids.append(id_)
+        if not ids:
             Message(self.app, _('Mark speakers'), _('No text file selected.'), 'critical').exec()
+            return
+        self.main_window.text_coding(task='mark_speakers', doc_id=ids[0], doc_ids=ids)
 
     def check_attribute_placeholders(self):
         """ Files can be added after attributes are in the project.
@@ -1717,11 +1743,9 @@ class DialogManageFiles(QtWidgets.QDialog):
         """ Import from CSV/TSV/ODS/XLSX Header row to contain column headings.
         Process Qual Texts, Cases, Attributes and optional assign autocoding.
         Can assign attributes to either files or cases.
-
-        The Case name can be absent. Or cand be from one primary column, or can also collate values from additional columns.
-
-        Qualitative texts from multiple columns are collated int one file.
-        The header for each block if text is the columns name from the survey
+        The Case name can be absent. Or can be from one primary column, or can also collate values from additional columns.
+        Qualitative texts from multiple columns are collated into one file.
+        The header for each block of text is the column name from the survey.
         """
 
         filepath, filter_type = QtWidgets.QFileDialog.getOpenFileName(None, _("Select Survey"), "",
@@ -1760,21 +1784,17 @@ class DialogManageFiles(QtWidgets.QDialog):
         columns = [str(c) for c in df.columns]
         dialog = DialogSurveyImport(columns, self)
         if not dialog.exec(): return
-
         text_cols, case_cols, attr_cols = dialog.get_selections()
         #filename_col = dialog.get_filename_column()
         autocode_enabled = dialog.get_autocode_setting()
         attr_file_or_case = "case"
         if not dialog.get_case_setting() or not case_cols:
             attr_file_or_case = "file"
-
         if not text_cols:
-            Message(self.app, _("Notice"), _("Select at least one Qualitative Text column to analyse.")).exec()
-            return
-
+            Message(self.app, _("Notice"), _("Survey - No qualitative text columns to analyse.")).exec()
+            msg += _("\nNo columns assigned as qualitative. Survey files will be empty.")
         cur = self.app.conn.cursor()
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
         new_attributes = {}  # Change from character to numeric attribute_type after checking when loading data
         for col in attr_cols:
             cur.execute("select name from attribute_type where name=?", [col])
@@ -1783,7 +1803,7 @@ class DialogManageFiles(QtWidgets.QDialog):
                             (col, now, self.app.settings['codername'], "", attr_file_or_case, "character"))
                 new_attributes[col] = 'numeric'
 
-        def sanitize_name(name_str):
+        def sanitize_name(name_str:str):
             return re.sub(r'[\\/:*?"<>|]', '-', str(name_str)).strip()
 
         count = 0
@@ -1805,7 +1825,8 @@ class DialogManageFiles(QtWidgets.QDialog):
                     end_pos = start_pos + len(val_clean)
                     code_positions.append((t_col, start_pos, end_pos, val_clean))
 
-            if not text_content.strip(): continue
+            '''if not text_content.strip(): 
+                continue'''
 
             case_name = ""
             if case_cols:
@@ -1833,7 +1854,6 @@ class DialogManageFiles(QtWidgets.QDialog):
             filepath_save = os.path.join(self.app.project_path, "documents", filename + ".txt")
             with open(filepath_save, 'w', encoding='utf-8') as f:
                 f.write(text_content)
-
             cur.execute("insert into source(name, fulltext, mediapath, memo, owner, date) values(?,?,?,?,?,?)",
                         (filename, text_content, None, "", self.app.settings['codername'], now))
             file_id = cur.lastrowid
@@ -1909,8 +1929,9 @@ class DialogManageFiles(QtWidgets.QDialog):
         self.app.delete_backup = False
         self.update_files_in_dialogs()
         self.load_file_data()
-        Message(self.app, _("Import successful."), _("{} rows imported.").format(count)).exec()
         self.parent_text_edit.append(msg)
+        Message(self.app, _("Import successful."), _("{} rows imported.").format(count)).exec()
+        
 
     def import_files(self, link:bool=False):
         """ Import files and store into relevant directories (documents, images, audio, video).
