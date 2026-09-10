@@ -42,6 +42,15 @@ from PyQt6 import QtWidgets
 
 from .ai_agent_prompts import AiAgentPromptsCatalog, AgentPromptRecord
 from .ai_async_worker import Worker
+from .ai_icons import (
+    code_analysis_icon,
+    general_chat_icon,
+    prompt_icon,
+    prompt_scope_icon,
+    search_icon,
+    text_analysis_icon,
+    topic_exploration_icon,
+)
 from .ai_memo import extract_ai_memo as extract_public_ai_memo
 from .confirm_delete import DialogConfirmDelete
 from .error_dlg import qt_exception_hook
@@ -69,7 +78,6 @@ json_repair = None
 OpenAI = None
 BadRequestError = None
 ValidationError = None
-qta = None
 AiVectorstore = None
 
 _AI_DEPENDENCIES_LOADED = False
@@ -88,7 +96,7 @@ def load_ai_runtime_dependencies() -> None:
     global ChatOpenAI, HumanMessage, OpenAI, PairwiseAligner, RunnableConfig
     global SystemMessage, ValidationError, _ChatGPTOAuthRefreshError
     global _ChatOpenAICodex, _FileChatGPTOAuthTokenProvider, httpx
-    global json_repair, login_chatgpt, qta
+    global json_repair, login_chatgpt
 
     if _AI_DEPENDENCIES_LOADED:
         return
@@ -114,8 +122,6 @@ def load_ai_runtime_dependencies() -> None:
         from openai import BadRequestError as bad_request_error
         from openai import OpenAI as open_ai
         from pydantic import ValidationError as validation_error
-        import qtawesome as qtawesome_module
-
         from .ai_vectorstore import AiVectorstore as ai_vectorstore
 
         PairwiseAligner = pairwise_aligner
@@ -134,7 +140,6 @@ def load_ai_runtime_dependencies() -> None:
         OpenAI = open_ai
         BadRequestError = bad_request_error
         ValidationError = validation_error
-        qta = qtawesome_module
         AiVectorstore = ai_vectorstore
         _AI_DEPENDENCIES_LOADED = True
 
@@ -4643,28 +4648,28 @@ class AiLLM():
 
     # Icons (https://pictogrammers.com/library/mdi/)
     def code_analysis_icon(self):
-        return qta.icon('mdi6.tag-text-outline', color=self.app.highlight_color())
+        return code_analysis_icon(self.app)
 
     def topic_analysis_icon(self):
         return self.topic_exploration_icon()
 
     def topic_exploration_icon(self):
-        return qta.icon('mdi6.star-outline', color=self.app.highlight_color())
+        return topic_exploration_icon(self.app)
 
     def search_icon(self):
-        return qta.icon('mdi6.magnify', color=self.app.highlight_color())
+        return search_icon(self.app)
     
     def text_analysis_icon(self):
-        return qta.icon('mdi6.text-box-outline', color=self.app.highlight_color())
+        return text_analysis_icon(self.app)
 
     def general_chat_icon(self):
-        return qta.icon('mdi6.chat-question-outline', color=self.app.highlight_color())
+        return general_chat_icon(self.app)
 
     def prompt_scope_icon(self):
-        return qta.icon('mdi6.folder-open-outline', color=self.app.highlight_color())
+        return prompt_scope_icon(self.app)
 
     def prompt_icon(self):
-        return qta.icon('mdi6.script-text-outline', color=self.app.highlight_color())
+        return prompt_icon(self.app)
 
     def _migrate_legacy_prompts_for_current_scope(self) -> None:
         """One-time import of legacy user/project prompts into Markdown files."""

@@ -299,8 +299,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.journal_display = None
         self.ai_chat_window = None
         self.ai_import_thread = None
-        self.ai_loading_label = None
-        self.ai_loading_status_label = None
         self.ai_chat_sidebar_mode = False
         self.ai_chat_tab_label = None
         self.ai_chat_tab_sidebar_button = None
@@ -354,27 +352,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.ai_import_thread is not None or ai_runtime_ready(self.app):
             return
         self.app.ai_runtime_state = AI_LOADING
-        self._show_ai_loading_placeholder()
         self.ui.textEdit.append(_("AI: Loading components in the background..."))
-        self._show_ai_startup_status_message()
+        self.statusBar().showMessage(_("AI: Starting up..."))
         self.ai_import_thread = AiImportThread(self)
         self.ai_import_thread.loaded.connect(self._finish_ai_runtime_initialization)
         self.ai_import_thread.failed.connect(self._ai_runtime_loading_failed)
         self.ai_import_thread.start(QtCore.QThread.Priority.LowPriority)
-
-    def _show_ai_loading_placeholder(self) -> None:
-        """Show a lightweight status message until the AI dialog is available."""
-
-        layout = self._ensure_widget_layout(self.ui.tab_ai_agent)
-        if self.ai_loading_label is None:
-            self.ai_loading_label = QtWidgets.QLabel(
-                _("AI components are loading in the background. You can continue working."),
-                self.ui.tab_ai_agent,
-            )
-            self.ai_loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            self.ai_loading_label.setWordWrap(True)
-            layout.addWidget(self.ai_loading_label)
-        self.ai_loading_label.show()
 
     @QtCore.pyqtSlot()
     def _finish_ai_runtime_initialization(self) -> None:
@@ -384,12 +367,11 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             from qualcoder.ai_llm import AiLLM
 
+            if self.ai_chat_window is None:
+                self.ai_chat()
             self.app.ai = AiLLM(self.app, self.ui.textEdit)
-            self.ai_chat()
             self.app.ai_runtime_state = AI_READY
             self.app.ai_runtime_error = ""
-            if self.ai_loading_label is not None:
-                self.ai_loading_label.hide()
             # First start? Ask if user wants to enable ai integration or not
             if self.app.settings['ai_first_startup'] == 'True' and self.app.settings['ai_enable'] == 'False':
                 msg = _('Welcome\n\n\
@@ -430,27 +412,12 @@ Click "Yes" to start now.')
         self.app.ai_runtime_error = error_text
         logger.error("AI background loading failed:\n%s", error_text)
         self._clear_ai_startup_status_message()
-        if self.ai_loading_label is not None:
-            self.ai_loading_label.setText(
-                _("The AI components could not be loaded. Other QualCoder functions remain available.")
-            )
         self.ui.textEdit.append(_("AI: Components could not be loaded. See the log for details."))
 
-    def _show_ai_startup_status_message(self) -> None:
-        """Show a startup indicator that menu status tips cannot replace."""
-
-        if self.ai_loading_status_label is None:
-            self.ai_loading_status_label = QtWidgets.QLabel(self)
-            self.statusBar().addPermanentWidget(self.ai_loading_status_label)
-        self.ai_loading_status_label.setText(_("AI: Starting up..."))
-        self.ai_loading_status_label.show()
-
     def _clear_ai_startup_status_message(self) -> None:
-        """Hide the persistent startup indicator after loading stops."""
+        """Clear our startup text without overwriting a newer status message."""
 
         status_bar = self.statusBar()
-        if self.ai_loading_status_label is not None:
-            self.ai_loading_status_label.hide()
         if status_bar.currentMessage() == _("AI: Starting up..."):
             status_bar.clearMessage()
 
@@ -877,6 +844,7 @@ Click "Yes" to start now.')
         
         self.ui.tabWidget.setCurrentIndex(0)
         self.last_non_ai_chat_tab = self.ui.tab_action_log
+        self.ai_chat()
         self.refresh_placeholder_tab_content()
 
         # Add tab widget icons

@@ -54,6 +54,20 @@ from .ai_agent_prompts import (
     prompt_name_and_scope,
     prompt_name_key,
 )
+from .ai_icons import (
+    code_analysis_icon,
+    general_chat_icon,
+    text_analysis_icon,
+    topic_exploration_icon,
+)
+from .ai_runtime import (
+    AI_FAILED,
+    AI_INITIALIZING,
+    AI_LOADING,
+    AI_NOT_STARTED,
+    ai_runtime_ready,
+    show_ai_runtime_not_ready,
+)
 from .ai_signals import ai_chat_signal_emitter
 from .ai_llm import extract_ai_memo, ai_quote_search, llm_content_to_text, strip_think_blocks, AICancelled
 from .ai_mcp_server import AiMcpServer
@@ -2014,13 +2028,13 @@ class DialogAIChat(QtWidgets.QDialog):
         """Return the icon for one New-menu target."""
 
         if target == 'new_general_chat':
-            return self.app.ai.general_chat_icon()
+            return general_chat_icon(self.app)
         if target == 'new_topic_exploration':
-            return self.app.ai.topic_exploration_icon()
+            return topic_exploration_icon(self.app)
         if target == 'new_text_analysis':
-            return self.app.ai.text_analysis_icon()
+            return text_analysis_icon(self.app)
         if target == 'new_code_analysis':
-            return self.app.ai.code_analysis_icon()
+            return code_analysis_icon(self.app)
         return QtGui.QIcon()
 
     def _create_new_chat_menu(self) -> tuple[QtWidgets.QMenu, dict[str, QtGui.QAction]]:
@@ -2073,6 +2087,9 @@ class DialogAIChat(QtWidgets.QDialog):
     def _popup_new_chat_menu(self, highlight_target: Optional[str] = None) -> None:
         """Show the New-session menu below the button and optionally highlight one entry."""
 
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Agent"))
+            return
         if self._new_chat_popup_menu is not None:
             self._new_chat_popup_menu.close()
         menu, action_map = self._create_new_chat_menu()
@@ -2262,19 +2279,19 @@ class DialogAIChat(QtWidgets.QDialog):
 
             # Creating a new QListWidgetItem
             if str(analysis_type).strip().lower() == 'code_analysis':
-                icon = self.app.ai.code_analysis_icon()
+                icon = code_analysis_icon(self.app)
             elif str(analysis_type).strip().lower() == 'text_analysis':
-                icon = self.app.ai.text_analysis_icon()
+                icon = text_analysis_icon(self.app)
             elif str(analysis_type).strip().lower() == 'topic_exploration':
-                icon = self.app.ai.topic_exploration_icon()
+                icon = topic_exploration_icon(self.app)
             elif self._is_agent_chat_type(analysis_type):
-                icon = self.app.ai.general_chat_icon()
+                icon = general_chat_icon(self.app)
             elif analysis_type == 'topic chat':
-                icon = self.app.ai.topic_exploration_icon()
+                icon = topic_exploration_icon(self.app)
             elif analysis_type == 'text chat':
-                icon = self.app.ai.text_analysis_icon()
+                icon = text_analysis_icon(self.app)
             elif analysis_type == 'code chat':
-                icon = self.app.ai.code_analysis_icon()
+                icon = code_analysis_icon(self.app)
             else: # unknown type, ignore this chat altogether
                 continue
 
@@ -2510,6 +2527,9 @@ class DialogAIChat(QtWidgets.QDialog):
     def _can_start_general_chat(self) -> bool:
         """Return whether a general AI chat session can be started now."""
 
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Agent"))
+            return False
         if self.app.project_name == "":
             msg = _('No project open.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
@@ -4681,6 +4701,9 @@ class DialogAIChat(QtWidgets.QDialog):
 
     def new_text_analysis(self):
         """analyze a piece of text from an empirical document"""
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Text Analysis"))
+            return
         if self.app.project_name == "":
             msg = _('No project open.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
@@ -4707,6 +4730,9 @@ class DialogAIChat(QtWidgets.QDialog):
 
     def new_code_analysis(self):
         """Start a new code analysis as an MCP-backed AI agent chat."""
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("Code analysis"))
+            return
         if self.app.project_name == "":
             msg = _('No project open.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
@@ -4782,6 +4808,9 @@ data collected. This information will accompany every prompt sent to the AI, res
  
     def new_topic_exploration(self):
         """Start a new topic exploration as an MCP-backed AI agent chat."""
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("Topic exploration"))
+            return
         if self.app.project_name == "":
             msg = _('No project open.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
@@ -5486,6 +5515,9 @@ data collected. This information will accompany every prompt sent to the AI, res
     def new_text_chat(self, doc_id, doc_name, text, start_pos, prompt):
         """Start one text analysis chat for the selected text passage."""
 
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Text Analysis"))
+            return
         if self.app.project_name == "":
             msg = _('No project open.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()
@@ -5603,8 +5635,14 @@ data collected. This information will accompany every prompt sent to the AI, res
                 self.ui.pushButton_question.setIcon(spin_icon)
                 self.ui.pushButton_question.setToolTip(_('Cancel AI generation'))
                 self.ui.progressBar_ai.setRange(0, 0)  # Starts the animation
-        # update ai status in the statusBar of the main window
-        if self.app.ai is not None:
+        # Repeating the loading state here restores it after temporary menu
+        # status tips disappear.
+        runtime_state = getattr(self.app, "ai_runtime_state", AI_NOT_STARTED)
+        if runtime_state in (AI_NOT_STARTED, AI_LOADING, AI_INITIALIZING):
+            self.main_window.statusBar().showMessage(_("AI: Starting up..."))
+        elif runtime_state == AI_FAILED:
+            self.main_window.statusBar().showMessage(_("AI: Components could not be loaded."))
+        elif self.app.ai is not None:
             if self.app.ai.get_status() == 'reading data' and self.app.ai.sources_vectorstore.reading_doc != '':
                 self.main_window.statusBar().showMessage(_('AI: ') + _('reading data') + ' (' + self.app.ai.sources_vectorstore.reading_doc + ')')
             else:
@@ -6842,6 +6880,9 @@ data collected. This information will accompany every prompt sent to the AI, res
             self.send_user_question()
                     
     def send_user_question(self):
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Agent"))
+            return
         if self.app.settings['ai_enable'] != 'True':
             msg = _('The AI is disabled. Go to "AI > Setup Wizard" first.')
             Message(self.app, _('AI not enabled'), msg, "warning").exec()

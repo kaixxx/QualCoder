@@ -489,20 +489,46 @@ class TestMainWindowAiActions(TestCase):
     def test_ai_startup_status_only_clears_its_own_message(self):
         status_bar = MagicMock()
         status_bar.currentMessage.return_value = "AI: Starting up..."
-        status_label = MagicMock()
-        window = SimpleNamespace(
-            ai_loading_status_label=status_label,
-            statusBar=MagicMock(return_value=status_bar),
-        )
+        window = SimpleNamespace(statusBar=MagicMock(return_value=status_bar))
 
         MainWindow._clear_ai_startup_status_message(window)
 
-        status_label.hide.assert_called_once_with()
         status_bar.clearMessage.assert_called_once_with()
         status_bar.reset_mock()
         status_bar.currentMessage.return_value = "AI: reading data"
         MainWindow._clear_ai_startup_status_message(window)
         status_bar.clearMessage.assert_not_called()
+
+    def test_ai_dialog_restores_startup_status_while_runtime_loads(self):
+        status_bar = MagicMock()
+        dialog = SimpleNamespace(
+            app=SimpleNamespace(
+                ai=None,
+                ai_runtime_state="loading",
+                highlight_color=MagicMock(return_value="#123456"),
+            ),
+            ui=SimpleNamespace(
+                pushButton_question=MagicMock(),
+                progressBar_ai=MagicMock(),
+            ),
+            main_window=SimpleNamespace(statusBar=MagicMock(return_value=status_bar)),
+            _chat_scope_active=MagicMock(return_value=False),
+        )
+
+        with patch("qualcoder.ai_chat.qta.icon", return_value=MagicMock()):
+            DialogAIChat.update_ai_busy(dialog)
+
+        status_bar.showMessage.assert_called_once_with("AI: Starting up...")
+
+    def test_ai_dialog_rejects_new_chat_while_runtime_loads(self):
+        app = SimpleNamespace(ai_runtime_state="loading")
+        dialog = SimpleNamespace(app=app)
+
+        with patch("qualcoder.ai_chat.show_ai_runtime_not_ready") as show_message:
+            allowed = DialogAIChat._can_start_general_chat(dialog)
+
+        self.assertFalse(allowed)
+        show_message.assert_called_once_with(app, "AI Agent")
 
     def test_text_coding_reuses_open_dialog(self):
         class FakeDialogCodeText:

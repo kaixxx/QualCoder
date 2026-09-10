@@ -29,9 +29,6 @@ class AiImportThread(QtCore.QThread):
             from . import ai_llm
 
             ai_llm.load_ai_runtime_dependencies()
-            # Preload the dialogs as well. Their Qt widgets are only constructed
-            # later, in the main-thread slot connected to ``loaded``.
-            from . import ai_chat  # noqa: F401
             from . import ai_prompt_library  # noqa: F401
         except Exception:
             error_text = traceback.format_exc()
