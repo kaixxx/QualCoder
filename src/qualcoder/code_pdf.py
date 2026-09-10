@@ -54,8 +54,8 @@ from .report_attributes import DialogSelectAttributeParameters
 from .select_items import DialogSelectItems
 # IA
 from .ai_agent_prompts import AiAgentPromptsCatalog  # PromptsList removed; new Markdown-based catalog
-from .ai_prompt_library import DialogAiEditPrompts  # Dialog moved from ai_prompts to ai_prompt_library
-from .ai_chat import ai_chat_signal_emitter
+from .ai_runtime import ai_runtime_ready, show_ai_runtime_not_ready
+from .ai_signals import ai_chat_signal_emitter
 # Shared PDF helpers live in pdf_utils, so lighter modules do not import this one.
 from .pdf_utils import W_X0, W_Y0, W_X1, W_Y1, W_POS0, W_POS1, W_LINE, \
     _page_words_raw, _build_page_text
@@ -4428,6 +4428,9 @@ class DialogCodePdf(QtWidgets.QWidget):
         # self.export_page_image()
 
         if action.property('submenu') == 'ai_text_analysis':
+            if not ai_runtime_ready(self.app):
+                show_ai_runtime_not_ready(self.app, _("AI Text Analysis"))
+                return
             if self.file_ is None:
                 Message(self.app, _('Warning'), _("No file was selected"), "warning").exec()
                 return
@@ -4442,6 +4445,11 @@ class DialogCodePdf(QtWidgets.QWidget):
             )
             return
         if action.property('submenu') == 'ai_text_analysis_prompts':
+            if not ai_runtime_ready(self.app):
+                show_ai_runtime_not_ready(self.app, _("AI Prompts"))
+                return
+            from .ai_prompt_library import DialogAiEditPrompts
+
             ui = DialogAiEditPrompts(self.app, 'text_analysis')
             ui.exec()
             return

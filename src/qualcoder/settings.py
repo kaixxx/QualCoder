@@ -33,6 +33,7 @@ import unicodedata  # <- L normalize localized numerals when reading numeric com
 from .GUI.ui_dialog_settings import Ui_Dialog_settings
 from .coder_names import DialogCoderNames
 from .helpers import get_default_user_directory, Message
+from .ai_runtime import ai_runtime_ready, show_ai_runtime_not_ready
 from .ai_llm import (
     add_new_ai_model,
     ensure_chatgpt_oauth_profile_defaults,
@@ -499,6 +500,9 @@ class DialogSettings(QtWidgets.QDialog):
         if not self.current_ai_profile_uses_oauth():
             self.ui.label_auth_result.setText('')
             return
+        if not ai_runtime_ready(self.app):
+            self.ui.label_auth_result.setText(_("AI components are still loading."))
+            return
         is_authenticated, status_text = get_chatgpt_oauth_status()
         self.ui.label_auth_result.setText(status_text)
 
@@ -697,6 +701,9 @@ class DialogSettings(QtWidgets.QDialog):
     def ai_update_available_models(self):
         if not self.ui.widget_AI_advanced_options.isVisible():
             return
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Models"))
+            return
         model_list = []
         if int(self.settings['ai_model_index']) >= 0:
             try:
@@ -788,6 +795,9 @@ class DialogSettings(QtWidgets.QDialog):
         """Start or renew ChatGPT OAuth authentication for the current profile."""
 
         if not self.current_ai_profile_uses_oauth():
+            return
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Authentication"))
             return
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.WaitCursor)
         try:

@@ -35,6 +35,7 @@ import platform
 import shutil
 import sqlite3
 import sys
+import traceback
 from typing import Optional
 import urllib.request
 import webbrowser
@@ -45,9 +46,16 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 import qtawesome as qta
-from qualcoder.ai_chat import DialogAIChat
-from qualcoder.ai_prompt_library import DialogAiEditPrompts
 from qualcoder.app import App
+from qualcoder.ai_runtime import (
+    AI_FAILED,
+    AI_INITIALIZING,
+    AI_LOADING,
+    AI_READY,
+    AiImportThread,
+    ai_runtime_ready,
+    show_ai_runtime_not_ready,
+)
 from qualcoder.error_dlg import qt_exception_hook
 from qualcoder.attributes import DialogManageAttributes
 from qualcoder.cases import DialogCases
@@ -290,6 +298,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.force_quit = force_quit
         self.journal_display = None
         self.ai_chat_window = None
+        self.ai_import_thread = None
+        self.ai_loading_label = None
+        self.ai_loading_status_label = None
         self.ai_chat_sidebar_mode = False
         self.ai_chat_tab_label = None
         self.ai_chat_tab_sidebar_button = None
@@ -333,11 +344,52 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.processEvents() 
         QtCore.QTimer.singleShot(0, self._restore_ai_splitters_after_show)
         self._show_pending_ai_model_upgrade_offer()
-        # Setup AI
+        # Start expensive AI imports only after this constructor returns and
+        # the normal Qt event loop can keep the visible window responsive.
+        QtCore.QTimer.singleShot(0, self.start_ai_background_loading)
+
+    def start_ai_background_loading(self) -> None:
+        """Preload optional AI packages on a low-priority worker thread."""
+
+        if self.ai_import_thread is not None or ai_runtime_ready(self.app):
+            return
+        self.app.ai_runtime_state = AI_LOADING
+        self._show_ai_loading_placeholder()
+        self.ui.textEdit.append(_("AI: Loading components in the background..."))
+        self._show_ai_startup_status_message()
+        self.ai_import_thread = AiImportThread(self)
+        self.ai_import_thread.loaded.connect(self._finish_ai_runtime_initialization)
+        self.ai_import_thread.failed.connect(self._ai_runtime_loading_failed)
+        self.ai_import_thread.start(QtCore.QThread.Priority.LowPriority)
+
+    def _show_ai_loading_placeholder(self) -> None:
+        """Show a lightweight status message until the AI dialog is available."""
+
+        layout = self._ensure_widget_layout(self.ui.tab_ai_agent)
+        if self.ai_loading_label is None:
+            self.ai_loading_label = QtWidgets.QLabel(
+                _("AI components are loading in the background. You can continue working."),
+                self.ui.tab_ai_agent,
+            )
+            self.ai_loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.ai_loading_label.setWordWrap(True)
+            layout.addWidget(self.ai_loading_label)
+        self.ai_loading_label.show()
+
+    @QtCore.pyqtSlot()
+    def _finish_ai_runtime_initialization(self) -> None:
+        """Construct AI Qt objects on the GUI thread after imports finish."""
+
+        self.app.ai_runtime_state = AI_INITIALIZING
         try:
-            global AiLLM
-            from qualcoder.ai_llm import AiLLM  # import after showing the UI because this takes several seconds
+            from qualcoder.ai_llm import AiLLM
+
             self.app.ai = AiLLM(self.app, self.ui.textEdit)
+            self.ai_chat()
+            self.app.ai_runtime_state = AI_READY
+            self.app.ai_runtime_error = ""
+            if self.ai_loading_label is not None:
+                self.ai_loading_label.hide()
             # First start? Ask if user wants to enable ai integration or not
             if self.app.settings['ai_first_startup'] == 'True' and self.app.settings['ai_enable'] == 'False':
                 msg = _('Welcome\n\n\
@@ -363,12 +415,52 @@ Click "Yes" to start now.')
                 self.app.ai.init_llm(self)      
             self.app.settings['ai_first_startup'] = 'False'
             self.app.write_config_ini(self.app.settings, self.app.ai_models)
+            self.ui.textEdit.append(_("AI: Components loaded."))
+            self._clear_ai_startup_status_message()
         except Exception as err:
-            type_e = type(err)
-            value = err
-            tb_obj = err.__traceback__
-            # log the exception and show error msg
-            qt_exception_hook.exception_hook(type_e, value, tb_obj)
+            self._ai_runtime_loading_failed(
+                "".join(traceback.format_exception(type(err), err, err.__traceback__))
+            )
+
+    @QtCore.pyqtSlot(str)
+    def _ai_runtime_loading_failed(self, error_text: str) -> None:
+        """Keep QualCoder usable when optional AI imports fail."""
+
+        self.app.ai_runtime_state = AI_FAILED
+        self.app.ai_runtime_error = error_text
+        logger.error("AI background loading failed:\n%s", error_text)
+        self._clear_ai_startup_status_message()
+        if self.ai_loading_label is not None:
+            self.ai_loading_label.setText(
+                _("The AI components could not be loaded. Other QualCoder functions remain available.")
+            )
+        self.ui.textEdit.append(_("AI: Components could not be loaded. See the log for details."))
+
+    def _show_ai_startup_status_message(self) -> None:
+        """Show a startup indicator that menu status tips cannot replace."""
+
+        if self.ai_loading_status_label is None:
+            self.ai_loading_status_label = QtWidgets.QLabel(self)
+            self.statusBar().addPermanentWidget(self.ai_loading_status_label)
+        self.ai_loading_status_label.setText(_("AI: Starting up..."))
+        self.ai_loading_status_label.show()
+
+    def _clear_ai_startup_status_message(self) -> None:
+        """Hide the persistent startup indicator after loading stops."""
+
+        status_bar = self.statusBar()
+        if self.ai_loading_status_label is not None:
+            self.ai_loading_status_label.hide()
+        if status_bar.currentMessage() == _("AI: Starting up..."):
+            status_bar.clearMessage()
+
+    def require_ai_runtime(self, title: str = "AI") -> bool:
+        """Return true when AI is ready; otherwise show a retry-later message."""
+
+        if ai_runtime_ready(self.app):
+            return True
+        show_ai_runtime_not_ready(self.app, title)
+        return False
 
     def init_placeholder_tab_layouts(self):
         """Put the startup placeholder browsers into real tab layouts."""
@@ -785,8 +877,6 @@ Click "Yes" to start now.')
         
         self.ui.tabWidget.setCurrentIndex(0)
         self.last_non_ai_chat_tab = self.ui.tab_action_log
-        self.ai_chat()
-
         self.refresh_placeholder_tab_content()
 
         # Add tab widget icons
@@ -1405,7 +1495,13 @@ Click "Yes" to start now.')
     def ai_chat(self):
         """Initialize AI chat and place it in tab or sidebar based on settings."""
 
+        from qualcoder.ai_chat import DialogAIChat
+
         self.ai_chat_window = DialogAIChat(self.app, self.ui.textEdit, self)
+        if self.app.project_path != "":
+            # A project may have been restored before the Qt event loop started,
+            # while the AI modules were still loading in the background.
+            self.ai_chat_window.init_ai_chat()
         sidebar_mode = self.app.settings.get('ai_chat_sidebar', 'False') == 'True'
         self.set_ai_chat_sidebar_mode(sidebar_mode, persist=False)
 
@@ -1478,6 +1574,8 @@ Click "Yes" to start now.')
     def open_ai_chat_sidebar_from_tab_button(self):
         """Switch AI chat to sidebar mode from the tab button."""
 
+        if not self.require_ai_runtime(_("AI Agent")):
+            return
         if self.app.settings['ai_enable'] != 'True':
             msg = _('Please enable the AI first and set it up in Settings.')
             Message(self.app, _('AI Agent'), msg).exec()
@@ -1657,6 +1755,11 @@ Click "Yes" to start now.')
     def toggle_ai_chat_sidebar(self, checked):
         """Handle menu toggle for AI chat sidebar mode."""
 
+        if checked and not self.require_ai_runtime(_("AI Agent")):
+            self.ui.actionAI_Agent_Sidebar.blockSignals(True)
+            self.ui.actionAI_Agent_Sidebar.setChecked(False)
+            self.ui.actionAI_Agent_Sidebar.blockSignals(False)
+            return
         self.set_ai_chat_sidebar_mode(checked)
         if bool(self.ai_chat_sidebar_mode) != bool(checked):
             self._sync_ai_chat_sidebar_action()
@@ -1757,7 +1860,7 @@ Click "Yes" to start now.')
             Message(self.app, _("Project creation"), _("REFI-QDA Project not successfully created"), "warning").exec()
             return
         RefiImport(self.app, self.ui.textEdit, "qdpx")
-        if self.app.settings['ai_enable'] == 'True':
+        if self.app.settings['ai_enable'] == 'True' and self.app.ai is not None:
             self.app.ai.init_llm(self, rebuild_vectorstore=True)
         self.project_summary_report()
 
@@ -1812,6 +1915,12 @@ Click "Yes" to start now.')
             self._remember_ai_sidebar_width()
         self.ai_sidebar_splitter_save_timer.stop()
 
+        # Avoid destroying a QThread while Python is in the middle of importing
+        # native AI extensions. This only waits when QualCoder is closed during
+        # the short background-loading window.
+        if self.ai_import_thread is not None and self.ai_import_thread.isRunning():
+            self.ai_import_thread.wait()
+
         self.close_project()
 
         self.app.settings['mainwindow_geometry'] = (
@@ -1859,9 +1968,14 @@ Click "Yes" to start now.')
         self.journal_display = None
         previous_app = self.app
         self.app = App()
+        self.app.ai_runtime_state = previous_app.ai_runtime_state
+        self.app.ai_runtime_error = previous_app.ai_runtime_error
         if self.app.settings['directory'] == "":
             self.app.settings['directory'] = get_default_user_directory()
-        self.app.ai = AiLLM(self.app, self.ui.textEdit)
+        if ai_runtime_ready(self.app):
+            from qualcoder.ai_llm import AiLLM
+
+            self.app.ai = AiLLM(self.app, self.ui.textEdit)
         project_path, ok = QtWidgets.QFileDialog.getSaveFileName(self,
                                                              _("Enter project name"), self.app.settings['directory'])
         if project_path == "":
@@ -1890,8 +2004,14 @@ Click "Yes" to start now.')
         except Exception as err:
             logger.critical(_("Project creation error ") + str(err))
             Message(self.app, _("Project"), self.app.project_path + _(" not successfully created"), "critical").exec()
+            failed_app = self.app
             self.app = App()
-            self.app.ai = AiLLM(self.app, self.ui.textEdit)
+            self.app.ai_runtime_state = failed_app.ai_runtime_state
+            self.app.ai_runtime_error = failed_app.ai_runtime_error
+            if ai_runtime_ready(self.app):
+                from qualcoder.ai_llm import AiLLM
+
+                self.app.ai = AiLLM(self.app, self.ui.textEdit)
             return
         self.app.project_name = self.app.project_path.rpartition('/')[2]
         self.app.settings['directory'] = self.app.project_path.rpartition('/')[0]
@@ -2020,6 +2140,8 @@ Click "Yes" to start now.')
         section = 'AI' moves to the AI settings at the bottom of the dialog
         enable_ai = if True, the AI will be enabled in settings
         """
+        if (section in ('AI', 'advanced AI') or enable_ai) and not self.require_ai_runtime(_("AI Settings")):
+            return
         current_coder = self.app.settings['codername']
         ui = DialogSettings(self.app, section=section, enable_ai=enable_ai)
         ret = ui.exec()
@@ -2031,16 +2153,18 @@ Click "Yes" to start now.')
         font = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         self.setStyleSheet(font)
         self.update_placeholder_tab_styles()
-        self.ai_chat_window.init_styles()
+        if self.ai_chat_window is not None:
+            self.ai_chat_window.init_styles()
         self.refresh_open_code_display_settings()
         
-        if self.app.settings['ai_enable'] == 'True':
+        if self.app.settings['ai_enable'] == 'True' and self.app.ai is not None:
             self.app.ai.init_llm(self, rebuild_vectorstore=False)
-        else:  
+        elif self.app.ai is not None:
             self.app.ai.close()
         self._show_pending_ai_model_upgrade_offer()
         self.update_ai_menu_options()
-        self.ai_chat_window.refresh_placeholder_if_visible()
+        if self.ai_chat_window is not None:
+            self.ai_chat_window.refresh_placeholder_if_visible()
             
         # Change in coder names: Close all opened dialogs as coder names needs to change everywhere
         if ui.coder_names_changes:
@@ -2552,8 +2676,10 @@ Click "Yes" to start now.')
             msg, backup_name = self.app.save_backup()
             self.ui.textEdit.append(msg)
         # AI: init llm and update vectorstore after backup to avoid locked sqlite sidecar files.
-        self.app.ai.init_llm(self)
-        self.ai_chat_window.init_ai_chat(self.app)
+        if self.app.ai is not None:
+            self.app.ai.init_llm(self)
+        if self.ai_chat_window is not None:
+            self.ai_chat_window.init_ai_chat(self.app)
         msg = f"{_('Project Opened: ')}{self.app.project_name}"
         self.ui.textEdit.append(msg)
         self.project_summary_report()
@@ -2646,8 +2772,10 @@ Click "Yes" to start now.')
             self.ui.textEdit.append(_("Closing project: ") + self.app.project_name +"\n" + "▔" * 20 + "\n")
             self.app.append_recent_project(self.app.project_path)
         # AI
-        self.ai_chat_window.close()
-        self.app.ai.close()
+        if self.ai_chat_window is not None:
+            self.ai_chat_window.close()
+        if self.app.ai is not None:
+            self.app.ai.close()
         
         if self.app.conn is not None:
             try:
@@ -2721,6 +2849,8 @@ Click "Yes" to start now.')
     # AI Menu Actions
     def ai_setup_wizard(self):
         """Action triggered by AI Setup Wizard menu item or at the first start of QualCoder."""
+        if not self.require_ai_runtime(_("AI Setup Wizard")):
+            return
         if self.app.settings['ai_enable'] == 'True':
             msg = _('The AI is setup and enabled, so there is nothing to do here. '
                     'Go to AI > settings to change the current model or other settings.')
@@ -2745,10 +2875,14 @@ Click "Yes" to start now.')
         
     def ai_settings(self):
         """ Action triggered by AI Settings menu item."""
+        if not self.require_ai_runtime(_("AI Settings")):
+            return
         self.change_settings(section='AI')
 
     def ai_rebuild_memory(self):
         """ Action triggered by AI Rebuild Internal Memory menu item."""
+        if not self.require_ai_runtime(_("Rebuild AI Memory")):
+            return
         if self.app.settings['ai_enable'] != 'True':
             msg = _('Please enable the AI first and set it in Settings.')
             Message(self.app, _('Rebuild AI Memory'), msg).exec() 
@@ -2771,6 +2905,10 @@ Click "Yes" to start now.')
     
     def ai_prompts(self, initial_prompt_name: str = "", initial_prompt_scope: str = ""):
         """ Action triggered by AI Prompts menu item."""
+        if not self.require_ai_runtime(_("AI Prompts")):
+            return
+        from qualcoder.ai_prompt_library import DialogAiEditPrompts
+
         DialogAiEditPrompts(
             self.app,
             initial_prompt_name=initial_prompt_name,
@@ -2779,6 +2917,8 @@ Click "Yes" to start now.')
 
     def ai_go_chat(self):
         """Action triggered by AI Agent menu item."""
+        if not self.require_ai_runtime(_("AI Agent")):
+            return
         if self.app.settings['ai_enable'] != 'True':
             msg = _('Please enable the AI first and set it up in Settings.')
             Message(self.app, _('AI Agent'), msg).exec()
@@ -2792,6 +2932,8 @@ Click "Yes" to start now.')
     def ai_go_analysis(self) -> None:
         """Start the AI analysis selected in the Analysis menu."""
 
+        if not self.require_ai_runtime(_("AI Analysis")):
+            return
         if self.ai_chat_window is None:
             return
         handlers = {
@@ -2812,6 +2954,8 @@ Click "Yes" to start now.')
     def ai_check_project_readiness(self) -> None:
         """Start an AI Agent chat that assesses the current project."""
 
+        if not self.require_ai_runtime(_("AI Agent")):
+            return
         if self.ai_chat_window is None:
             return
         self.set_ai_chat_sidebar_mode(False, persist=False)
@@ -2821,6 +2965,8 @@ Click "Yes" to start now.')
     def ai_go_help_support(self):
         """Action triggered by Help > Ask the AI Agent."""
 
+        if not self.require_ai_runtime(_("AI Agent")):
+            return
         if self.app.settings['ai_enable'] != 'True':
             msg = _('Please enable the AI first and set it up in Settings.')
             Message(self.app, _('AI Agent'), msg).exec()
@@ -2834,6 +2980,8 @@ Click "Yes" to start now.')
 
     def ai_go_search(self):
         """ Action triggered by AI Search and Coding menu item."""
+        if not self.require_ai_runtime(_("AI Search")):
+            return
         if self.app.settings['ai_enable'] != 'True':
             msg = _('Please enable the AI first and set it up in Settings.')
             Message(self.app, _('Rebuild AI Memory'), msg).exec() 

@@ -20,6 +20,8 @@ https://qualcoder.wordpress.com/
 https://qualcoder.org/
 """
 
+from __future__ import annotations
+
 import asyncio
 import configparser
 import json
@@ -34,40 +36,107 @@ import time
 import traceback
 import uuid
 
-from Bio.Align import PairwiseAligner
-import httpx
-from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_community.cache import InMemoryCache  # Unused
-from langchain_core.documents.base import Document  # Unused
-from langchain_core.globals import set_llm_cache  # Unused
-from langchain_core.messages.ai import AIMessage  # Unused
-from langchain_core.messages.human import HumanMessage
-from langchain_core.messages.system import SystemMessage
-from langchain_core.runnables.config import RunnableConfig
-from langchain_openai import ChatOpenAI, AzureChatOpenAI
-from langchain_openai.chat_models.codex import _ChatOpenAICodex
-from langchain_openai.chatgpt_oauth import (
-    _ChatGPTOAuthRefreshError,
-    _FileChatGPTOAuthTokenProvider,
-    login_chatgpt,
-)
-import json_repair
-from openai import OpenAI, BadRequestError
-from pydantic import ValidationError
 from PyQt6 import QtCore
 from PyQt6 import QtGui
 from PyQt6 import QtWidgets
-import qtawesome as qta
 
 from .ai_agent_prompts import AiAgentPromptsCatalog, AgentPromptRecord
 from .ai_async_worker import Worker
 from .ai_memo import extract_ai_memo as extract_public_ai_memo
-from .ai_vectorstore import AiVectorstore
 from .confirm_delete import DialogConfirmDelete
 from .error_dlg import qt_exception_hook
 from .helpers import Message
 from .html_parser import html_to_text
 from .select_items import DialogSelectItems
+
+# Expensive third-party packages are loaded automatically by the background
+# AI loader after the main window is usable.  Keeping these names at module
+# scope lets the rest of this module remain unchanged while importing the
+# lightweight profile helpers above during application startup.
+PairwiseAligner = None
+httpx = None
+AIMessage = None
+HumanMessage = None
+SystemMessage = None
+RunnableConfig = None
+ChatOpenAI = None
+AzureChatOpenAI = None
+_ChatOpenAICodex = None
+_ChatGPTOAuthRefreshError = None
+_FileChatGPTOAuthTokenProvider = None
+login_chatgpt = None
+json_repair = None
+OpenAI = None
+BadRequestError = None
+ValidationError = None
+qta = None
+AiVectorstore = None
+
+_AI_DEPENDENCIES_LOADED = False
+_AI_DEPENDENCIES_LOCK = threading.Lock()
+
+
+def load_ai_runtime_dependencies() -> None:
+    """Import expensive AI runtime packages once.
+
+    This function is called by the background loader. It is also safe to call
+    defensively from runtime-only helpers after loading has completed.
+    """
+
+    global _AI_DEPENDENCIES_LOADED
+    global AIMessage, AiVectorstore, AzureChatOpenAI, BadRequestError
+    global ChatOpenAI, HumanMessage, OpenAI, PairwiseAligner, RunnableConfig
+    global SystemMessage, ValidationError, _ChatGPTOAuthRefreshError
+    global _ChatOpenAICodex, _FileChatGPTOAuthTokenProvider, httpx
+    global json_repair, login_chatgpt, qta
+
+    if _AI_DEPENDENCIES_LOADED:
+        return
+    with _AI_DEPENDENCIES_LOCK:
+        if _AI_DEPENDENCIES_LOADED:
+            return
+
+        from Bio.Align import PairwiseAligner as pairwise_aligner
+        import httpx as httpx_module
+        from langchain_core.messages.ai import AIMessage as ai_message
+        from langchain_core.messages.human import HumanMessage as human_message
+        from langchain_core.messages.system import SystemMessage as system_message
+        from langchain_core.runnables.config import RunnableConfig as runnable_config
+        from langchain_openai import AzureChatOpenAI as azure_chat_open_ai
+        from langchain_openai import ChatOpenAI as chat_open_ai
+        from langchain_openai.chat_models.codex import _ChatOpenAICodex as chat_open_ai_codex
+        from langchain_openai.chatgpt_oauth import (
+            _ChatGPTOAuthRefreshError as chatgpt_oauth_refresh_error,
+            _FileChatGPTOAuthTokenProvider as file_chatgpt_oauth_token_provider,
+            login_chatgpt as login_chatgpt_function,
+        )
+        import json_repair as json_repair_module
+        from openai import BadRequestError as bad_request_error
+        from openai import OpenAI as open_ai
+        from pydantic import ValidationError as validation_error
+        import qtawesome as qtawesome_module
+
+        from .ai_vectorstore import AiVectorstore as ai_vectorstore
+
+        PairwiseAligner = pairwise_aligner
+        httpx = httpx_module
+        AIMessage = ai_message
+        HumanMessage = human_message
+        SystemMessage = system_message
+        RunnableConfig = runnable_config
+        ChatOpenAI = chat_open_ai
+        AzureChatOpenAI = azure_chat_open_ai
+        _ChatOpenAICodex = chat_open_ai_codex
+        _ChatGPTOAuthRefreshError = chatgpt_oauth_refresh_error
+        _FileChatGPTOAuthTokenProvider = file_chatgpt_oauth_token_provider
+        login_chatgpt = login_chatgpt_function
+        json_repair = json_repair_module
+        OpenAI = open_ai
+        BadRequestError = bad_request_error
+        ValidationError = validation_error
+        qta = qtawesome_module
+        AiVectorstore = ai_vectorstore
+        _AI_DEPENDENCIES_LOADED = True
 
 max_memo_length = 1500  # Maximum length of the memo send to the AI
 
@@ -112,12 +181,16 @@ class AiRunContext:
     provider: str = ''
         
 
-class MyCustomSyncHandler(BaseCallbackHandler):
-    def __init__(self, ai_llm):
-        self.ai_llm = ai_llm
-        
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        self.ai_llm.run_progress_count += 1
+def make_custom_sync_handler(ai_llm):
+    """Create the LangChain callback after its base class is available."""
+
+    from langchain_core.callbacks.base import BaseCallbackHandler
+
+    class MyCustomSyncHandler(BaseCallbackHandler):
+        def on_llm_new_token(self, token: str, **kwargs) -> None:
+            ai_llm.run_progress_count += 1
+
+    return MyCustomSyncHandler()
     
 
 def extract_ai_memo(memo: str) -> str:
@@ -158,6 +231,7 @@ def ensure_chatgpt_oauth_profile_defaults(model: dict | None) -> None:
 def _chatgpt_oauth_provider(timeout: float = 5.0) -> _FileChatGPTOAuthTokenProvider:
     """Return the default ChatGPT OAuth token provider."""
 
+    load_ai_runtime_dependencies()
     return _FileChatGPTOAuthTokenProvider(timeout=timeout)
 
 
@@ -197,6 +271,7 @@ def get_chatgpt_oauth_status(timeout: float = 5.0) -> tuple[bool, str]:
 def renew_chatgpt_oauth(timeout: float = 300.0) -> tuple[bool, str]:
     """Start or renew ChatGPT OAuth authentication."""
 
+    load_ai_runtime_dependencies()
     try:
         login_chatgpt(timeout=timeout)
     except Exception as err:
@@ -215,6 +290,7 @@ def _chatgpt_oauth_reauth_message() -> str:
     
 def get_available_models(app, api_base: str, api_key: str) -> list:
     """Queries the API and returns a list of all AI models available from this provider."""
+    load_ai_runtime_dependencies()
     if is_chatgpt_oauth_api_base(api_base):
         return []
     msg = None
@@ -1374,6 +1450,8 @@ def ai_quote_search(quote: str, original: str) -> tuple[int, int]:
     Returns -1, -1 if no match is found.
     """
     
+    load_ai_runtime_dependencies()
+
     # try finding an exact match first
     start_idx = original.find(quote)
     if start_idx > -1:
@@ -1435,6 +1513,7 @@ class AiLLM():
     ai_change_history = None
     
     def __init__(self, app, parent_text_edit):
+        load_ai_runtime_dependencies()
         self.app = app
         self.parent_text_edit = parent_text_edit
         self.threadpool = QtCore.QThreadPool()
@@ -5190,7 +5269,7 @@ class AiLLM():
         
         # callback to show percentage done    
         config = RunnableConfig()
-        config['callbacks'] = [MyCustomSyncHandler(self)]
+        config['callbacks'] = [make_custom_sync_handler(self)]
         self.run_progress_max = round(1000 / 4)  # estimated token count of the result (1000 chars)
 
         response_format = self._get_response_format_json_schema("code_descriptions", response_schema)
@@ -5401,7 +5480,7 @@ class AiLLM():
 
         # callback to show percentage done    
         config = RunnableConfig()
-        config['callbacks'] = [MyCustomSyncHandler(self)]
+        config['callbacks'] = [make_custom_sync_handler(self)]
         self.run_progress_max = 130  # estimated average token count of the result
         
         # send the query to the llm 

@@ -43,7 +43,7 @@ from langchain_core.messages.human import HumanMessage
 from langchain_core.messages.system import SystemMessage
 from markdown_it import MarkdownIt
 from PyQt6 import QtWidgets, QtCore, QtGui
-from PyQt6.QtCore import Qt, QEvent, QObject, pyqtSignal
+from PyQt6.QtCore import Qt, QEvent, pyqtSignal
 from PyQt6.QtGui import QCursor, QGuiApplication, QAction, QPalette, QShortcut, QKeySequence, QStandardItemModel, QStandardItem
 from PyQt6.QtWidgets import QTextEdit
 import qtawesome as qta
@@ -54,6 +54,7 @@ from .ai_agent_prompts import (
     prompt_name_and_scope,
     prompt_name_key,
 )
+from .ai_signals import ai_chat_signal_emitter
 from .ai_llm import extract_ai_memo, ai_quote_search, llm_content_to_text, strip_think_blocks, AICancelled
 from .ai_mcp_server import AiMcpServer
 from .ai_search_dialog import DialogAiSearch
@@ -162,12 +163,6 @@ def render_markdown_to_html(text: str, hr_color: str = "#e6e6e6", hr_width_px: i
         rendered_html = rendered_html.replace(old, new)
 
     return f'<div style="margin-top: 4px;">{rendered_html}</div>'
-
-class AIChatSignalEmitter(QObject):
-    newTextChatSignal = pyqtSignal(int, str, str, int, object)  # will start a new text analysis chat
-
-ai_chat_signal_emitter = AIChatSignalEmitter()  # Create a global instance of the signal emitter
-
 
 class PrefixedComboBox(QtWidgets.QComboBox):
     """Draw a prefix in the closed combobox without changing the popup item texts."""
@@ -2492,6 +2487,11 @@ class DialogAIChat(QtWidgets.QDialog):
         return success
 
     def new_chat(self, name, analysis_type, summary, analysis_prompt):
+        if self.chat_history_conn is None:
+            if self.app.project_path == "":
+                Message(self.app, _('AI Agent'), _('No project open.'), "warning").exec()
+                return
+            self.init_ai_chat()
         self._clear_stream_preview_buffers()
         date = datetime.now()
         date_text = date.strftime('%Y-%m-%d %H:%M:%S')

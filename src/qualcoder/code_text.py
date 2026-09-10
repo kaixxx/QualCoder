@@ -46,9 +46,8 @@ from odf import text as odf_text, office as odf_office, dc as odf_dc, style as o
 from odf.namespaces import OFFICENS, DRAWNS  # Required for _export_odt_clean method
 
 from .ai_agent_prompts import AiAgentPromptsCatalog, prompt_name_and_scope
-from .ai_prompt_library import DialogAiEditPrompts
-from .ai_search_dialog import DialogAiSearch
-from .ai_chat import ai_chat_signal_emitter
+from .ai_runtime import ai_runtime_ready, show_ai_runtime_not_ready
+from .ai_signals import ai_chat_signal_emitter
 from .code_in_all_files import DialogCodeInAllFiles
 from .code_text_coding_margin import (CodingMargin, DEFAULT_CODING_MARGIN_WIDTH, MINIMUM_CODING_MARGIN_WIDTH,
                                       MINIMUM_CODING_MARGIN_LABEL_WIDTH)
@@ -2247,6 +2246,9 @@ class DialogCodeText(QtWidgets.QWidget):
             self.mark_with_new_code(in_vivo=True)
             return
         if action.property('submenu') == 'ai_text_analysis':
+            if not ai_runtime_ready(self.app):
+                show_ai_runtime_not_ready(self.app, _("AI Text Analysis"))
+                return
             if self.file_ is None:
                 Message(self.app, _('Warning'), _("No file was selected"), "warning").exec()
                 return
@@ -2259,6 +2261,11 @@ class DialogCodeText(QtWidgets.QWidget):
                                                           action.data())
             return
         if action.property('submenu') == 'ai_text_analysis_prompts':
+            if not ai_runtime_ready(self.app):
+                show_ai_runtime_not_ready(self.app, _("AI Prompts"))
+                return
+            from .ai_prompt_library import DialogAiEditPrompts
+
             DialogAiEditPrompts(self.app, 'text_analysis').exec()
             return
         # Remaining actions will be the submenu codes
@@ -6320,6 +6327,9 @@ class DialogCodeText(QtWidgets.QWidget):
         This will open a DialogAISearch to collect the search parameters and then 
         start phase 1 of the search, looking for suitable chunks of data in the vectorstore.
         """
+        if not ai_runtime_ready(self.app):
+            show_ai_runtime_not_ready(self.app, _("AI Search"))
+            return
         if self.edit_mode:
             msg = _('Please finish editing the text before starting an AI search.')
             Message(self.app, _('AI Search'), msg, "warning").exec()
@@ -6350,6 +6360,8 @@ class DialogCodeText(QtWidgets.QWidget):
             selected_is_code = True
 
         # Sort option lives in the shared code tree controller
+        from .ai_search_dialog import DialogAiSearch
+
         ui = DialogAiSearch(self.app, 'search', selected_id, selected_is_code, self.code_tree.tree_sort_option)
         ret = ui.exec()
         if ret == QtWidgets.QDialog.DialogCode.Accepted:

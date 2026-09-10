@@ -120,6 +120,8 @@ class App(object):
         self.configpath = str(qc_config_folder / 'config.ini')
         self.persist_path = str(qc_config_folder / 'recent_projects.txt')
         self.pending_ai_model_upgrade_offer = None
+        self.ai_runtime_state = "not_started"
+        self.ai_runtime_error = ""
         self.settings, self.ai_models = self.load_settings()
         self.last_export_directory = copy(self.settings['directory'])
         self.ai = None

@@ -445,6 +445,7 @@ class TestMainWindowAiActions(TestCase):
                     ui=ui,
                     sender=MagicMock(return_value=action),
                     set_ai_chat_sidebar_mode=MagicMock(),
+                    require_ai_runtime=MagicMock(return_value=True),
                 )
 
                 MainWindow.ai_go_analysis(window)
@@ -456,6 +457,52 @@ class TestMainWindowAiActions(TestCase):
                 else:
                     window.set_ai_chat_sidebar_mode.assert_not_called()
                     tab_widget.setCurrentWidget.assert_not_called()
+
+    def test_ai_action_asks_user_to_retry_while_runtime_loads(self):
+        app = SimpleNamespace(ai_runtime_state="loading")
+        window = SimpleNamespace(app=app)
+
+        with patch("qualcoder.__main__.show_ai_runtime_not_ready") as show_message:
+            ready = MainWindow.require_ai_runtime(window, "AI Agent")
+
+        self.assertFalse(ready)
+        show_message.assert_called_once_with(app, "AI Agent")
+
+    def test_deferred_ai_chat_initializes_restored_project_history(self):
+        chat_window = MagicMock()
+        app = SimpleNamespace(
+            project_path="C:/projects/example.qda",
+            settings={'ai_chat_sidebar': 'False'},
+        )
+        window = SimpleNamespace(
+            app=app,
+            ui=SimpleNamespace(textEdit=object()),
+            set_ai_chat_sidebar_mode=MagicMock(),
+        )
+
+        with patch("qualcoder.ai_chat.DialogAIChat", return_value=chat_window):
+            MainWindow.ai_chat(window)
+
+        chat_window.init_ai_chat.assert_called_once_with()
+        window.set_ai_chat_sidebar_mode.assert_called_once_with(False, persist=False)
+
+    def test_ai_startup_status_only_clears_its_own_message(self):
+        status_bar = MagicMock()
+        status_bar.currentMessage.return_value = "AI: Starting up..."
+        status_label = MagicMock()
+        window = SimpleNamespace(
+            ai_loading_status_label=status_label,
+            statusBar=MagicMock(return_value=status_bar),
+        )
+
+        MainWindow._clear_ai_startup_status_message(window)
+
+        status_label.hide.assert_called_once_with()
+        status_bar.clearMessage.assert_called_once_with()
+        status_bar.reset_mock()
+        status_bar.currentMessage.return_value = "AI: reading data"
+        MainWindow._clear_ai_startup_status_message(window)
+        status_bar.clearMessage.assert_not_called()
 
     def test_text_coding_reuses_open_dialog(self):
         class FakeDialogCodeText:
