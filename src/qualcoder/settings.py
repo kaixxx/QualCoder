@@ -21,19 +21,16 @@ https://qualcoder-org.github.io
 https://qualcoder.org/
 """
 
+import copy
 import logging
 import os
-from typing import Any
-from PyQt6 import QtGui, QtWidgets, QtCore
-import qtawesome as qta
-import copy
 import re
 import unicodedata  # <- L normalize localized numerals when reading numeric combos
+from typing import Any, Callable, Optional
 
-from .GUI.ui_dialog_settings import Ui_Dialog_settings
-from .coder_names import DialogCoderNames
-from .helpers import get_default_user_directory, Message
-from .ai_runtime import ai_runtime_ready, show_ai_runtime_not_ready
+from PyQt6 import QtCore, QtGui, QtWidgets
+import qtawesome as qta
+
 from .ai_llm import (
     add_new_ai_model,
     ensure_chatgpt_oauth_profile_defaults,
@@ -42,6 +39,11 @@ from .ai_llm import (
     is_chatgpt_oauth_profile,
     renew_chatgpt_oauth,
 )
+from .ai_runtime import ai_runtime_ready, show_ai_runtime_not_ready
+from .coder_names import DialogCoderNames
+from .confirm_delete import DialogConfirmDelete
+from .GUI.ui_dialog_settings import Ui_Dialog_settings
+from .helpers import get_default_user_directory, Message
 
 home = os.path.expanduser('~')
 path = os.path.abspath(os.path.dirname(__file__))
@@ -182,9 +184,11 @@ class DialogSettings(QtWidgets.QDialog):
 
     settings = {}
 
-    def __init__(self, app, parent=None, section=None, enable_ai=False):
+    def __init__(self, app, parent=None, section=None, enable_ai=False,
+                 ai_runtime_loader: Optional[Callable[..., bool]] = None):
 
         self.app = app
+        self.ai_runtime_loader = ai_runtime_loader
         if self.app.conn is not None:
             self.initial_changes = self.app.conn.total_changes
         self.settings = copy.deepcopy(self.app.settings)
@@ -528,6 +532,13 @@ class DialogSettings(QtWidgets.QDialog):
             self.ui.label_auth_result.setText('')
 
     def ai_enable_state_changed(self):
+        if (self.ui.checkBox_AI_enable.isChecked()
+                and not ai_runtime_ready(self.app)
+                and self.ai_runtime_loader is not None):
+            loaded = self.ai_runtime_loader(_("AI Settings"), self)
+            if not loaded:
+                with QtCore.QSignalBlocker(self.ui.checkBox_AI_enable):
+                    self.ui.checkBox_AI_enable.setChecked(False)
         self.ui.comboBox_ai_profile.setEnabled(self.ui.checkBox_AI_enable.isChecked())
         self.ui.pushButton_ai_profile_edit.setEnabled(self.ui.checkBox_AI_enable.isChecked())
         self.ui.comboBox_ai_permissions.setEnabled(self.ui.checkBox_AI_enable.isChecked())

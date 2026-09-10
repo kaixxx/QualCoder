@@ -4,8 +4,9 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
-from qualcoder.ai_runtime import AI_FAILED, AI_LOADING, AI_READY, ai_runtime_ready
+from qualcoder.ai_runtime import AI_DISABLED, AI_FAILED, AI_LOADING, AI_READY, ai_runtime_ready
 from qualcoder.ai_runtime import show_ai_runtime_not_ready
+from qualcoder.__main__ import MainWindow
 
 
 class TestAiRuntime(TestCase):
@@ -27,6 +28,24 @@ class TestAiRuntime(TestCase):
         with patch("qualcoder.ai_runtime.Message") as message_class:
             show_ai_runtime_not_ready(app, "AI Agent")
         self.assertIn("could not be loaded", message_class.call_args.args[2].lower())
+
+    def test_disabled_message_does_not_claim_loading(self):
+        app = SimpleNamespace(ai_runtime_state=AI_DISABLED)
+        with patch("qualcoder.ai_runtime.Message") as message_class:
+            show_ai_runtime_not_ready(app, "AI Agent")
+        self.assertIn("disabled", message_class.call_args.args[2].lower())
+
+    def test_disabled_ai_skips_background_runtime_loading(self):
+        app = SimpleNamespace(
+            ai_runtime_state="not_started",
+            settings={'ai_enable': 'False'},
+        )
+        window = SimpleNamespace(app=app, ai_import_thread=None)
+
+        MainWindow.start_ai_background_loading(window)
+
+        self.assertEqual(AI_DISABLED, app.ai_runtime_state)
+        self.assertIsNone(window.ai_import_thread)
 
     def test_lightweight_ai_llm_import_excludes_model_stack(self):
         code = (

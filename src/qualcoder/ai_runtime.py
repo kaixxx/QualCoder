@@ -10,6 +10,7 @@ from .helpers import Message
 logger = logging.getLogger(__name__)
 
 AI_NOT_STARTED = "not_started"
+AI_DISABLED = "disabled"
 AI_LOADING = "loading"
 AI_INITIALIZING = "initializing"
 AI_READY = "ready"
@@ -50,6 +51,8 @@ def show_ai_runtime_not_ready(app, title: str = "AI") -> None:
     state = getattr(app, "ai_runtime_state", AI_NOT_STARTED)
     if state == AI_FAILED:
         text = _("The AI components could not be loaded. Please restart QualCoder or check the log for details.")
+    elif state == AI_DISABLED:
+        text = _("The AI is disabled. Enable it in the AI Setup Wizard or AI Settings.")
     else:
         text = _("The AI components are still loading in the background. Please retry in a moment.")
     Message(app, title, text, "Information").exec()

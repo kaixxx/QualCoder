@@ -61,6 +61,7 @@ from .ai_icons import (
     topic_exploration_icon,
 )
 from .ai_runtime import (
+    AI_DISABLED,
     AI_FAILED,
     AI_INITIALIZING,
     AI_LOADING,
@@ -5640,6 +5641,8 @@ data collected. This information will accompany every prompt sent to the AI, res
         runtime_state = getattr(self.app, "ai_runtime_state", AI_NOT_STARTED)
         if runtime_state in (AI_NOT_STARTED, AI_LOADING, AI_INITIALIZING):
             self.main_window.statusBar().showMessage(_("AI: Starting up..."))
+        elif runtime_state == AI_DISABLED:
+            self.main_window.statusBar().showMessage(_("AI: ") + _("disabled"))
         elif runtime_state == AI_FAILED:
             self.main_window.statusBar().showMessage(_("AI: Components could not be loaded."))
         elif self.app.ai is not None:

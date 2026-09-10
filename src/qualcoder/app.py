@@ -120,9 +120,11 @@ class App(object):
         self.configpath = str(qc_config_folder / 'config.ini')
         self.persist_path = str(qc_config_folder / 'recent_projects.txt')
         self.pending_ai_model_upgrade_offer = None
-        self.ai_runtime_state = "not_started"
         self.ai_runtime_error = ""
         self.settings, self.ai_models = self.load_settings()
+        self.ai_runtime_state = (
+            "not_started" if self.settings['ai_enable'] == 'True' else "disabled"
+        )
         self.last_export_directory = copy(self.settings['directory'])
         self.ai = None
         # Sentence transformer embedding function. It is stored here so it must not be reloaded every time a project is opened.

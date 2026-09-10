@@ -48,6 +48,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 import qtawesome as qta
 from qualcoder.app import App
 from qualcoder.ai_runtime import (
+    AI_DISABLED,
     AI_FAILED,
     AI_INITIALIZING,
     AI_LOADING,
@@ -299,6 +300,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.journal_display = None
         self.ai_chat_window = None
         self.ai_import_thread = None
+        self.ai_initialize_llm_after_load = True
         self.ai_chat_sidebar_mode = False
         self.ai_chat_tab_label = None
         self.ai_chat_tab_sidebar_button = None
@@ -345,12 +347,22 @@ class MainWindow(QtWidgets.QMainWindow):
         # Start expensive AI imports only after this constructor returns and
         # the normal Qt event loop can keep the visible window responsive.
         QtCore.QTimer.singleShot(0, self.start_ai_background_loading)
+        QtCore.QTimer.singleShot(0, self._offer_first_ai_setup)
 
-    def start_ai_background_loading(self) -> None:
+    def start_ai_background_loading(
+            self, force: bool = False, initialize_llm_after_load: bool = True) -> None:
         """Preload optional AI packages on a low-priority worker thread."""
 
-        if self.ai_import_thread is not None or ai_runtime_ready(self.app):
+        if ai_runtime_ready(self.app):
             return
+        if not initialize_llm_after_load:
+            self.ai_initialize_llm_after_load = False
+        if self.ai_import_thread is not None and self.ai_import_thread.isRunning():
+            return
+        if self.app.settings['ai_enable'] != 'True' and not force:
+            self.app.ai_runtime_state = AI_DISABLED
+            return
+        self.ai_initialize_llm_after_load = initialize_llm_after_load
         self.app.ai_runtime_state = AI_LOADING
         self.ui.textEdit.append(_("AI: Loading components in the background..."))
         self.statusBar().showMessage(_("AI: Starting up..."))
@@ -372,30 +384,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.app.ai = AiLLM(self.app, self.ui.textEdit)
             self.app.ai_runtime_state = AI_READY
             self.app.ai_runtime_error = ""
-            # First start? Ask if user wants to enable ai integration or not
-            if self.app.settings['ai_first_startup'] == 'True' and self.app.settings['ai_enable'] == 'False':
-                msg = _('Welcome\n\n\
-The new AI enhanced functions in QualCoder need some additional setup. \
-Do you want to enable the AI and start the setup? \
-You can also do this later by starting the AI Setup Wizard from the AI menu in the main window. \
-Click "Yes" to start now.')
-                msg_box = QtWidgets.QMessageBox(self)
-                msg_box.setWindowTitle(_('AI Integration'))
-                msg_box.setText(msg)
-                msg_box.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
-                msg_box.addButton(QtWidgets.QMessageBox.StandardButton.Yes)
-                msg_box.addButton(QtWidgets.QMessageBox.StandardButton.No)
-                msg_box.addButton(QtWidgets.QMessageBox.StandardButton.Help)
-                reply = None
-                while reply is None or reply == QtWidgets.QMessageBox.StandardButton.Help:
-                    reply = msg_box.exec()
-                    if reply == QtWidgets.QMessageBox.StandardButton.Help:
-                        self.app.help_wiki("2.3.-AI-Setup")                
-                if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-                    self.ai_setup_wizard()  # (will also init the llm)
-            else:
-                self.app.ai.init_llm(self)      
-            self.app.settings['ai_first_startup'] = 'False'
+            if self.ai_initialize_llm_after_load:
+                self.app.ai.init_llm(self)
             self.app.write_config_ini(self.app.settings, self.app.ai_models)
             self.ui.textEdit.append(_("AI: Components loaded."))
             self._clear_ai_startup_status_message()
@@ -420,6 +410,66 @@ Click "Yes" to start now.')
         status_bar = self.statusBar()
         if status_bar.currentMessage() == _("AI: Starting up..."):
             status_bar.clearMessage()
+
+    def load_ai_runtime_modal(
+            self, title: str, parent: Optional[QtWidgets.QWidget] = None) -> bool:
+        """Load AI packages in the background while displaying a modal step."""
+
+        if ai_runtime_ready(self.app):
+            return True
+        self.start_ai_background_loading(force=True, initialize_llm_after_load=False)
+        progress = QtWidgets.QProgressDialog(
+            _("Loading AI components..."),
+            "",
+            0,
+            0,
+            parent if parent is not None else self,
+        )
+        progress.setWindowTitle(title)
+        progress.setCancelButton(None)
+        progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        poll_timer = QtCore.QTimer(progress)
+
+        def finish_when_loaded() -> None:
+            if self.app.ai_runtime_state not in (AI_LOADING, AI_INITIALIZING):
+                progress.accept()
+
+        poll_timer.timeout.connect(finish_when_loaded)
+        poll_timer.start(50)
+        progress.exec()
+        poll_timer.stop()
+        if ai_runtime_ready(self.app):
+            return True
+        show_ai_runtime_not_ready(self.app, title)
+        return False
+
+    def _offer_first_ai_setup(self) -> None:
+        """Offer the lightweight first-run setup without preloading AI packages."""
+
+        if self.app.settings['ai_first_startup'] != 'True' or self.app.settings['ai_enable'] == 'True':
+            return
+        msg = _('Welcome\n\n\
+The new AI enhanced functions in QualCoder need some additional setup. \
+Do you want to enable the AI and start the setup? \
+You can also do this later by starting the AI Setup Wizard from the AI menu in the main window. \
+Click "Yes" to start now.')
+        msg_box = QtWidgets.QMessageBox(self)
+        msg_box.setWindowTitle(_('AI Integration'))
+        msg_box.setText(msg)
+        msg_box.setStyleSheet(f"* {{font-size:{self.app.settings['fontsize']}pt}} ")
+        msg_box.addButton(QtWidgets.QMessageBox.StandardButton.Yes)
+        msg_box.addButton(QtWidgets.QMessageBox.StandardButton.No)
+        msg_box.addButton(QtWidgets.QMessageBox.StandardButton.Help)
+        reply = None
+        while reply is None or reply == QtWidgets.QMessageBox.StandardButton.Help:
+            reply = msg_box.exec()
+            if reply == QtWidgets.QMessageBox.StandardButton.Help:
+                self.app.help_wiki("2.3.-AI-Setup")
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self.ai_setup_wizard()
+        self.app.settings['ai_first_startup'] = 'False'
+        self.app.write_config_ini(self.app.settings, self.app.ai_models)
 
     def require_ai_runtime(self, title: str = "AI") -> bool:
         """Return true when AI is ready; otherwise show a retry-later message."""
@@ -2108,10 +2158,13 @@ Click "Yes" to start now.')
         section = 'AI' moves to the AI settings at the bottom of the dialog
         enable_ai = if True, the AI will be enabled in settings
         """
-        if (section in ('AI', 'advanced AI') or enable_ai) and not self.require_ai_runtime(_("AI Settings")):
-            return
         current_coder = self.app.settings['codername']
-        ui = DialogSettings(self.app, section=section, enable_ai=enable_ai)
+        ui = DialogSettings(
+            self.app,
+            section=section,
+            enable_ai=enable_ai,
+            ai_runtime_loader=self.load_ai_runtime_modal,
+        )
         ret = ui.exec()
         if ret == QtWidgets.QDialog.DialogCode.Rejected:  # Dialog has been canceled
             return
@@ -2125,10 +2178,15 @@ Click "Yes" to start now.')
             self.ai_chat_window.init_styles()
         self.refresh_open_code_display_settings()
         
-        if self.app.settings['ai_enable'] == 'True' and self.app.ai is not None:
-            self.app.ai.init_llm(self, rebuild_vectorstore=False)
+        if self.app.settings['ai_enable'] == 'True':
+            if not ai_runtime_ready(self.app):
+                self.load_ai_runtime_modal(_("AI Settings"))
+            if self.app.ai is not None:
+                self.app.ai.init_llm(self, rebuild_vectorstore=False)
         elif self.app.ai is not None:
             self.app.ai.close()
+        else:
+            self.app.ai_runtime_state = AI_DISABLED
         self._show_pending_ai_model_upgrade_offer()
         self.update_ai_menu_options()
         if self.ai_chat_window is not None:
@@ -2817,7 +2875,7 @@ Click "Yes" to start now.')
     # AI Menu Actions
     def ai_setup_wizard(self):
         """Action triggered by AI Setup Wizard menu item or at the first start of QualCoder."""
-        if not self.require_ai_runtime(_("AI Setup Wizard")):
+        if not ai_runtime_ready(self.app) and not self.load_ai_runtime_modal(_("AI Setup Wizard")):
             return
         if self.app.settings['ai_enable'] == 'True':
             msg = _('The AI is setup and enabled, so there is nothing to do here. '
@@ -2843,8 +2901,6 @@ Click "Yes" to start now.')
         
     def ai_settings(self):
         """ Action triggered by AI Settings menu item."""
-        if not self.require_ai_runtime(_("AI Settings")):
-            return
         self.change_settings(section='AI')
 
     def ai_rebuild_memory(self):
