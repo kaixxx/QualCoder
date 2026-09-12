@@ -58,6 +58,7 @@ from qualcoder.ai_runtime import (
     show_ai_runtime_not_ready,
 )
 from qualcoder.error_dlg import qt_exception_hook
+from qualcoder.external_mcp import ExternalMcpController
 from qualcoder.attributes import DialogManageAttributes
 from qualcoder.cases import DialogCases
 from qualcoder.code_av import DialogCodeAV
@@ -94,6 +95,7 @@ from qualcoder.rqda import RqdaImport
 from qualcoder.settings import DialogSettings
 from qualcoder.special_functions import DialogSpecialFunctions
 from qualcoder.taguette_import import TaguetteImport
+from qualcoder.sonal_import import SonalImport
 from qualcoder.view_charts import ViewCharts
 from qualcoder.view_graph import ViewGraph
 from qualcoder.view_image import DialogCodeImage
@@ -315,6 +317,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.instance().setStyle("Fusion")
 
         QtWidgets.QMainWindow.__init__(self)
+        self.external_mcp = ExternalMcpController(self.app, self)
+        self.external_mcp.status_changed.connect(self._external_mcp_status_changed)
         self.ai_sidebar_splitter_save_timer = QtCore.QTimer(self)
         self.ai_sidebar_splitter_save_timer.setSingleShot(True)
         self.ai_sidebar_splitter_save_timer.timeout.connect(self.persist_ai_sidebar_splitter_setting)
@@ -499,6 +503,14 @@ Click "Yes" to start now.')
             placeholder.anchorClicked.connect(self.handle_placeholder_link)
             placeholder.show()
         self.update_placeholder_tab_styles()
+
+    @QtCore.pyqtSlot(str)
+    def _external_mcp_status_changed(self, message: str) -> None:
+        """Show External MCP lifecycle information in the action log."""
+
+        logger.info(message)
+        if getattr(self, "ui", None) is not None and hasattr(self.ui, "textEdit"):
+            self.ui.textEdit.append(message)
 
     @staticmethod
     def _object_name_aliases(object_name):
@@ -801,6 +813,7 @@ Click "Yes" to start now.')
         self.ui.actionREFI_QDA_Project_import.triggered.connect(self.refi_project_import)
         self.ui.actionRQDA_Project_import.triggered.connect(self.rqda_project_import)
         self.ui.actionTaguette_import.triggered.connect(self.taguette_project_import)
+        self.ui.actionSonal_import.triggered.connect(self.sonal_project_import)
         self.ui.actionExport_codebook.triggered.connect(self.codebook)
         self.ui.actionExport_codebook_with_memos.triggered.connect(self.codebook_with_memos)
         self.ui.actionExit.triggered.connect(self.close)
@@ -980,6 +993,7 @@ Click "Yes" to start now.')
         self.ui.actionREFI_QDA_Project_import.setEnabled(True)
         self.ui.actionRQDA_Project_import.setEnabled(True)
         self.ui.actionTaguette_import.setEnabled(True)
+        self.ui.actionSonal_import.setEnabled(True)
         self.ui.actionExport_codebook.setEnabled(False)
         self.ui.actionImport_plain_text_codes_list.setEnabled(False)
         # Manage menu
@@ -1030,6 +1044,7 @@ Click "Yes" to start now.')
         self.ui.actionREFI_Codebook_import.setEnabled(True)
         self.ui.actionREFI_QDA_Project_import.setEnabled(True)
         self.ui.actionRQDA_Project_import.setEnabled(True)
+        self.ui.actionSonal_import.setEnabled(True)
         self.ui.actionExport_codebook.setEnabled(True)
         self.ui.actionImport_plain_text_codes_list.setEnabled(True)
         # Manage menu
@@ -1896,7 +1911,23 @@ Click "Yes" to start now.')
             return
         TaguetteImport(self.app, self.ui.textEdit)
         self.project_summary_report()
+    
+    def sonal_project_import(self):
+        """ Import a Sonal (SonalPi) project into a new project space. """
 
+        self.close_project()
+        self.ui.textEdit.append(_("IMPORTING SONAL PROJECT"))
+        msg = _(
+            "Step 1: You will be asked for a new QualCoder project name.\nStep 2: You will be asked for the Sonal corpus file (.crp or .zip).")
+        Message(self.app, _('Sonal import steps'), msg).exec()
+        self.new_project()
+        # Check project created successfully
+        if self.app.project_name == "":
+            Message(self.app, _('Project creation'), _("Project not successfully created"), "critical").exec()
+            return
+        SonalImport(self.app, self.ui.textEdit)
+        self.project_summary_report()
+  
     def rqda_project_import(self):
         """ Import an RQDA format project into a new project space. """
 
@@ -2170,6 +2201,7 @@ Click "Yes" to start now.')
             return
 
         self.app.settings, self.app.ai_models = self.app.load_settings()
+        self.external_mcp.sync_with_application_state()
         self.settings_report(swith_to_action_log=False)
         font = f'font: {self.app.settings["fontsize"]}pt "{self.app.settings["font"]}";'
         self.setStyleSheet(font)
@@ -2710,6 +2742,7 @@ Click "Yes" to start now.')
         self.ui.textEdit.append(msg)
         self.project_summary_report()
         self.show_menu_options()
+        self.external_mcp.sync_with_application_state()
 
     def project_summary_report(self):
         """ Add a summary of the project to the text edit.
@@ -2790,6 +2823,8 @@ Click "Yes" to start now.')
         Remove widgets from tabs, clear dialog list. Close app connection.
         Delete old backups. Hide menu options. """
 
+        self.external_mcp.stop()
+        self.app.ai_mcp_server.reset_project_state()
         self.journal_display = None
         for tab_widget in (self.ui.tab_reports, self.ui.tab_coding, self.ui.tab_manage):
             self.clear_tab_widgets(tab_widget, show_placeholder=True)
