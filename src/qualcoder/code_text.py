@@ -24,19 +24,18 @@ https://qualcoder.org/
 
 from copy import copy, deepcopy
 import datetime
-# import difflib  # Slow, kept this in case need to revert to it. Now using diff_match_patch
-import diff_match_patch
-import emoji
 import html
 import logging
 from operator import itemgetter
 from pathlib import Path
-import qtawesome as qta  # see: https://pictogrammers.com/library/mdi/
 import re
 import sqlite3
 import unicodedata
 import webbrowser
 
+import diff_match_patch
+import emoji
+import qtawesome as qta  # see: https://pictogrammers.com/library/mdi/
 from PyQt6 import QtCore, QtGui, QtWidgets, sip
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QBrush, QColor
@@ -3010,11 +3009,9 @@ class DialogCodeText(QtWidgets.QWidget):
             if code['cid'] == item['cid']:
                 color = code['color']
         fmt = QtGui.QTextCharFormat()
-        brush = QBrush(QColor(color))
-        fmt.setBackground(brush)
+        self._set_code_marker_format(fmt, color)
         if item['important']:
             fmt.setFontWeight(QtGui.QFont.Weight.Bold)
-        fmt.setForeground(QBrush(QColor(TextColor(color).recommendation)))
         cursor.setCharFormat(fmt)
         self.apply_underline_to_overlaps()
 
@@ -4053,11 +4050,9 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.plainTextEdit.setTextCursor(cursor)
         cursor.setPosition(cur_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
         cursor.setPosition(end_pos, QtGui.QTextCursor.MoveMode.KeepAnchor)
-        brush = QBrush(QColor(color))
         fmt = QtGui.QTextCharFormat()
-        fmt.setBackground(brush)
+        self._set_code_marker_format(fmt, color)
         foreground_color = TextColor(color).recommendation
-        fmt.setForeground(QBrush(QColor(foreground_color)))
         cursor.mergeCharFormat(fmt)
         # Update tooltips to show only this code
         self.eventFilterTT.set_codes_and_annotations(self.app, tt_code_text, self.codes, self.annotations,
@@ -4124,11 +4119,9 @@ class DialogCodeText(QtWidgets.QWidget):
         self.ui.plainTextEdit.setTextCursor(cursor)
         cursor.setPosition(cur_pos, QtGui.QTextCursor.MoveMode.MoveAnchor)
         cursor.setPosition(end_pos, QtGui.QTextCursor.MoveMode.KeepAnchor)
-        brush = QBrush(QColor(color))
         fmt = QtGui.QTextCharFormat()
-        fmt.setBackground(brush)
+        self._set_code_marker_format(fmt, color)
         foreground_colour = TextColor(color).recommendation
-        fmt.setForeground(QBrush(QColor(foreground_colour)))
         cursor.mergeCharFormat(fmt)
         # Update tooltips to show only this code
         self.eventFilterTT.set_codes_and_annotations(self.app, tt_code_text, self.codes, self.annotations,
@@ -4714,6 +4707,37 @@ class DialogCodeText(QtWidgets.QWidget):
         cursor.setPosition(len(self.text), QtGui.QTextCursor.MoveMode.KeepAnchor)
         cursor.setCharFormat(QtGui.QTextCharFormat())
 
+    def _set_code_marker_format(self, fmt: QtGui.QTextCharFormat, color: str):
+        """Set a translucent marker with readable text for the current theme.
+
+        Args:
+            fmt: Character format to update.
+            color: Code background color.
+        """
+
+        # Resolve stylesheet colors even before the editor is first shown.
+        self.ui.plainTextEdit.ensurePolished()
+        viewport = self.ui.plainTextEdit.viewport()
+        viewport.ensurePolished()
+        palette = viewport.palette()
+        base_color = palette.color(QtGui.QPalette.ColorRole.Base)
+        text_color = palette.color(QtGui.QPalette.ColorRole.Text)
+        dark_mode = (CodingMargin._relative_luminance(text_color)
+                     > CodingMargin._relative_luminance(base_color))
+        marker_color = QColor(color)
+        marker_color.setAlphaF(0.3 if dark_mode else 0.2)
+        fmt.setBackground(QBrush(marker_color))
+        opacity = marker_color.alphaF()
+        blended_color = QColor(*(
+            round(opacity * marker_channel + (1 - opacity) * base_channel)
+            for marker_channel, base_channel in zip(
+                marker_color.getRgb()[:3], base_color.getRgb()[:3])))
+        if CodingMargin._contrast_ratio(text_color, blended_color) < 4.5:
+            text_color = max(
+                (QColor("#000000"), QColor("#ffffff")),
+                key=lambda candidate: CodingMargin._contrast_ratio(candidate, blended_color))
+        fmt.setForeground(QBrush(text_color))
+
     def _apply_format_to_code_item(self, item, codes_lookup):  # <- L
         """ Apply highlight formatting to a single coded text item.
         Extracted from highlight() so it can be reused by the incremental
@@ -4735,10 +4759,7 @@ class DialogCodeText(QtWidgets.QWidget):
             fmt.setUnderlineStyle(QtGui.QTextCharFormat.UnderlineStyle.DashUnderline)
             fmt.setUnderlineColor(self._code_label_contrast_color(color))
         else:
-            brush = QBrush(QColor(color))
-            fmt.setBackground(brush)
-            text_brush = QBrush(QColor(TextColor(color).recommendation))
-            fmt.setForeground(text_brush)
+            self._set_code_marker_format(fmt, color)
 
         if item.get('memo', '') != "":
             fmt.setFontItalic(True)
@@ -4836,7 +4857,7 @@ class DialogCodeText(QtWidgets.QWidget):
         If no colour has been assigned to a code, those coded text fragments are coloured gray.
         Each code text item contains: fid, date, pos0, pos1, seltext, cid, status, memo,
         name, owner.
-        For defined colours in color_selector, make text light on dark, and conversely dark on light
+        Use translucent marker colors and choose readable text for the current theme.
         """
 
         if self.file_ is None or self.ai_search_message_shown or self.ui.plainTextEdit.toPlainText() == "":
@@ -4858,11 +4879,7 @@ class DialogCodeText(QtWidgets.QWidget):
                 fmt.setUnderlineStyle(QtGui.QTextCharFormat.UnderlineStyle.DashUnderline)
                 fmt.setUnderlineColor(self._code_label_contrast_color(color))
             else:
-                brush = QBrush(QColor(color))
-                fmt.setBackground(brush)
-                # Foreground depends on the defined need_white_text color in color_selector
-                text_brush = QBrush(QColor(TextColor(color).recommendation))
-                fmt.setForeground(text_brush)
+                self._set_code_marker_format(fmt, color)
 
             # Highlight codes with memos - these are italicised
             # Italics also used for overlapping codes
