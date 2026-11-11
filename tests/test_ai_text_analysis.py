@@ -1,8 +1,11 @@
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import MethodType, SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
+from qualcoder.ai_agent_prompts import AiAgentPromptsCatalog
 from qualcoder.ai_chat import DialogAIChat
 from qualcoder.ai_mcp_server import AiMcpServer
 
@@ -105,6 +108,47 @@ class TestAiTextAnalysis(TestCase):
                     self.chat.new_chat.assert_not_called()
                     self.chat.main_window.ai_go_chat.assert_not_called()
                     self.chat._start_mcp_agent_worker.assert_not_called()
+
+    def test_project_reinitialization_resolves_prompts_from_current_project(self) -> None:
+        temporary_directory = TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        config_path = root / 'config'
+        project_path = root / 'current.qda'
+        old_project_path = root / 'previous.qda'
+        prompt_name = 'text-analysis/Interview'
+        for prompt_root, content in (
+            (config_path / 'ai_prompts', 'User instructions'),
+            (project_path / 'ai_data' / 'ai_prompts', 'Current project instructions'),
+            (old_project_path / 'ai_data' / 'ai_prompts', 'Previous project instructions'),
+        ):
+            prompt_file = prompt_root / f'{prompt_name}.md'
+            prompt_file.parent.mkdir(parents=True)
+            prompt_file.write_text(content, encoding='utf-8')
+
+        self.chat.chat_history_conn = None
+        self.chat._close_chat_history_connection = MethodType(
+            DialogAIChat._close_chat_history_connection, self.chat
+        )
+        self.addCleanup(self.chat._close_chat_history_connection)
+        current_app = SimpleNamespace(
+            confighome=str(config_path), project_path=str(project_path), ai_mcp_server=self.server,
+        )
+        for previous_path in ('', str(old_project_path)):
+            with self.subTest(previous_path=previous_path):
+                self.chat.app = SimpleNamespace(confighome=str(config_path), project_path=previous_path)
+                self.chat.agent_prompts_catalog = AiAgentPromptsCatalog(self.chat.app)
+
+                DialogAIChat.init_ai_chat(self.chat, current_app)
+
+                for scope, expected_content in (
+                    ('user', 'User instructions'), ('project', 'Current project instructions'),
+                ):
+                    prompt_record = DialogAIChat._resolve_text_analysis_prompt_payload(
+                        self.chat, {'name': prompt_name, 'scope': scope},
+                    )
+                    self.assertIsNotNone(prompt_record)
+                    self.assertEqual(expected_content, prompt_record.content)
 
     def test_bootstrap_loads_only_the_complete_selection_before_model_invocation(self) -> None:
         for text_length in (37, 12000, 12001, 24000, 24001, 60000):

@@ -1653,6 +1653,7 @@ class DialogAIChat(QtWidgets.QDialog):
     def init_ai_chat(self, app=None):
         if app is not None:
             self.app = app
+            self.agent_prompts_catalog = AiAgentPromptsCatalog(self.app)
             self.ai_mcp_server = self.app.ai_mcp_server
             self.load_ai_permissions()
         self._close_chat_history_connection()
