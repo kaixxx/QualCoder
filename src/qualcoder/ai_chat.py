@@ -5139,8 +5139,17 @@ data collected. This information will accompany every prompt sent to the AI, res
             ("initialize", {}),
             ("resources/list", {}),
             ("resources/templates/list", {}),
-            ("resources/read", {"uri": self._text_analysis_document_uri(doc_id, start_pos, text_length)}),
         ]
+        read_length = int(getattr(self.ai_mcp_server, 'max_read_length', 12000))
+        bootstrap_calls.extend(
+            (
+                "resources/read",
+                {"uri": self._text_analysis_document_uri(
+                    doc_id, start_pos + offset, min(read_length, text_length - offset)
+                )},
+            )
+            for offset in range(0, text_length, read_length)
+        )
         reflection_json_schema = self._mcp_reflection_json_schema()
         max_calls_per_round = AI_AGENT_MAX_CALLS_PER_ROUND
         max_reflection_rounds = AI_AGENT_MAX_REFLECTION_ROUNDS
@@ -5463,7 +5472,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             if ai_change_set_id != "":
                 self._discard_empty_ai_change_set(ai_change_set_id)
 
-    def new_text_chat(self, doc_id, doc_name, text, start_pos, prompt):
+    def new_text_chat(self, doc_id: int, doc_name: str, text: str, start_pos: int, prompt: Any) -> None:
         """Start one text analysis chat for the selected text passage."""
 
         if not ensure_ai_ready(self.app, _("AI Text Analysis")):
@@ -5482,10 +5491,7 @@ data collected. This information will accompany every prompt sent to the AI, res
             Message(self.app, _('AI prompts'), msg, "warning").exec()
             return
 
-        max_ai_data_length = min(
-            max(4000, round(0.5 * (self.app.ai.large_llm_context_window * 4))),
-            int(getattr(self.ai_mcp_server, 'max_read_length', 12000)),
-        )
+        max_ai_data_length = max(4000, round(0.5 * (self.app.ai.large_llm_context_window * 4)))
         if len(text) > max_ai_data_length:
             msg = _('The text is too long to be analyzed in one go. Please select a shorter passage.')
             Message(self.app, _('AI text analysis'), msg, "warning").exec()
