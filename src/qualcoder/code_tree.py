@@ -52,6 +52,7 @@ class CodeTreeController(QtCore.QObject):
         fill_counts_callback() - fill the Count column after fill_tree
         coded_files_callback(code_or_codes, title) - one code dict, or a list for a category branch
         find_code_callback(), show_codes_like_callback(), show_codes_of_colour_callback()
+        show_codes_branch_callback(),
         on_codes_deleted(cids), on_code_renamed(old_name, new_name) - host cache cleanup
     Signals:
         menu_requested(menu, selected_item) - emitted before the context menu is shown
@@ -86,6 +87,7 @@ class CodeTreeController(QtCore.QObject):
         self.find_code_callback = None
         self.show_codes_like_callback = None
         self.show_codes_of_colour_callback = None
+        self.show_codes_branch_callback = None
         self.on_codes_deleted = None
         self.on_code_renamed = None
         # Collapsed branches are tracked in app.coding_tree_collapsed, shared by coding dialogs only
@@ -112,6 +114,37 @@ class CodeTreeController(QtCore.QObject):
         self.app.coding_tree_collapsed.discard(item.text(1))
 
     # tree fill
+
+    def _sort_tree_by_totals(self, descending=True):
+        """ Order every tree level by total, then by name. """
+
+        tree = self.tree
+        total_col = tree.columnCount() - 1
+
+        def sort_key(item):
+            text = item.text(total_col)
+            # Codes with sub-codes show 'own (branch total)': sort by the branch total
+            if "(" in text:
+                text = text.split("(")[1].rstrip(")")
+            try:
+                total = int(text)
+            except ValueError:
+                total = 0
+            name = item.toolTip(0) if item.toolTip(0) != "" else item.text(0)
+            return -total if descending else total, name.lower()
+
+        def sort_children(parent):
+            children = parent.takeChildren()
+            children.sort(key=sort_key)
+            parent.addChildren(children)
+            for child in children:
+                sort_children(child)
+
+        top_items = [tree.takeTopLevelItem(0) for _i in range(tree.topLevelItemCount())]
+        top_items.sort(key=sort_key)
+        tree.addTopLevelItems(top_items)
+        for item in top_items:
+            sort_children(item)
 
     def fill_tree(self):
         """ Fill tree widget, top level items are main categories and unlinked codes.
@@ -341,7 +374,9 @@ class CodeTreeController(QtCore.QObject):
             action_find_code = menu.addAction(_("Find code"))
         action_show_codes_like = None
         action_show_codes_colour = None
-        if self.show_codes_like_callback is not None or self.show_codes_of_colour_callback is not None:
+        action_show_codes_branch = None
+        if self.show_codes_like_callback is not None or self.show_codes_of_colour_callback is not None or \
+            self.show_codes_branch_callback is not None:
             filter_menu = menu.addMenu(_("Filter"))
             if self.show_codes_like_callback is not None:
                 like_filter = getattr(self.host, 'show_codes_like_filter', "")
@@ -349,10 +384,13 @@ class CodeTreeController(QtCore.QObject):
             if self.show_codes_of_colour_callback is not None:
                 colour_filter = getattr(self.host, 'show_codes_colour_filter', "")
                 action_show_codes_colour = filter_menu.addAction(_("Show codes by colour") + f": {colour_filter} F10")
+            if selected is not None and getattr(self.host, 'show_codes_branch_filter', "") == "":
+                action_show_codes_branch = filter_menu.addAction(_("Codes branch filter"))
         sort_menu = menu.addMenu(_("Sort"))
         action_all_asc = sort_menu.addAction(_("Sort ascending F11"))
         action_all_desc = sort_menu.addAction(_("Sort descending F12"))
         action_cat_then_code_asc = sort_menu.addAction(_("Sort category then code ascending"))
+        action_sort_frequency_desc = sort_menu.addAction(_("Sort by code frequency descending"))
 
         # Let the host dialog add its own entries before the menu is shown.
         self.menu_requested.emit(menu, selected)
@@ -372,11 +410,17 @@ class CodeTreeController(QtCore.QObject):
             self.tree_sort_option = "cat and code asc"
             self.fill_tree()
             return
+        if action == action_sort_frequency_desc:
+            self._sort_tree_by_totals()
+            return
         if action == action_show_codes_like:
             self.show_codes_like_callback()
             return
         if action == action_show_codes_colour:
             self.show_codes_of_colour_callback()
+            return
+        if action == action_show_codes_branch:
+            self.show_codes_branch_callback()
             return
         if action == action_find_code:
             self.find_code_callback()

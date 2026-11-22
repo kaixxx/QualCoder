@@ -47,6 +47,7 @@ from .GUI.ui_dialog_code_image import Ui_Dialog_code_image
 from .GUI.ui_dialog_view_image import Ui_Dialog_view_image
 from .context_help import open_module_help
 from .move_resize_rectangle import DialogMoveResizeRectangle
+from .pdf_utils import render_pdf_area_image
 from .helpers import ExportDirectoryPathDialog, Message, init_persistent_tree_header
 from .memo import DialogMemo
 from .report_attributes import DialogSelectAttributeParameters
@@ -97,6 +98,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.default_new_code_color = None
         self.show_codes_like_filter = ""  # gets filled when text strings are used to show specific code names
         self.show_codes_colour_filter = ""  # gets filled when a code colur is selected
+        self.show_codes_branch_filter = ""  # gets filled when a category or code branch is selected
 
         self.pdf_page = None  # display at 1
         self.pdf_total_pages = None
@@ -152,6 +154,8 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.code_tree.find_code_callback = self.find_code_in_tree
         self.code_tree.show_codes_like_callback = self.show_codes_like
         self.code_tree.show_codes_of_colour_callback = self.show_codes_of_color
+        self.code_tree.show_codes_branch_callback = self.show_codes_branch
+
         self.code_tree.codes_changed.connect(self.update_dialog_codes_and_categories)
         self.ui.treeWidget.itemClicked.connect(self.tree_item_clicked)
         init_persistent_tree_header(self.ui.treeWidget, self.app, 'dialogcodeimage_tree_widths')
@@ -1295,6 +1299,50 @@ class DialogCodeImage(QtWidgets.QDialog):
         self.get_coded_areas()
         self.redraw_scene()
 
+    def show_codes_branch(self):
+        """  Show categories and codes of selected branch. """
+
+        target_item = self.ui.treeWidget.currentItem()
+        codename= target_item.text(0)
+        self.show_codes_branch_filter = target_item.text(1)
+
+        # Hide all items initially
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            iterator.value().setHidden(True)
+            iterator += 1
+        # Show target item and decendents
+        sub_iterator = QtWidgets.QTreeWidgetItemIterator(target_item)
+        while sub_iterator.value():
+            item = sub_iterator.value()
+            # QTreeWidgetItemIterator on a subtree continues to siblings after finishing
+            # the subtree, so stop once we leave the target_item's hierarchy
+            if item is not target_item and not self.is_descendant(target_item, item):
+                break
+            item.setHidden(False)
+            sub_iterator += 1
+        # Walk up the tree to ensure all parent branches are visible
+        parent = target_item.parent()
+        while parent is not None:
+            parent.setHidden(False)
+            parent = parent.parent()
+
+        if self.show_codes_branch_filter == "":
+            self.ui.pushButton_clear_filter_code.setVisible(False)
+            self.ui.pushButton_clear_filter_code.setStyleSheet("")
+        else:
+            self.ui.pushButton_clear_filter_code.setVisible(True)
+            self.ui.pushButton_clear_filter_code.setStyleSheet("background-color: #1e90ff; color: white;")
+
+    def is_descendant(self, ancestor: QtWidgets.QTreeWidgetItem, item: QtWidgets.QTreeWidgetItem) -> bool:
+        """ Used for show codes branch """
+        parent = item.parent()
+        while parent is not None:
+            if parent is ancestor:
+                return True
+            parent = parent.parent()
+        return False
+
     def show_codes_like(self, preset:str|None=None):
         """ Show all codes if text is empty.
          Show selected codes that contain entered text.
@@ -1330,6 +1378,7 @@ class DialogCodeImage(QtWidgets.QDialog):
             if not ok:
                 return
             self.show_codes_colour_filter = ""
+            self.show_codes_branch_filter = ""
             case_sensitive = chkbox.isChecked()
             self.show_codes_like_filter = line.text()
         else:
@@ -1360,6 +1409,7 @@ class DialogCodeImage(QtWidgets.QDialog):
             self.show_codes_colour_filter = ""
         show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected)
         self.show_codes_like_filter = ""
+        self.show_codes_branch_filter = ""
         if self.show_codes_colour_filter == "":  # for clear filter code
             self.ui.pushButton_clear_filter_code.setVisible(False)
             self.ui.pushButton_clear_filter_code.setStyleSheet("")
@@ -1372,6 +1422,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         and restore all codes in the tree. """
         self.show_codes_like_filter = ""
         self.show_codes_colour_filter = ""
+        self.show_codes_branch_filter = ""
         self.ui.lineEdit_code_filter.setText("")
         root = self.ui.treeWidget.invisibleRootItem()
         self.recursive_traverse(root, "")  # Show all codes
@@ -1451,8 +1502,10 @@ class DialogCodeImage(QtWidgets.QDialog):
         key = event.key()
         mods = event.modifiers()
 
-        # New category
-        if key == QtCore.Qt.Key.Key_C:
+        # New category. Not with Ctrl, Alt or Cmd: Ctrl+C is the copy key
+        if key == QtCore.Qt.Key.Key_C and not mods & (
+                QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.AltModifier |
+                QtCore.Qt.KeyboardModifier.MetaModifier):
             # if category already selected, add new category to that
             supercatid = None
             selected = self.ui.treeWidget.currentItem()
@@ -1778,6 +1831,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         action_move_resize = menu.addAction(_("Move or resize"))
         # Add the option Interactive resize
         action_interactive_resize = menu.addAction(_("Interactive resize"))
+        action_copy_area = menu.addAction(_("Copy coded area as image"))
         action_important = None
         action_not_important = None
         if single_segment:  # only filter important options when the target segment is unambiguous
@@ -1802,7 +1856,7 @@ class DialogCodeImage(QtWidgets.QDialog):
         # If the chosen action targets one segment and several overlap under the
         # cursor, ask which segment now (including "Highlight this code").
         segment_actions = (action_memo, action_unmark, action_move_resize, action_interactive_resize,
-                           action_important, action_not_important, action_highlight_gray,
+                           action_copy_area, action_important, action_not_important, action_highlight_gray,
                            action_highlight_solarize, action_highlight_blur,
                            action_highlight_code_gray, action_highlight_code_solarize,
                            action_highlight_code_blur)
@@ -1847,12 +1901,55 @@ class DialogCodeImage(QtWidgets.QDialog):
             self.set_coded_importance(item, False)
         if action == action_move_resize:
             self.move_or_resize_coding(item)
+        if action == action_copy_area:
+            self.copy_coded_area_image_to_clipboard(item)
         # If the user selects the new option, store the segment to be resized
         if action == action_interactive_resize:
             self.item_to_resize = item
             self.redraw_scene()  # Redrawing triggers draw_coded_areas, showing the handles
         items = self.find_coded_areas_for_pos(pos)
         self.fill_coded_area_label(items)
+
+    def copy_coded_area_image_to_clipboard(self, area):
+        """ Copies the coded area to the clipboard as an image, at full resolution.
+        param: area dict from self.code_areas
+        """
+
+        if self.file_ is None or self.pixmap is None or area is None:
+            return
+        if self.pdf_page is not None:
+            # PDF page: the displayed pixmap is only 72 dpi, so render from the file
+            mediapath = self.file_['mediapath']
+            if mediapath[:6] == "/docs/":
+                source_path = f"{self.app.project_path}/documents/{mediapath[6:]}"
+            else:
+                source_path = mediapath[5:]
+            try:
+                image = render_pdf_area_image(source_path, self.pdf_page, area['x1'], area['y1'],
+                                              area['width'], area['height'])
+            except Exception as err:
+                Message(self.app, _("Image Error"), _("Cannot open: ") + f"{source_path}\n{err}").exec()
+                return
+        else:
+            rect = QtCore.QRect(int(area['x1']), int(area['y1']), int(area['width']), int(area['height']))
+            rect = rect.intersected(self.pixmap.rect())
+            if rect.isEmpty():
+                return
+            # Opaque white background: transparency pastes as black in some applications
+            image = QtGui.QImage(rect.size(), QtGui.QImage.Format.Format_RGB32)
+            image.fill(QtCore.Qt.GlobalColor.white)
+            painter = QtGui.QPainter(image)
+            painter.drawPixmap(0, 0, self.pixmap, rect.x(), rect.y(), rect.width(), rect.height())
+            painter.end()
+        if image is None or image.isNull():
+            return
+        # Match the view rotation
+        if self.degrees:
+            dots_per_meter = image.dotsPerMeterX()
+            image = image.transformed(QtGui.QTransform().rotate(self.degrees))
+            image.setDotsPerMeterX(dots_per_meter)
+            image.setDotsPerMeterY(dots_per_meter)
+        QtWidgets.QApplication.clipboard().setImage(image)
 
     def rotate_clockwise(self):
         self.degrees += 90

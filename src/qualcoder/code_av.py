@@ -87,6 +87,7 @@ class DialogCodeAV(QtWidgets.QDialog):
         self.file_ = None  # Current file
         self.show_codes_like_filter = ""  # gets filled when text strings are used to show specific code names
         self.show_codes_colour_filter = ""  # gets filled when a code colur is selected
+        self.show_codes_branch_filter = ""  # gets filled when a category or code branch is selected
 
         # For transcribed text
         self.annotations = []
@@ -308,6 +309,7 @@ class DialogCodeAV(QtWidgets.QDialog):
         self.code_tree.find_code_callback = self.find_code_in_tree
         self.code_tree.show_codes_like_callback = self.show_codes_like
         self.code_tree.show_codes_of_colour_callback = self.show_codes_of_color
+        self.code_tree.show_codes_branch_callback = self.show_codes_branch
         self.code_tree.codes_changed.connect(self.update_dialog_codes_and_categories)
         # Restore the page-specific entry lost in the tree migration.
         self.code_tree.menu_requested.connect(self.add_av_tree_menu_actions)
@@ -2904,6 +2906,50 @@ class DialogCodeAV(QtWidgets.QDialog):
         DialogCodeInAllFiles(self.app, code_dict, "File", category_name)
         self.update_dialog_codes_and_categories(["code_name", "code_cat", "code_text", "code_av", "code_image"])
 
+    def show_codes_branch(self):
+        """  Show categories and codes of selected branch. """
+
+        target_item = self.ui.treeWidget.currentItem()
+        codename= target_item.text(0)
+        self.show_codes_branch_filter = target_item.text(1)
+
+        # Hide all items initially
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            iterator.value().setHidden(True)
+            iterator += 1
+        # Show target item and decendents
+        sub_iterator = QtWidgets.QTreeWidgetItemIterator(target_item)
+        while sub_iterator.value():
+            item = sub_iterator.value()
+            # QTreeWidgetItemIterator on a subtree continues to siblings after finishing
+            # the subtree, so stop once we leave the target_item's hierarchy
+            if item is not target_item and not self.is_descendant(target_item, item):
+                break
+            item.setHidden(False)
+            sub_iterator += 1
+        # Walk up the tree to ensure all parent branches are visible
+        parent = target_item.parent()
+        while parent is not None:
+            parent.setHidden(False)
+            parent = parent.parent()
+
+        if self.show_codes_branch_filter == "":
+            self.ui.pushButton_clear_filter_code.setVisible(False)
+            self.ui.pushButton_clear_filter_code.setStyleSheet("")
+        else:
+            self.ui.pushButton_clear_filter_code.setVisible(True)
+            self.ui.pushButton_clear_filter_code.setStyleSheet("background-color: #1e90ff; color: white;")
+
+    def is_descendant(self, ancestor: QtWidgets.QTreeWidgetItem, item: QtWidgets.QTreeWidgetItem) -> bool:
+        """ Used for show codes branch """
+        parent = item.parent()
+        while parent is not None:
+            if parent is ancestor:
+                return True
+            parent = parent.parent()
+        return False
+
     def show_codes_like(self, preset=None):
         """ Show all codes if text is empty.
         Show selected codes that contain entered text.
@@ -2939,6 +2985,7 @@ class DialogCodeAV(QtWidgets.QDialog):
             if not ok:
                 return
             self.show_codes_colour_filter = ""
+            self.show_codes_branch_filter = ""
             case_sensitive = chkbox.isChecked()
             self.show_codes_like_filter = line.text()
         else:
@@ -2969,7 +3016,8 @@ class DialogCodeAV(QtWidgets.QDialog):
             self.show_codes_colour_filter = ""
         show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected)
         self.show_codes_like_filter = ""
-        if self.show_codes_colour_filter == "":  #
+        self.show_codes_branch_filter = ""
+        if self.show_codes_colour_filter == "":
             self.ui.pushButton_clear_filter_code.setVisible(False)
             self.ui.pushButton_clear_filter_code.setStyleSheet("")
         else:
@@ -2980,6 +3028,7 @@ class DialogCodeAV(QtWidgets.QDialog):
         """ Clear any active code filter and restore all codes in the tree. """
         self.show_codes_like_filter = ""
         self.show_codes_colour_filter = ""
+        self.show_codes_branch_filter = ""
         self.ui.lineEdit_code_filter.setText("")
         root = self.ui.treeWidget.invisibleRootItem()
         self.recursive_traverse(root, "")
@@ -3151,8 +3200,10 @@ class DialogCodeAV(QtWidgets.QDialog):
             cur.execute("update project set avbookmarkfile=?, avbookmarkmsec=?, avbookmarktextpos=?", [self.file_['id'], self.mediaplayer.get_time(), cursor_pos])
             self.app.conn.commit()
             return
-        # New category
-        if key == QtCore.Qt.Key.Key_C:
+        # New category. Not with Ctrl, Alt or Cmd: Ctrl+C is the copy key
+        if key == QtCore.Qt.Key.Key_C and not mods & (
+                QtCore.Qt.KeyboardModifier.ControlModifier | QtCore.Qt.KeyboardModifier.AltModifier |
+                QtCore.Qt.KeyboardModifier.MetaModifier):
             # if category already selected, add new category to that
             supercatid = None
             selected = self.ui.treeWidget.currentItem()
@@ -3967,7 +4018,9 @@ class DialogCodeAV(QtWidgets.QDialog):
             menu.addAction(action_show_handles)
         if selected_text != "":
             action_annotate = menu.addAction(_("Annotate (A)"))
-            action_copy = menu.addAction(_("Copy to clipboard"))
+            copy_key = QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Copy).toString(
+                QtGui.QKeySequence.SequenceFormat.NativeText)
+            action_copy = menu.addAction(_("Copy to clipboard") + f"\t{copy_key}")
             action_copy_metadata = menu.addAction(_("Copy with metadata"))
             # AI text analysis submenu, as in code_text.
             submenu_ai_text_analysis = menu.addMenu(_("AI Text Analysis"))
@@ -4293,7 +4346,8 @@ class DialogCodeAV(QtWidgets.QDialog):
         """ Copy text to clipboard, optionally with metadata (file, positions, codes
         and reference), as code_text does; the file here is the transcript."""
 
-        text = self.ui.plainTextEdit.textCursor().selectedText()
+        # selectedText() returns paragraph separators instead of line breaks
+        text = self.ui.plainTextEdit.textCursor().selectedText().replace("\u2029", "\n")
         if metadata and self.transcription is not None:
             start_pos = self.ui.plainTextEdit.textCursor().selectionStart()
             end_pos = self.ui.plainTextEdit.textCursor().selectionEnd()
@@ -4301,8 +4355,8 @@ class DialogCodeAV(QtWidgets.QDialog):
             code_names = {c['cid']: c['name'] for c in self.codes}
             codes = ""
             for coded in self.code_text:
-                if coded['pos0'] <= start_pos <= coded['pos1'] or coded['pos0'] <= end_pos <= coded['pos1'] or \
-                        (start_pos <= coded['pos0'] and coded['pos1'] <= end_pos):
+                # End positions are exclusive. An empty selection counts as one character
+                if coded['pos0'] < max(end_pos, start_pos + 1) and start_pos < coded['pos1']:
                     codes += f"{code_names.get(coded['cid'], '')}; "
             if codes:
                 text += f"\nCodes: {codes}"

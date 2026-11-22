@@ -58,7 +58,7 @@ from .ai_runtime import ensure_ai_ready
 from .ai_ui import ai_chat_signal_emitter
 # Shared PDF helpers live in pdf_utils, so lighter modules do not import this one.
 from .pdf_utils import W_X0, W_Y0, W_X1, W_Y1, W_POS0, W_POS1, W_LINE, \
-    _page_words_raw, _build_page_text
+    _page_words_raw, _build_page_text, render_pdf_area_image
 
 logger = logging.getLogger(__name__)
 
@@ -1826,6 +1826,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         self.code_tree.find_code_callback = self.find_code_in_tree
         self.code_tree.show_codes_like_callback = self.show_codes_like
         self.code_tree.show_codes_of_colour_callback = self.show_codes_of_color
+        self.code_tree.show_codes_branch_callback = self.show_codes_branch
         self.code_tree.codes_changed.connect(self.update_dialog_codes_and_categories)
         self.ui.treeWidget.itemClicked.connect(self.tree_item_clicked)
         self.ui.treeWidget.itemSelectionChanged.connect(self.fill_code_label)
@@ -1838,6 +1839,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         self.ui.treeWidget.setDefaultDropAction(Qt.DropAction.MoveAction)  # Mover (no copiar) al soltar. Move (not copy) on drop.
         self.ui.treeWidget.setDropIndicatorShown(True)  # Show the drop target indicator.
         self.ui.treeWidget.viewport().installEventFilter(self)  # Drag and drop of codes
+        self.ui.treeWidget.installEventFilter(self)  # Copy key with a text selection
         # Tree column-width persistence (config.ini). Replaces the automatic resize.
         # It goes here (not in the state block above) because it needs self.ui to already exist.
         init_persistent_tree_header(self.ui.treeWidget, self.app, 'dialogcodepdf_tree_widths')
@@ -1860,6 +1862,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         # para show codes like
         self.show_codes_like_filter = ""
         self.show_codes_colour_filter = ""
+        self.show_codes_branch_filter = ""
         if getattr(self.app, "project_events", None) is not None:
             self.app.project_events.project_data_changed.connect(self._on_project_data_changed)
 
@@ -4076,7 +4079,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         mods = event.modifiers()
         
         # code in vivo, etc. Plain keys only: before, Ctrl+Q marked, Ctrl+A annotated,
-        # Ctrl+V created an in vivo code, etc.
+        # Ctrl+V created an in vivo code, Ctrl C copy text, etc.
         if key == Qt.Key.Key_Q and mods == Qt.KeyboardModifier.NoModifier:
             self.mark()
             return True
@@ -4102,6 +4105,10 @@ class DialogCodePdf(QtWidgets.QWidget):
             # The context menu advertised
             # "(N)" without a handler.
             self.mark_with_new_code()
+            return True
+        # Standard copy key: Ctrl+C, Cmd+C on macOS, also Ctrl+Insert
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy) and self.selection is not None:
+            self.copy_selected_text_to_clipboard()
             return True
         # Switch coding mode: T = text, E = area/image (like the mode buttons).
         if key == Qt.Key.Key_T and mods == Qt.KeyboardModifier.NoModifier:
@@ -4259,6 +4266,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         action_important = None
         action_resize_text = None
         action_area_interactive = None
+        action_copy_area = None
         if texts_here or areas_here:
             menu.addSeparator()
             action_unmark = menu.addAction(_("Unmark (U)"))
@@ -4268,6 +4276,7 @@ class DialogCodePdf(QtWidgets.QWidget):
                 action_resize_text = menu.addAction(_("Resize"))
             if areas_here:
                 action_area_interactive = menu.addAction(_("Move or resize area"))
+                action_copy_area = menu.addAction(_("Copy coded area as image"))
         action_edit_annot = None
         action_delete_annot = None
         if notes_here:
@@ -4275,9 +4284,13 @@ class DialogCodePdf(QtWidgets.QWidget):
             action_edit_annot = menu.addAction(_("Edit annotation"))
             action_delete_annot = menu.addAction(_("Delete annotation"))
         action_copy = None
+        action_copy_metadata = None
         if self.selection is not None:
             menu.addSeparator()
-            action_copy = menu.addAction(_("Copy selected text"))
+            copy_key = QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Copy).toString(
+                QtGui.QKeySequence.SequenceFormat.NativeText)
+            action_copy = menu.addAction(_("Copy to clipboard") + f"\t{copy_key}")
+            action_copy_metadata = menu.addAction(_("Copy with metadata"))
             
             # Text Analysis with AI Submenu
             if self.extracted_ok:
@@ -4392,9 +4405,17 @@ class DialogCodePdf(QtWidgets.QWidget):
             if target is not None:
                 self.start_interactive_area_resize(target)
             return
+        if action == action_copy_area:
+            target = self._select_single(
+                [{'name': a['name'], 'ref': a} for a in areas_here], _("Select area to copy"))
+            if target is not None:
+                self.copy_coded_area_image_to_clipboard(target)
+            return
         if action == action_copy:
-            pos0, pos1 = self.selection
-            QtWidgets.QApplication.clipboard().setText(self.text[pos0:pos1])
+            self.copy_selected_text_to_clipboard()
+            return
+        if action == action_copy_metadata:
+            self.copy_selected_text_to_clipboard(True)
             return
         if action == action_undo:
             self.undo_last_unmarked_code()
@@ -4457,6 +4478,89 @@ class DialogCodePdf(QtWidgets.QWidget):
             ui = DialogAiEditPrompts(self.app, 'text_analysis')
             ui.exec()
             return
+
+    def copy_selected_text_to_clipboard(self, metadata: bool = False):
+        """ Copies the selected text to the clipboard, optionally with metadata. """
+
+        if self.selection is None:
+            return
+        pos0, pos1 = self.selection
+        self._copy_text_with_optional_metadata(self.text[pos0:pos1], pos0, pos1, metadata)
+
+    def copy_coded_text_to_clipboard(self, coded_text, metadata: bool = False):
+        """ Copies the text of one coded segment to the clipboard, optionally with metadata.
+        param: coded_text dict from self.code_text
+        """
+
+        if self.file_ is None or coded_text is None:
+            return
+        file_start = self.file_.get('start', 0)
+        self._copy_text_with_optional_metadata(coded_text.get('seltext') or "", coded_text['pos0'] - file_start,
+                                               coded_text['pos1'] - file_start, metadata)
+
+    def _copy_text_with_optional_metadata(self, text, pos0, pos1, metadata: bool = False):
+        """ Puts text on the clipboard. Metadata, as in code_text: file name, positions, page,
+        codes and reference.
+        param: pos0, pos1 int positions in the loaded text
+        """
+
+        if metadata and self.file_ is not None:
+            file_start = self.file_.get('start', 0)
+            start_pos = pos0 + file_start
+            end_pos = pos1 + file_start
+            text += f"\nFile: {self.file_['name']} [{start_pos} - {end_pos}] "
+            pages = self._pages_spanning(pos0, pos1)
+            if pages:
+                text += f"Page: {pages[0] + 1}"
+                if pages[-1] != pages[0]:
+                    text += f"-{pages[-1] + 1}"
+            codes = ""
+            for coded in self.code_text:
+                # End positions are exclusive. An empty selection counts as one character
+                if coded['pos0'] < max(end_pos, start_pos + 1) and start_pos < coded['pos1']:
+                    codes += f"{coded['name']}; "
+            if codes:
+                text += f"\nCodes: {codes}"
+            cur = self.app.conn.cursor()
+            cur.execute("select risid from source where source.id=?", [self.file_['id']])
+            ris_res = cur.fetchone()
+            if ris_res and ris_res[0]:
+                ris = Ris(self.app)
+                ris.get_references(ris_res[0])
+                if ris.refs:
+                    text += "\n" + _("Reference: ") + ris.refs[0]['apa']
+        QtWidgets.QApplication.clipboard().setText(text)
+        self.ui.label_status.setText(_("Copied to clipboard"))
+
+    def copy_coded_area_image_to_clipboard(self, area):
+        """ Renders the coded area from the PDF page and copies it to the clipboard as an image.
+        param: area dict from self.code_areas
+        """
+
+        if self.file_ is None or area is None or area.get('pdf_page') is None:
+            return
+        filepath = self._resolve_filepath(self.file_)
+        if filepath is None or not Path(filepath).exists():
+            Message(self.app, _("Warning"), _("File not found: ") + str(filepath or ""), "warning").exec()
+            return
+        page_idx = int(area['pdf_page'])
+        try:
+            image = render_pdf_area_image(filepath, page_idx, area['x1'], area['y1'],
+                                          area['width'], area['height'])
+        except Exception as err:
+            Message(self.app, _("Warning"), str(err), "warning").exec()
+            return
+        if image is None or image.isNull():
+            return
+        # Match the view rotation of the page
+        rotation = self.view.page_rotations.get(page_idx, 0)
+        if rotation:
+            dots_per_meter = image.dotsPerMeterX()
+            image = image.transformed(QtGui.QTransform().rotate(rotation))
+            image.setDotsPerMeterX(dots_per_meter)
+            image.setDotsPerMeterY(dots_per_meter)
+        QtWidgets.QApplication.clipboard().setImage(image)
+        self.ui.label_status.setText(_("Copied to clipboard"))
 
     def export_page_image(self): # Triggers disabled; will be changed to creating a file source from the PDF page image.
         """ Exports the current page as PNG at 2x."""
@@ -4731,7 +4835,56 @@ class DialogCodePdf(QtWidgets.QWidget):
                 if item is not None:
                     self.code_tree.item_moved_update_data(item, parent)
                     return True
+        # One clipboard write: the tree copies the code name and still passes the key on
+        if object_ is self.ui.treeWidget and event.type() == QtCore.QEvent.Type.KeyPress \
+                and self.selection is not None and event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self.copy_selected_text_to_clipboard()
+            return True
         return super().eventFilter(object_, event)
+
+    def show_codes_branch(self):
+        """  Show categories and codes of selected branch. """
+
+        target_item = self.ui.treeWidget.currentItem()
+        codename= target_item.text(0)
+        self.show_codes_branch_filter = target_item.text(1)
+
+        # Hide all items initially
+        iterator = QtWidgets.QTreeWidgetItemIterator(self.ui.treeWidget)
+        while iterator.value():
+            iterator.value().setHidden(True)
+            iterator += 1
+        # Show target item and decendents
+        sub_iterator = QtWidgets.QTreeWidgetItemIterator(target_item)
+        while sub_iterator.value():
+            item = sub_iterator.value()
+            # QTreeWidgetItemIterator on a subtree continues to siblings after finishing
+            # the subtree, so stop once we leave the target_item's hierarchy
+            if item is not target_item and not self.is_descendant(target_item, item):
+                break
+            item.setHidden(False)
+            sub_iterator += 1
+        # Walk up the tree to ensure all parent branches are visible
+        parent = target_item.parent()
+        while parent is not None:
+            parent.setHidden(False)
+            parent = parent.parent()
+
+        if self.show_codes_branch_filter == "":
+            self.ui.pushButton_clear_filter_code.setVisible(False)
+            self.ui.pushButton_clear_filter_code.setStyleSheet("")
+        else:
+            self.ui.pushButton_clear_filter_code.setVisible(True)
+            self.ui.pushButton_clear_filter_code.setStyleSheet("background-color: #1e90ff; color: white;")
+
+    def is_descendant(self, ancestor: QtWidgets.QTreeWidgetItem, item: QtWidgets.QTreeWidgetItem) -> bool:
+        """ Used for show codes branch """
+        parent = item.parent()
+        while parent is not None:
+            if parent is ancestor:
+                return True
+            parent = parent.parent()
+        return False
 
     # Filter unification (dialog and real-time in a single method)
     def show_codes_like(self, filter_text=None):
@@ -4747,6 +4900,7 @@ class DialogCodePdf(QtWidgets.QWidget):
             if not dialog.exec():
                 return
             text_ = str(dialog.textValue())
+            self.show_codes_branch_filter = ""
             
             # Synchronize the lineEdit for visual consistency.
             self.ui.lineEdit_code_filter.blockSignals(True)
@@ -4777,6 +4931,7 @@ class DialogCodePdf(QtWidgets.QWidget):
         selected = ui.get_selected()
         if not selected:
             return
+        self.show_codes_branch_filter = ""
         show_codes_of_colour_range(self.app, self.ui.treeWidget, self.codes, selected)
         self.ui.pushButton_clear_filter_code.setVisible(True)
         self.ui.pushButton_clear_filter_code.setStyleSheet("background-color: #1e90ff; color: white;")
@@ -4784,6 +4939,8 @@ class DialogCodePdf(QtWidgets.QWidget):
     # Implementación centralizada. Centralized implementation
     def clear_code_filter(self):
         """ Clears the filter and shows the entire tree. """
+
+        self.show_codes_branch_filter = ""
         self.ui.lineEdit_code_filter.setText("")
         root = self.ui.treeWidget.invisibleRootItem()
         self.recursive_traverse(root, "")
@@ -5439,8 +5596,15 @@ class DialogCodePdf(QtWidgets.QWidget):
         # like the viewer menu.
         action_change_code = menu.addAction(_("Change code"))
         action_annotate = None
-        if not is_area:
+        action_copy_area = None
+        action_copy = None
+        action_copy_metadata = None
+        if is_area:
+            action_copy_area = menu.addAction(_("Copy coded area as image"))
+        else:
             action_annotate = menu.addAction(_("Annotate"))
+            action_copy = menu.addAction(_("Copy to clipboard"))
+            action_copy_metadata = menu.addAction(_("Copy with metadata"))
         global_pos = source_widget.mapToGlobal(position)
         action = menu.exec(global_pos)
         if action is None:
@@ -5458,6 +5622,9 @@ class DialogCodePdf(QtWidgets.QWidget):
                 return
             if action == action_change_code:
                 self.change_code_for_segment(area_item=target)
+                return
+            if action == action_copy_area:
+                self.copy_coded_area_image_to_clipboard(target)
                 return
             if action == action_important:
                 self.toggle_important([], [target])
@@ -5477,6 +5644,12 @@ class DialogCodePdf(QtWidgets.QWidget):
             return
         if action == action_annotate:
             self.annotate(pos0=target['pos0'], pos1=target['pos1'])
+            return
+        if action == action_copy:
+            self.copy_coded_text_to_clipboard(target)
+            return
+        if action == action_copy_metadata:
+            self.copy_coded_text_to_clipboard(target, True)
             return
         if action == action_important:
             self.toggle_important([target], [])
