@@ -6,7 +6,6 @@ sys.setrecursionlimit(sys.getrecursionlimit() * 5)
 block_cipher = None
 
 datas = collect_data_files('langchain')
-datas += collect_data_files('langchain_community')
 datas += collect_data_files('langchain_core')
 datas += collect_data_files('langchain_openai')
 datas += collect_data_files('langchain_text_splitters')

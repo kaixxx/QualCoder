@@ -36,7 +36,7 @@ import weakref
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Union
 
 os.environ['FAISS_NO_AVX2'] = '1'
 # Setting the env 'FAISS_OPT_LEVEL' to '' will create a 'generic' index. It is a poorly documented 
@@ -50,8 +50,6 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import faiss
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils.tqdm import tqdm as HuggingFaceTqdm
-from langchain_community.vectorstores import FAISS as LegacyFAISS
-from langchain_core.embeddings import Embeddings
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
 import sentence_transformers  # Keep a reference so it is not garbage collected in subthreads.
@@ -137,7 +135,7 @@ class SearchChunkDocument:
     id: str
 
 
-class E5SentenceTransformerEmbeddings(Embeddings):
+class E5SentenceTransformerEmbeddings:
     """Encode passages and queries with the local E5 model."""
 
     def __init__(self, model_name: str) -> None:
@@ -378,7 +376,6 @@ class AiVectorstore:
         self.threadpool.setMaxThreadCount(1)
         self._register_quit_hook()
         self._search_db_path = ""
-        self._legacy_faiss_path = ""
         self._faiss_index = None
         self._chunk_ids_by_pos: List[int] = []
         self._compat_store = _CompatFaissStore(self)
@@ -588,7 +585,6 @@ class AiVectorstore:
     def _set_project_paths(self):
         ai_dir = self._project_ai_dir()
         self._search_db_path = os.path.join(ai_dir, 'search.sqlite')
-        self._legacy_faiss_path = os.path.join(ai_dir, 'vectorstore', 'faiss_store.bin')
         self.faiss_db_path = self._search_db_path
 
     def _project_db_path(self) -> str:
@@ -792,19 +788,12 @@ class AiVectorstore:
         conn.execute("DELETE FROM search_source_state WHERE source_id=?", (int(source_id),))
 
     def _index_source(self, conn: sqlite3.Connection, source_id: int, source_name: str, text: str,
-                      candidate_vectors_by_hash: Optional[Dict[str, List[np.ndarray]]] = None,
                       signals=None, worker_generation: Optional[int] = None) -> Optional[int]:
         if self.cancelled(worker_generation):
             return None
 
         docs = self._split_source_text(source_id, source_name, text)
-        if candidate_vectors_by_hash is None:
-            candidate_vectors_by_hash = self._load_existing_vectors_by_hash(conn, source_id)
-        else:
-            normalized: Dict[str, List[np.ndarray]] = defaultdict(list)
-            for key, vectors in candidate_vectors_by_hash.items():
-                normalized[str(key)] = [np.asarray(vec, dtype=np.float32) for vec in vectors]
-            candidate_vectors_by_hash = normalized
+        existing_vectors_by_hash = self._load_existing_vectors_by_hash(conn, source_id)
 
         # Old rows are deleted AFTER embedding (below): deleting here kept a write
         # transaction open for the whole embed, locking search.sqlite for minutes.
@@ -817,7 +806,7 @@ class AiVectorstore:
         chunk_vectors: List[Optional[np.ndarray]] = []
         for doc in docs:
             text_hash = str(doc.metadata["text_hash"])
-            vectors = candidate_vectors_by_hash.get(text_hash, [])
+            vectors = existing_vectors_by_hash.get(text_hash, [])
             if vectors:
                 chunk_vectors.append(vectors.pop(0))
             else:
@@ -901,64 +890,6 @@ class AiVectorstore:
         self.reading_doc = ''
         return len(docs)
 
-    def _build_candidate_vectors_from_legacy(self, source_id: int, source_name: str, text: str,
-                                             legacy_items: List[Tuple[int, str, np.ndarray]]) -> Dict[str, List[np.ndarray]]:
-        result: Dict[str, List[np.ndarray]] = defaultdict(list)
-        current_len = len(text)
-        for start_index, chunk_text, vector in sorted(legacy_items, key=lambda item: item[0]):
-            if start_index < 0 or chunk_text == "":
-                continue
-            end_index = start_index + len(chunk_text)
-            if end_index > current_len:
-                continue
-            if text[start_index:end_index] != chunk_text:
-                continue
-            result[self._hash_text(chunk_text)].append(np.asarray(vector, dtype=np.float32))
-        return result
-
-    def _load_legacy_candidates(self) -> Dict[int, List[Tuple[int, str, np.ndarray]]]:
-        result: Dict[int, List[Tuple[int, str, np.ndarray]]] = defaultdict(list)
-        if not os.path.exists(self._legacy_faiss_path):
-            return result
-        with open(self._legacy_faiss_path, 'rb') as handle:
-            serialized_bytes = handle.read()
-        legacy_store = LegacyFAISS.deserialize_from_bytes(
-            serialized=serialized_bytes,
-            embeddings=self.app.ai_embedding_function,
-            allow_dangerous_deserialization=True,
-        )
-        index = getattr(legacy_store, "index", None)
-        docstore = getattr(legacy_store, "docstore", None)
-        index_to_docstore_id = getattr(legacy_store, "index_to_docstore_id", {})
-        if index is None or docstore is None:
-            return result
-        for pos, docstore_id in index_to_docstore_id.items():
-            try:
-                doc = docstore.search(docstore_id)
-            except Exception:
-                doc = None
-            if doc is None or not hasattr(doc, "page_content") or not hasattr(doc, "metadata"):
-                continue
-            metadata = getattr(doc, "metadata", {})
-            if not isinstance(metadata, dict):
-                continue
-            try:
-                source_id = int(metadata.get("id", -1))
-                start_index = int(metadata.get("start_index", -1))
-            except (TypeError, ValueError):
-                continue
-            if source_id <= 0 or start_index < 0:
-                continue
-            chunk_text = str(getattr(doc, "page_content", ""))
-            if chunk_text == "":
-                continue
-            try:
-                vector = np.asarray(index.reconstruct(int(pos)), dtype=np.float32)
-            except Exception:
-                continue
-            result[source_id].append((start_index, chunk_text, vector))
-        return result
-
     def _rebuild_faiss_index_from_db(self, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
             "SELECT c.chunk_id, e.dim, e.vector_blob "
@@ -982,7 +913,6 @@ class AiVectorstore:
         self.faiss_db = self._compat_store
 
     def _refresh_sources(self, conn: sqlite3.Connection, signals=None,
-                         legacy_candidates: Optional[Dict[int, List[Tuple[int, str, np.ndarray]]]] = None,
                          worker_generation: Optional[int] = None) -> None:
         docs = self._fetch_project_text_sources()
         current_source_ids = {int(doc['id']) for doc in docs}
@@ -1019,20 +949,11 @@ class AiVectorstore:
             if row is not None and str(row[0]) == current_hash and str(row[1]) == source_name:
                 continue
 
-            candidates = None
-            if legacy_candidates is not None and source_id in legacy_candidates:
-                candidates = self._build_candidate_vectors_from_legacy(
-                    source_id,
-                    source_name,
-                    text,
-                    legacy_candidates[source_id],
-                )
             self._index_source(
                 conn,
                 source_id,
                 source_name,
                 text,
-                candidate_vectors_by_hash=candidates,
                 signals=signals,
                 worker_generation=worker_generation,
             )
@@ -1046,7 +967,6 @@ class AiVectorstore:
             if self.cancelled(worker_generation):
                 return
             self._set_project_paths()
-            os.makedirs(os.path.dirname(self._legacy_faiss_path), exist_ok=True)
             conn = self._connect_search_db()
             try:
                 self._ensure_search_schema(conn)
@@ -1065,32 +985,15 @@ class AiVectorstore:
                     )
                     conn.commit()
 
-                legacy_candidates = None
                 self._set_meta_build_state(conn, "building")
                 if rebuild:
                     msg = _('AI: Rebuilding memory. The local AI will read through all your documents, please be patient.')
                     self._post_message(msg)
                     logger.debug(msg)
                     self._reset_search_store(conn)
-                else:
-                    has_chunks = conn.execute("SELECT 1 FROM search_chunks LIMIT 1").fetchone() is not None
-                    if not has_chunks and os.path.exists(self._legacy_faiss_path):
-                        if signals is not None and signals.progress is not None:
-                            signals.progress.emit(
-                                _('Migrating the existing AI memory to the new internal search database...')
-                            )
-                        try:
-                            legacy_candidates = self._load_legacy_candidates()
-                        except Exception:
-                            legacy_candidates = None
-                            if signals is not None and signals.progress is not None:
-                                signals.progress.emit(
-                                    _('The old AI memory could not be migrated automatically. Rebuilding from the project texts instead.')
-                                )
                 self._refresh_sources(
                     conn,
                     signals=signals,
-                    legacy_candidates=legacy_candidates,
                     worker_generation=worker_generation,
                 )
                 with self._index_write_lock:
