@@ -50,8 +50,8 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import faiss
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils.tqdm import tqdm as HuggingFaceTqdm
-from langchain_community.embeddings import SentenceTransformerEmbeddings
 from langchain_community.vectorstores import FAISS as LegacyFAISS
+from langchain_core.embeddings import Embeddings
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
 import sentence_transformers  # Keep a reference so it is not garbage collected in subthreads.
@@ -137,16 +137,24 @@ class SearchChunkDocument:
     id: str
 
 
-class E5SentenceTransformerEmbeddings(SentenceTransformerEmbeddings):
+class E5SentenceTransformerEmbeddings(Embeddings):
+    """Encode passages and queries with the local E5 model."""
 
-    def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        emb_texts = []
-        for text in texts:
-            emb_texts.append('passage: ' + text)
-        return super().embed_documents(texts=emb_texts)
+    def __init__(self, model_name: str) -> None:
+        self._model = sentence_transformers.SentenceTransformer(model_name)
 
-    def embed_query(self, text: str) -> List[float]:
-        return super().embed_documents([f'query: {text}'])[0]
+    def _encode(self, texts: list[str], prefix: str) -> list[list[float]]:
+        # Match the preprocessing used to produce embeddings already stored in projects.
+        prepared_texts = [prefix + text.replace("\n", " ") for text in texts]
+        return self._model.encode(
+            prepared_texts, show_progress_bar=False, normalize_embeddings=False
+        ).tolist()
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._encode(texts, "passage: ")
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._encode([text], "query: ")[0]
 
 
 class _RecursiveTextChunker:
