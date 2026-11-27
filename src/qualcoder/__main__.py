@@ -26,7 +26,6 @@ import base64
 import datetime
 import gettext
 import html
-#import json  # To get the latest GitHub release information
 import logging
 from logging.handlers import RotatingFileHandler
 import multiprocessing
@@ -38,7 +37,6 @@ import sqlite3
 import sys
 import traceback
 from typing import Any, Optional
-#import urllib.request
 import webbrowser
 
 if __name__ == "__main__":
@@ -111,6 +109,7 @@ from qualcoder.report_file_summary import DialogReportFileSummary
 from qualcoder.report_exact_matches import DialogReportExactTextMatches
 from qualcoder.report_relations import DialogReportRelations
 from qualcoder.report_sql import DialogSQL
+from qualcoder.dialog_text_stats import DialogTextStats
 from qualcoder.rqda import RqdaImport
 from qualcoder.settings import DialogSettings
 from qualcoder.special_functions import DialogSpecialFunctions
@@ -956,6 +955,7 @@ Click "Yes" to start now.')
         self.ui.actionCode_relations.triggered.connect(self.report_code_relations)
         self.ui.actionCode_text_exact_matches.triggered.connect(self.report_exact_text_matches)
         self.ui.actionText_segments_by_codes.triggered.connect(self.text_segments_codes_table)
+        self.ui.actionText_statistics.triggered.connect(self.text_stats)
         self.ui.actionView_Graph.setShortcut('Alt+G')
         self.ui.actionView_Graph.triggered.connect(self.view_graph_original)
         self.ui.actionAI_topic_exploration.triggered.connect(self.ai_go_analysis)
@@ -978,6 +978,7 @@ Click "Yes" to start now.')
         self.ui.actionCharts.triggered.connect(self.view_charts)
         self.ui.actionSQL_statements.setShortcut('Alt+D')
         self.ui.actionSQL_statements.triggered.connect(self.report_sql)
+
         # AI menu
         self.ui.actionAI_Setup_wizard.triggered.connect(self.ai_setup_wizard)
         self.ui.actionAI_Configuration.triggered.connect(self.ai_settings)
@@ -1964,6 +1965,7 @@ Click "Yes" to start now.')
         self.ui.actionCode_co_occurrence.setEnabled(False)
         self.ui.actionCode_relations.setEnabled(False)
         self.ui.actionText_segments_by_codes.setEnabled(False)
+        self.ui.actionText_statistics.setEnabled(False)
         self.ui.actionView_Graph.setEnabled(False)
         # Reports menu
         self.ui.actionCoding_comparison.setEnabled(False)
@@ -2015,6 +2017,7 @@ Click "Yes" to start now.')
         self.ui.actionCode_relations.setEnabled(True)
         self.ui.actionCode_text_exact_matches.setEnabled(True)
         self.ui.actionText_segments_by_codes.setEnabled(True)
+        self.ui.actionText_statistics.setEnabled(True)
         self.ui.actionView_Graph.setEnabled(True)
         # Reports menu
         self.ui.actionCoding_comparison.setEnabled(True)
@@ -2085,6 +2088,15 @@ Click "Yes" to start now.')
 
         self.ui.textBrowser_reports.hide()
         ui = DialogSQL(self.app, self.ui.textEdit)
+        self.tab_layout_helper(self.ui.tab_reports, ui)
+
+    def text_stats(self):
+        """ Text statistics in the style of IRaMuTeQ (corpus, descending statistics,
+        specificities, correspondence analysis, similarity graph, Reinert classification,
+        IRaMuTeQ export) on the coded segments or whole documents of the project. """
+
+        self.ui.textBrowser_reports.hide()
+        ui = DialogTextStats(self.app, self.ui.textEdit)
         self.tab_layout_helper(self.ui.tab_reports, ui)
 
     def report_coding_comparison(self):
